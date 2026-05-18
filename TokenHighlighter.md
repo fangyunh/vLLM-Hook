@@ -16,6 +16,31 @@ Given prompt tokens `X` and target affirmation tokens `Y`:
 
 View the original paper [**Token Highlighter: Inspecting and Mitigating Jailbreak Prompts for Large Language Models**](https://arxiv.org/pdf/2412.18171) for more information.
 
+## General Pipeline and Mental Model
+1. `execute_model`: capture ON, pending prompts stored
+2. `super().execute_model()` with original input embeddings
+      └─ `set_forward_context(real scheduler metadata)`
+      └─ prefill forward (user prompt)
+      └─ hooks → Q,K,V,h_L + `query_start_loc`
+3. capture OFF (end prefill phase; post-prefill bookkeeping)
+4. Slice real capture per prompt (use captured data from unmitigated/real prefill)
+5. Teacher `_dummy_run(prompt + target[:-1])` → full sequence tensors
+6. Merge: prompt positions ← real activations, rest ← teacher
+7. `_get_grad_influences` → scores (requires real activations from initial prefill)
+8. Soft re-prefill: `_dummy_run(prompt only)` + embedding hook
+9. Save trace; later decode steps via `super()` calls use (hopefully) updated KV with beta-scaled drivers
+
+FORWARD_ATTR and beta < 1 (current):
+
+  [Scheduler] **real prefill** via `super()`     → capture + unmitigated KV
+  [Worker]    bookkeeping on CPU/GPU     → **score** (+ teacher dummy for suffix)
+  [Worker]    **soft re-prefill** via dummy  → hope KV matches mitigated prompt
+  [Scheduler] **decode** × N via `super()`     → actual response
+
+AUTOGRAD and beta < 1 (paper-like order):
+
+  Separate scorer model for autograd means influence score computation is **independent of scheduler** (before `super()`) → **real prefill with soft hook** → **decode** (no re-prefill; no real-prefill capture for scoring since already done)
+
 ## Worker / Analyzer Communication
 
 ### Worker (`HighlighterWorker`)
