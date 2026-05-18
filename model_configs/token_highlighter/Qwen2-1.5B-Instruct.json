@@ -5,6 +5,7 @@
     "highlighter": {
         "target_phrase": "Sure! I can help with that",
         "mode": "top_percentage",
+        "scorer": "autograd",
         "threshold_k": 2.0,
         "temperature": 1.0,
         "beta": 0.1,
