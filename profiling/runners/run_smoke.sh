@@ -1,16 +1,16 @@
 #!/bin/bash
 # run_smoke.sh — 5-minute end-to-end profiler sanity check.
 #
-# Runs examples/demo_hiddenstate.py with profiling ON, then verifies the
+# Runs profiling/smoke_test.py with profiling ON, then verifies the
 # instrumentation actually fired by checking TWO independent signals:
 #   1. JSON dumps under VLLM_HOOK_PROFILE_DIR (driver + worker, written
 #      by the atexit handler in _profiler.py).
-#   2. The safetensors sidecar at /dev/shm/vllm_hook/<run_id>/tp_rank_*/
+#   2. The safetensors sidecar at <HOOK_DIR>/<run_id>/tp_rank_*/
 #      hidden_states.json — its meta["profile"] field is written by the
 #      worker even when the in-process dump misses (sidecar enrichment).
 #
-# Use this once after a fresh checkout / new node before queueing the
-# longer benchmarks.
+# HOOK_DIR and PROFILE_DIR default to USER-and-JOB-specific paths so
+# nothing collides with prior jobs left on a shared compute node.
 #
 # Submit:  bsub < profiling/runners/run_smoke.sh
 # Logs:    profiling/runners/logs/smoke.<JOBID>.{out,err}
@@ -28,11 +28,28 @@ cd ~/vLLM-Hook
 
 mkdir -p profiling/runners/logs
 
-PROFILE_DIR="${PROFILE_DIR:-/dev/shm/vllm_hook_profile_smoke}"
-HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook}"
+# Unique per job — /dev/shm survives between LSF jobs on the same compute
+# node, so reusing /dev/shm/vllm_hook or similar will deadlock on foreign
+# permissions sooner or later.
+JOB_TAG="${LSB_JOBID:-$$}"
+USER_TAG="${USER:-noname}"
+PROFILE_DIR="${PROFILE_DIR:-/dev/shm/vllm_hook_profile_${USER_TAG}_${JOB_TAG}}"
+HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook_${USER_TAG}_${JOB_TAG}}"
+
+# Ownership-safe init: if either dir exists but isn't ours, mint a new
+# path so we never inherit a foreign-owned directory we can't write into.
+for var in PROFILE_DIR HOOK_DIR; do
+    eval "path=\$$var"
+    if [[ -e "$path" && ! -O "$path" ]]; then
+        new="${path}_$$"
+        echo "[smoke] $path exists and isn't owned by $USER — using $new instead"
+        eval "$var=$new"
+    fi
+done
+
 mkdir -p "$PROFILE_DIR" "$HOOK_DIR"
-rm -f "$PROFILE_DIR"/profile-*.json
-rm -rf "$HOOK_DIR"/*
+# Only remove files WE own; never blanket rm -rf a /dev/shm path.
+find "$PROFILE_DIR" -maxdepth 1 -type f -user "${USER:-$(id -un)}" -delete 2>/dev/null || true
 
 export VLLM_USE_V1=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -40,13 +57,15 @@ export VLLM_HOOK_USE_SAFETENSORS=1
 export VLLM_HOOK_ASYNC_SAVE=1
 export VLLM_HOOK_PROFILE=1
 export VLLM_HOOK_PROFILE_DIR="$PROFILE_DIR"
+export HOOK_DIR
 
-# Confirm the env vars are set as we expect them.
 echo "[smoke] env check:"
-env | grep -E "^VLLM_(HOOK|USE_V1|WORKER_MULTIPROC)" | sort
+env | grep -E "^(VLLM_(HOOK|USE_V1|WORKER_MULTIPROC)|HOOK_DIR)" | sort
 echo
 
-# Confirm the plugin imports cleanly before launching the demo.
+# Pre-launch import probe — runs in a throwaway PROFILE_DIR so its atexit
+# dump can't be mistaken for the real smoke dump.
+VLLM_HOOK_PROFILE_DIR=/tmp/vllm_hook_profile_smoke_probe \
 python -c "
 from vllm_hook_plugins._profiler import PROF, is_enabled
 import os
@@ -56,8 +75,8 @@ print(f'[smoke] _profiler imported. enabled={is_enabled()}  '
 "
 echo
 
-echo "[smoke] running demo_hiddenstate.py with profiling on..."
-python examples/demo_hiddenstate.py
+echo "[smoke] running profiling/smoke_test.py with profiling on..."
+python profiling/smoke_test.py
 
 echo
 echo "[smoke] profile dumps in $PROFILE_DIR:"
@@ -65,13 +84,9 @@ ls -la "$PROFILE_DIR" || true
 
 echo
 echo "[smoke] safetensors sidecars in $HOOK_DIR:"
-find "$HOOK_DIR" -name '*.json' -printf '%p  (%s bytes)\n' 2>/dev/null || \
-    find "$HOOK_DIR" -name '*.json' 2>/dev/null
+find "$HOOK_DIR" -name '*.json' 2>/dev/null || true
 
-# Signal 1 — any in-process dump?
 DUMP=$(ls -t "$PROFILE_DIR"/profile-*.json 2>/dev/null | head -1 || true)
-
-# Signal 2 — any sidecar with embedded profile?
 SIDECAR=$(find "$HOOK_DIR" -name 'hidden_states.json' 2>/dev/null | head -1 || true)
 
 if [[ -n "$DUMP" ]]; then
@@ -125,9 +140,6 @@ for name, val in sorted(counters.items()):
 PY
 fi
 
-# Decide pass/fail. Either signal is sufficient — the in-process dump
-# proves the driver-side timers fire; the sidecar proves the worker-side
-# timers fire. Both is best; just one is acceptable for smoke.
 if [[ -z "$DUMP" && -z "$SIDECAR" ]]; then
     echo
     echo "[smoke] FAIL — neither an in-process dump nor a sidecar profile."

@@ -32,8 +32,8 @@ CONCURRENCY="${CONCURRENCY:-1 2 4 8}"
 DURATION="${DURATION:-30}"
 MAX_TOKENS="${MAX_TOKENS:-64}"
 PORT="${PORT:-8770}"
-HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook}"
-PROFILE_DIR="${PROFILE_DIR:-/dev/shm/vllm_hook_profile_serve}"
+HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook_${USER:-noname}_${LSB_JOBID:-$$}}"
+PROFILE_DIR="${PROFILE_DIR:-/dev/shm/vllm_hook_profile_serve_${USER:-noname}_${LSB_JOBID:-$$}}"
 
 mkdir -p "$HOOK_DIR" "$PROFILE_DIR"
 

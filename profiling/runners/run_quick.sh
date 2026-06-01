@@ -35,8 +35,9 @@ BATCH_SIZES="${BATCH_SIZES:-1 16}"
 MAX_TOKENS="${MAX_TOKENS:-1 32}"
 REPS="${REPS:-5}"
 WARMUP="${WARMUP:-2}"
-HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook}"
-PROFILE_DIR="${PROFILE_DIR:-/dev/shm/vllm_hook_profile}"
+# Per-job tmpfs paths — see run_smoke.sh for the collision rationale.
+HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook_${USER:-noname}_${LSB_JOBID:-$$}}"
+PROFILE_DIR="${PROFILE_DIR:-/dev/shm/vllm_hook_profile_${USER:-noname}_${LSB_JOBID:-$$}}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"
 
 mkdir -p "$HOOK_DIR" "$PROFILE_DIR"

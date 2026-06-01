@@ -26,7 +26,7 @@ mkdir -p profiling/runners/logs profiling/results
 MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
 BATCHES="${BATCHES:-1 8 64}"
 N_DECODE="${N_DECODE:-128}"
-HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook}"
+HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook_${USER:-noname}_${LSB_JOBID:-$$}}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.4}"
 
 mkdir -p "$HOOK_DIR"
