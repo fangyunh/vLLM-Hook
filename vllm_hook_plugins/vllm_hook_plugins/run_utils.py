@@ -5,6 +5,8 @@ import os
 import time
 from typing import Dict, List, Any
 
+from vllm_hook_plugins._profiler import PROF
+
 
 # ---------------------------------------------------------------------------
 # Artifact format conversion utilities
@@ -126,17 +128,23 @@ def _load_safetensors_shards(st_paths: List[str], cache_key: str, basename: str,
     from safetensors import safe_open
 
     shards = []
-    for p in st_paths:
-        meta_path = p.replace(f"{basename}.safetensors", f"{basename}.json")
-        with open(meta_path) as f:
-            meta = json.load(f)
-        tp_rank = meta.get("tp_rank", 0)
-        with safe_open(p, framework="pt", device="cpu") as sf:
-            shard_cache = build_entries(sf, meta)
-        shard = {"config": meta["config"], cache_key: shard_cache}
-        if "peak_gpu_mb" in meta:
-            shard["peak_gpu_mb"] = meta.get("peak_gpu_mb", 0.0)
-        shards.append((tp_rank, shard))
+    with PROF.timed("io.artifact_load.safetensors"):
+        for p in st_paths:
+            meta_path = p.replace(f"{basename}.safetensors", f"{basename}.json")
+            with open(meta_path) as f:
+                meta = json.load(f)
+            tp_rank = meta.get("tp_rank", 0)
+            try:
+                PROF.gauge("io.bytes_read.safetensors", os.path.getsize(p))
+                PROF.gauge("io.bytes_read.json", os.path.getsize(meta_path))
+            except OSError:
+                pass
+            with safe_open(p, framework="pt", device="cpu") as sf:
+                shard_cache = build_entries(sf, meta)
+            shard = {"config": meta["config"], cache_key: shard_cache}
+            if "peak_gpu_mb" in meta:
+                shard["peak_gpu_mb"] = meta.get("peak_gpu_mb", 0.0)
+            shards.append((tp_rank, shard))
     shards.sort(key=lambda x: x[0])
     return shards
 
@@ -154,34 +162,37 @@ def _merge_shards_by_module(shards, cache_key: str, tensor_keys):
     if len(shards) == 1:
         return shards[0][1]
 
+    PROF.gauge("io.tp_shard_count", len(shards))
+
     base_cfg = shards[0][1]["config"]
     merged: Dict[str, Any] = {"config": base_cfg, cache_key: {}}
     if "peak_gpu_mb" in shards[0][1]:
         merged["peak_gpu_mb"] = shards[0][1].get("peak_gpu_mb", 0.0)
 
-    module_names: set = set()
-    for _, shard in shards:
-        module_names.update(shard.get(cache_key, {}).keys())
-
-    for module_name in module_names:
-        layer_num = None
-        per_shard_lists: Dict[str, List[List[Any]]] = {k: [] for k in tensor_keys}
+    with PROF.timed("io.tp_shard_merge"):
+        module_names: set = set()
         for _, shard in shards:
-            entry = shard.get(cache_key, {}).get(module_name)
-            if entry is None:
-                continue
-            if layer_num is None:
-                layer_num = entry.get("layer_num")
-            for k in tensor_keys:
-                per_shard_lists[k].append(entry[k])
+            module_names.update(shard.get(cache_key, {}).keys())
 
-        bs = len(next(iter(per_shard_lists.values()))[0])
-        merged_entry = {"layer_num": layer_num}
-        for k in tensor_keys:
-            merged_entry[k] = [
-                torch.cat([s[i] for s in per_shard_lists[k]], dim=-1) for i in range(bs)
-            ]
-        merged[cache_key][module_name] = merged_entry
+        for module_name in module_names:
+            layer_num = None
+            per_shard_lists: Dict[str, List[List[Any]]] = {k: [] for k in tensor_keys}
+            for _, shard in shards:
+                entry = shard.get(cache_key, {}).get(module_name)
+                if entry is None:
+                    continue
+                if layer_num is None:
+                    layer_num = entry.get("layer_num")
+                for k in tensor_keys:
+                    per_shard_lists[k].append(entry[k])
+
+            bs = len(next(iter(per_shard_lists.values()))[0])
+            merged_entry = {"layer_num": layer_num}
+            for k in tensor_keys:
+                merged_entry[k] = [
+                    torch.cat([s[i] for s in per_shard_lists[k]], dim=-1) for i in range(bs)
+                ]
+            merged[cache_key][module_name] = merged_entry
 
     return merged
 
@@ -241,11 +252,16 @@ def load_and_merge_hs_cache(hook_dir: str, run_id: str) -> Dict[str, Any]:
         )
 
     shards = []
-    for p in paths:
-        cache = torch.load(p, map_location="cpu")
-        meta = cache.get("meta", {})
-        tp_rank = int(meta.get("tp_rank", 0))
-        shards.append((tp_rank, cache))
+    with PROF.timed("io.artifact_load.pt"):
+        for p in paths:
+            try:
+                PROF.gauge("io.bytes_read.pt", os.path.getsize(p))
+            except OSError:
+                pass
+            cache = torch.load(p, map_location="cpu")
+            meta = cache.get("meta", {})
+            tp_rank = int(meta.get("tp_rank", 0))
+            shards.append((tp_rank, cache))
     shards.sort(key=lambda x: x[0])
 
     if len(shards) == 1:
@@ -350,11 +366,16 @@ def load_and_merge_qk_cache(hook_dir: str, run_id: str):
         )
 
     shareds = []
-    for p in paths:
-        cache = torch.load(p, map_location="cpu")
-        meta = cache.get("meta", {})
-        tp_rank = int(meta.get("tp_rank", 0))
-        shareds.append((tp_rank, cache))
+    with PROF.timed("io.artifact_load.pt"):
+        for p in paths:
+            try:
+                PROF.gauge("io.bytes_read.pt", os.path.getsize(p))
+            except OSError:
+                pass
+            cache = torch.load(p, map_location="cpu")
+            meta = cache.get("meta", {})
+            tp_rank = int(meta.get("tp_rank", 0))
+            shareds.append((tp_rank, cache))
     shareds.sort(key=lambda x: x[0])
 
     # Single shared: return as-is.

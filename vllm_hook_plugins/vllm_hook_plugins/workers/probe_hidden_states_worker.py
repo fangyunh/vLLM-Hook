@@ -8,6 +8,7 @@ import zstandard as zstd
 from vllm.forward_context import get_forward_context
 from vllm.distributed import parallel_state as ps
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.workers._common import (
     background_save_loop,
     clear_states_for_req,
@@ -229,6 +230,9 @@ class ProbeHiddenStatesWorker:
                 else:
                     activation = hidden[start:end].detach().clone()
 
+                PROF.incr("hook.fire.hs")
+                PROF.gauge("captured.bytes.hs", activation.numel() * activation.element_size())
+
                 # Route to disk or RPC bucket based on save_to_disk flag.
                 bucket = self._disk_states if e["save_to_disk"] else self._captured_states
                 if req_id not in bucket:
@@ -270,17 +274,23 @@ class ProbeHiddenStatesWorker:
         for req_id in iter_matching_req_ids(self._captured_states, external_req_id):
             layer_dict = self._captured_states.pop(req_id)
             cpu_dict = {}
-            for mod_name, entry in layer_dict.items():
-                tensors = entry["hidden_states"]
-                mode = entry.get("hs_mode", self.hs_mode)
-                if mode == "last_token":
-                    stacked = torch.stack([t.cpu() for t in tensors])
-                else:
-                    from torch.nn.utils.rnn import pad_sequence
-                    stacked = pad_sequence([t.cpu() for t in tensors], batch_first=True)
-                cpu_dict[mod_name] = {"hidden_states": stacked, "layer_num": entry["layer_num"], "hs_mode": mode}
+            with PROF.timed("worker.cpu_transfer.hs"):
+                for mod_name, entry in layer_dict.items():
+                    tensors = entry["hidden_states"]
+                    mode = entry.get("hs_mode", self.hs_mode)
+                    if mode == "last_token":
+                        stacked = torch.stack([t.cpu() for t in tensors])
+                    else:
+                        from torch.nn.utils.rnn import pad_sequence
+                        stacked = pad_sequence([t.cpu() for t in tensors], batch_first=True)
+                    cpu_dict[mod_name] = {"hidden_states": stacked, "layer_num": entry["layer_num"], "hs_mode": mode}
             payload = {"hs_cache": cpu_dict, "config": self._conf}
-            return _ZSTD_COMPRESSOR.compress(pickle.dumps(payload))
+            with PROF.timed("worker.compress.hs"):
+                raw = pickle.dumps(payload)
+                PROF.gauge("worker.raw_bytes.hs", len(raw))
+                compressed = _ZSTD_COMPRESSOR.compress(raw)
+            PROF.gauge("worker.compressed_bytes.hs", len(compressed))
+            return compressed
         return None
 
     def clear_captured_states(self, external_req_id: str) -> None:
@@ -299,24 +309,25 @@ class ProbeHiddenStatesWorker:
         cpu_cache: dict = {"config": self._conf, "hs_cache": {}}
         found_any = False
 
-        for external_req_id in external_req_ids:
-            for req_id in iter_matching_req_ids(self._disk_states, external_req_id):
-                layer_dict = self._disk_states.pop(req_id)
-                if not layer_dict:
-                    continue
-                found_any = True
-                for mod_name, entry in layer_dict.items():
-                    cpu_entry = {
-                        "hidden_states": [t.cpu() for t in entry["hidden_states"]],
-                        "layer_num": entry["layer_num"],
-                        "hs_mode": entry.get("hs_mode", self.hs_mode),
-                    }
-                    if mod_name in cpu_cache["hs_cache"]:
-                        cpu_cache["hs_cache"][mod_name]["hidden_states"].extend(
-                            cpu_entry["hidden_states"]
-                        )
-                    else:
-                        cpu_cache["hs_cache"][mod_name] = cpu_entry
+        with PROF.timed("worker.cpu_transfer.hs"):
+            for external_req_id in external_req_ids:
+                for req_id in iter_matching_req_ids(self._disk_states, external_req_id):
+                    layer_dict = self._disk_states.pop(req_id)
+                    if not layer_dict:
+                        continue
+                    found_any = True
+                    for mod_name, entry in layer_dict.items():
+                        cpu_entry = {
+                            "hidden_states": [t.cpu() for t in entry["hidden_states"]],
+                            "layer_num": entry["layer_num"],
+                            "hs_mode": entry.get("hs_mode", self.hs_mode),
+                        }
+                        if mod_name in cpu_cache["hs_cache"]:
+                            cpu_cache["hs_cache"][mod_name]["hidden_states"].extend(
+                                cpu_entry["hidden_states"]
+                            )
+                        else:
+                            cpu_cache["hs_cache"][mod_name] = cpu_entry
 
         if not found_any:
             return False
@@ -326,7 +337,9 @@ class ProbeHiddenStatesWorker:
         os.makedirs(run_dir, exist_ok=True)
 
         if os.environ.get("VLLM_HOOK_ASYNC_SAVE", "0") == "1":
-            self._save_queue.put((run_id, cpu_cache, run_dir))
+            PROF.gauge("async.queue_depth_before_put", self._save_queue.qsize())
+            with PROF.timed("worker.queue_put"):
+                self._save_queue.put((run_id, cpu_cache, run_dir))
         elif os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1":
             self._save_safetensors(cpu_cache, run_dir)
         else:

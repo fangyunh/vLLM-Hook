@@ -8,6 +8,7 @@ import zstandard as zstd
 from vllm.forward_context import get_forward_context
 from vllm.distributed import parallel_state as ps
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.workers._common import (
     background_save_loop,
     clear_states_for_req,
@@ -240,11 +241,18 @@ class ProbeHookQKWorker:
                         query_len = end - start
                         num_cached = total_len - query_len
                         if num_cached > 0:
-                            prefix_k = _read_cached_keys(module_name, metadata if not isinstance(metadata, dict) else next(iter(metadata.values())), i, num_cached, total_len)
+                            PROF.incr("kv.prefix_recon")
+                            with PROF.timed("kv.prefix_recon"):
+                                prefix_k = _read_cached_keys(module_name, metadata if not isinstance(metadata, dict) else next(iter(metadata.values())), i, num_cached, total_len)
                             if prefix_k is not None:
                                 k_tok = torch.cat([prefix_k.to(k_tok.device, dtype=k_tok.dtype), k_tok], dim=0)
                     except Exception:
-                        pass
+                        PROF.incr("kv.prefix_recon.errors")
+
+                PROF.incr("hook.fire.qk")
+                PROF.gauge("captured.bytes.qk",
+                           q_tok.numel() * q_tok.element_size()
+                           + k_tok.numel() * k_tok.element_size())
 
                 # Route to disk or RPC bucket based on save_to_disk flag.
                 bucket = self._disk_states if extra.get("save_to_disk") else self._captured_states
@@ -285,17 +293,23 @@ class ProbeHookQKWorker:
         for req_id in iter_matching_req_ids(self._captured_states, external_req_id):
             layer_dict = self._captured_states.pop(req_id)
             cpu_dict = {}
-            for mod_name, entry in layer_dict.items():
-                from torch.nn.utils.rnn import pad_sequence
-                mode = entry.get("hookq_mode", self.hookq_mode)
-                if mode == "all_tokens":
-                    q_stacked = pad_sequence([t.cpu() for t in entry["q"]], batch_first=True)
-                else:
-                    q_stacked = torch.stack([t.cpu() for t in entry["q"]])
-                k_stacked = pad_sequence([t.cpu() for t in entry["k_all"]], batch_first=True)
-                cpu_dict[mod_name] = {"q": q_stacked, "k_all": k_stacked, "layer_num": entry["layer_num"], "hookq_mode": mode}
+            with PROF.timed("worker.cpu_transfer.qk"):
+                for mod_name, entry in layer_dict.items():
+                    from torch.nn.utils.rnn import pad_sequence
+                    mode = entry.get("hookq_mode", self.hookq_mode)
+                    if mode == "all_tokens":
+                        q_stacked = pad_sequence([t.cpu() for t in entry["q"]], batch_first=True)
+                    else:
+                        q_stacked = torch.stack([t.cpu() for t in entry["q"]])
+                    k_stacked = pad_sequence([t.cpu() for t in entry["k_all"]], batch_first=True)
+                    cpu_dict[mod_name] = {"q": q_stacked, "k_all": k_stacked, "layer_num": entry["layer_num"], "hookq_mode": mode}
             payload = {"qk_cache": cpu_dict, "config": self._conf}
-            return _ZSTD_COMPRESSOR.compress(pickle.dumps(payload))
+            with PROF.timed("worker.compress.qk"):
+                raw = pickle.dumps(payload)
+                PROF.gauge("worker.raw_bytes.qk", len(raw))
+                compressed = _ZSTD_COMPRESSOR.compress(raw)
+            PROF.gauge("worker.compressed_bytes.qk", len(compressed))
+            return compressed
         return None
 
     def clear_captured_states(self, external_req_id: str) -> None:
@@ -314,24 +328,25 @@ class ProbeHookQKWorker:
         cpu_cache: dict = {"config": self._conf, "qk_cache": {}}
         found_any = False
 
-        for external_req_id in external_req_ids:
-            for req_id in iter_matching_req_ids(self._disk_states, external_req_id):
-                layer_dict = self._disk_states.pop(req_id)
-                if not layer_dict:
-                    continue
-                found_any = True
-                for mod_name, entry in layer_dict.items():
-                    cpu_entry = {
-                        "q": [t.cpu() for t in entry["q"]],
-                        "k_all": [t.cpu() for t in entry["k_all"]],
-                        "layer_num": entry["layer_num"],
-                        "hookq_mode": entry.get("hookq_mode", self.hookq_mode),
-                    }
-                    if mod_name in cpu_cache["qk_cache"]:
-                        cpu_cache["qk_cache"][mod_name]["q"].extend(cpu_entry["q"])
-                        cpu_cache["qk_cache"][mod_name]["k_all"].extend(cpu_entry["k_all"])
-                    else:
-                        cpu_cache["qk_cache"][mod_name] = cpu_entry
+        with PROF.timed("worker.cpu_transfer.qk"):
+            for external_req_id in external_req_ids:
+                for req_id in iter_matching_req_ids(self._disk_states, external_req_id):
+                    layer_dict = self._disk_states.pop(req_id)
+                    if not layer_dict:
+                        continue
+                    found_any = True
+                    for mod_name, entry in layer_dict.items():
+                        cpu_entry = {
+                            "q": [t.cpu() for t in entry["q"]],
+                            "k_all": [t.cpu() for t in entry["k_all"]],
+                            "layer_num": entry["layer_num"],
+                            "hookq_mode": entry.get("hookq_mode", self.hookq_mode),
+                        }
+                        if mod_name in cpu_cache["qk_cache"]:
+                            cpu_cache["qk_cache"][mod_name]["q"].extend(cpu_entry["q"])
+                            cpu_cache["qk_cache"][mod_name]["k_all"].extend(cpu_entry["k_all"])
+                        else:
+                            cpu_cache["qk_cache"][mod_name] = cpu_entry
 
         if not found_any:
             return False
@@ -341,7 +356,9 @@ class ProbeHookQKWorker:
         os.makedirs(run_dir, exist_ok=True)
 
         if os.environ.get("VLLM_HOOK_ASYNC_SAVE", "0") == "1":
-            self._save_queue.put((run_id, cpu_cache, run_dir))
+            PROF.gauge("async.queue_depth_before_put", self._save_queue.qsize())
+            with PROF.timed("worker.queue_put"):
+                self._save_queue.put((run_id, cpu_cache, run_dir))
         elif os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1":
             self._save_safetensors(cpu_cache, run_dir)
         else:

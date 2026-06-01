@@ -21,6 +21,8 @@ from typing import Any
 
 import zstandard as zstd
 
+from vllm_hook_plugins._profiler import PROF
+
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
 
@@ -42,9 +44,11 @@ _DEFAULT_HOOK_DIR = "/dev/shm/vllm_hook"
 
 
 def _decompress(data: bytes) -> Any:
-    if data[:4] == _ZSTD_MAGIC:
-        return pickle.loads(_ZSTD_DECOMPRESSOR.decompress(data))
-    return pickle.loads(data)
+    PROF.gauge("rpc.payload_bytes", len(data))
+    with PROF.timed("rpc.decompress"):
+        if data[:4] == _ZSTD_MAGIC:
+            return pickle.loads(_ZSTD_DECOMPRESSOR.decompress(data))
+        return pickle.loads(data)
 
 
 def _trim_probes(probes: dict, key: str, expected_len: int) -> None:
@@ -65,6 +69,7 @@ def _trim_probes(probes: dict, key: str, expected_len: int) -> None:
                 continue
             # 3D = (bs, seq, hidden) — trim seq (dim 1)
             if t.dim() == 3 and t.shape[1] > expected_len:
+                PROF.incr("trim.event")
                 entry[tkey] = t[:, :expected_len, :]
 
 
@@ -138,7 +143,9 @@ async def _patched_generate(
     save_to_disk = bool(extra.get("save_to_disk"))
 
     if needs_hooks and not getattr(self, "_vllm_hook_installed", False):
-        await self.collective_rpc("install_hooks")
+        PROF.incr("rpc.install_hooks")
+        with PROF.timed("rpc.install_hooks"):
+            await self.collective_rpc("install_hooks")
         setattr(self, "_vllm_hook_installed", True)
 
     assert _original_generate is not None
@@ -150,10 +157,12 @@ async def _patched_generate(
                 if save_to_disk:
                     run_id = extra.get("run_id") or request_id
                     hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
-                    await self.collective_rpc("flush_disk", args=([request_id], run_id, hook_dir))
+                    with PROF.timed("rpc.flush_disk"):
+                        await self.collective_rpc("flush_disk", args=([request_id], run_id, hook_dir))
                     # Leave output.probes unset — caller reads artifacts from disk.
                 else:
-                    states = await self.collective_rpc("get_captured_states", args=(request_id,))
+                    with PROF.timed("rpc.get_states"):
+                        states = await self.collective_rpc("get_captured_states", args=(request_id,))
                     parts = [_decompress(s) for s in states if s is not None]
                     if parts:
                         probes = parts[0]  # rank 0 result; PP merge not yet needed
@@ -196,7 +205,9 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
     )
 
     if needs_hooks and not getattr(self, "_vllm_hook_installed", False):
-        self.collective_rpc("install_hooks")
+        PROF.incr("rpc.install_hooks")
+        with PROF.timed("rpc.install_hooks"):
+            self.collective_rpc("install_hooks")
         self._vllm_hook_installed = True
 
     assert _original_llm_generate is not None
@@ -222,7 +233,8 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
                 hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
                 disk_by_run.setdefault(run_id, []).append((req_id, hook_dir))
             elif wants_artifacts:
-                states = self.collective_rpc("get_captured_states", args=(req_id,))
+                with PROF.timed("rpc.get_states"):
+                    states = self.collective_rpc("get_captured_states", args=(req_id,))
                 parts = [_decompress(s) for s in states if s is not None]
                 if parts:
                     probes = parts[0]
@@ -239,7 +251,8 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
         for run_id, req_list in disk_by_run.items():
             req_ids = [r for r, _ in req_list]
             _, hook_dir = req_list[0]
-            self.collective_rpc("flush_disk", args=(req_ids, run_id, hook_dir))
+            with PROF.timed("rpc.flush_disk"):
+                self.collective_rpc("flush_disk", args=(req_ids, run_id, hook_dir))
 
     return outputs
 
@@ -252,20 +265,35 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
 def _serialize_probes(probes: dict) -> dict:
     """Serialize probe tensors to lists for JSON transport."""
     import torch
-    result = {}
-    for key, cache in probes.items():
-        # config is a flat dict of scalars — pass through as-is.
-        if key == "config" and isinstance(cache, dict):
-            result[key] = cache
-            continue
-        if not isinstance(cache, dict):
-            continue
-        result[key] = {}
-        for mod_name, entry in cache.items():
-            result[key][mod_name] = {
-                k: v.tolist() if isinstance(v, torch.Tensor) else v
-                for k, v in entry.items()
-            }
+    PROF.incr("serve.serialize_probes.calls")
+    with PROF.timed("serve.serialize_probes"):
+        result = {}
+        n_tensors = 0
+        n_elems = 0
+        for key, cache in probes.items():
+            # config is a flat dict of scalars — pass through as-is.
+            if key == "config" and isinstance(cache, dict):
+                result[key] = cache
+                continue
+            if not isinstance(cache, dict):
+                continue
+            result[key] = {}
+            for mod_name, entry in cache.items():
+                new_entry = {}
+                for k, v in entry.items():
+                    if isinstance(v, torch.Tensor):
+                        n_tensors += 1
+                        n_elems += v.numel()
+                        new_entry[k] = v.tolist()
+                    else:
+                        new_entry[k] = v
+                result[key][mod_name] = new_entry
+        PROF.gauge("serve.serialize_probes.tensors", n_tensors)
+        PROF.gauge("serve.serialize_probes.elements", n_elems)
+        # Approximate JSON wire size — encoding to bytes here would double the
+        # work and is the actual fix discussed in plan.html §7. We use the
+        # element count as the proxy and let the harness compute the realized
+        # response_bytes from the HTTP response.
     return result
 
 

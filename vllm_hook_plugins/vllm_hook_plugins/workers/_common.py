@@ -20,6 +20,8 @@ from typing import Any, Iterator
 
 import torch
 
+from vllm_hook_plugins._profiler import PROF
+
 
 # ---------------------------------------------------------------------------
 # Per-request bookkeeping
@@ -76,12 +78,17 @@ def get_query_metadata(metadata: Any) -> tuple:
 
 def save_pt_atomic(cpu_cache: dict, out_path: str) -> None:
     """Write ``cpu_cache`` to ``out_path`` via tmp+fsync+rename for atomicity."""
-    tmp_path = out_path + ".tmp"
-    with open(tmp_path, "wb") as f:
-        torch.save(cpu_cache, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.rename(tmp_path, out_path)
+    with PROF.timed("worker.disk_write.pt"):
+        tmp_path = out_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            torch.save(cpu_cache, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, out_path)
+    try:
+        PROF.gauge("disk.bytes.pt", os.path.getsize(out_path))
+    except OSError:
+        pass
 
 
 def init_async_save_thread(worker, target, thread_name: str) -> None:
@@ -98,6 +105,7 @@ def init_async_save_thread(worker, target, thread_name: str) -> None:
     worker._io_thread = threading.Thread(target=target, daemon=True, name=thread_name)
     worker._io_thread.start()
     worker._io_thread_started = True
+    PROF.incr("install.async_thread")
 
 
 def iter_matched_modules(model, match_fn, layer_filter=None):
@@ -119,6 +127,10 @@ def iter_matched_modules(model, match_fn, layer_filter=None):
 def save_safetensors_atomic(flat_dict: dict, meta: dict, run_dir: str, basename: str) -> None:
     """Write ``flat_dict`` to ``{run_dir}/{basename}.safetensors`` and ``meta``
     to ``{run_dir}/{basename}.json``, both via tmp+rename for atomicity.
+
+    When VLLM_HOOK_PROFILE=1 the JSON sidecar is enriched with a snapshot
+    of the worker-side profiler so post-hoc analysis doesn't need a
+    separate RPC fetch.
     """
     import json as _json
     from safetensors.torch import save_file as _st_save
@@ -128,12 +140,32 @@ def save_safetensors_atomic(flat_dict: dict, meta: dict, run_dir: str, basename:
     tmp_st = out_path + ".tmp"
     tmp_meta = meta_path + ".tmp"
 
-    _st_save(flat_dict, tmp_st)
-    os.rename(tmp_st, out_path)
+    with PROF.timed("worker.disk_write.safetensors"):
+        _st_save(flat_dict, tmp_st)
+        os.rename(tmp_st, out_path)
+
+    # Sidecar enrichment: bake a profile snapshot into the JSON meta so the
+    # harness reads perf data without a separate fetch. The snapshot is the
+    # cumulative state at write time — readers should subtract the previous
+    # cell's snapshot to get per-cell metrics, or call PROF.reset() between
+    # cells.
+    try:
+        from vllm_hook_plugins._profiler import PROF as _PROF, is_enabled as _en
+        if _en():
+            meta = dict(meta)
+            meta["profile"] = _PROF.summary_only()
+    except Exception:
+        pass
 
     with open(tmp_meta, "w") as f:
         _json.dump(meta, f)
     os.rename(tmp_meta, meta_path)
+
+    try:
+        PROF.gauge("disk.bytes.safetensors", os.path.getsize(out_path))
+        PROF.gauge("disk.bytes.json", os.path.getsize(meta_path))
+    except OSError:
+        pass
 
 
 def background_save_loop(worker, pt_filename: str) -> None:
@@ -146,13 +178,17 @@ def background_save_loop(worker, pt_filename: str) -> None:
     """
     while True:
         run_id, cpu_cache, run_dir = worker._save_queue.get()
+        PROF.gauge("async.queue_depth_after_get", worker._save_queue.qsize())
         try:
-            os.makedirs(run_dir, exist_ok=True)
-            if os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1":
-                worker._save_safetensors(cpu_cache, run_dir)
-            else:
-                save_pt_atomic(cpu_cache, os.path.join(run_dir, pt_filename))
+            with PROF.timed("async.save_iter"):
+                os.makedirs(run_dir, exist_ok=True)
+                if os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1":
+                    worker._save_safetensors(cpu_cache, run_dir)
+                else:
+                    save_pt_atomic(cpu_cache, os.path.join(run_dir, pt_filename))
+            PROF.incr("async.iter")
         except Exception as e:
+            PROF.incr("async.save.errors")
             print(f"background save failed for {run_id}: {e}")
         finally:
             worker._save_queue.task_done()

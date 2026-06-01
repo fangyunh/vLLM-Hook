@@ -3,15 +3,16 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Tuple, Optional, List
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.run_utils import load_and_merge_qk_cache, unpack_qk
 
 
 class AttntrackerAnalyzer:
-    
+
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
         self.hook_dir = hook_dir
         self.layer_to_heads = layer_to_heads
-    
+
     def analyze(
         self,
         analyzer_spec: Optional[Dict] = None,
@@ -19,8 +20,9 @@ class AttntrackerAnalyzer:
         probes: Optional[Dict] = None,
     ) -> Optional[Dict]:
 
-        attention_weights = self.compute_attention_from_qk(run_id, probes=probes)
-        score = self.attn2score(attention_weights, analyzer_spec['input_range'], analyzer_spec['attn_func'])
+        with PROF.timed("analyzer.kernel"):
+            attention_weights = self.compute_attention_from_qk(run_id, probes=probes)
+            score = self.attn2score(attention_weights, analyzer_spec['input_range'], analyzer_spec['attn_func'])
 
         return {
             "score": score

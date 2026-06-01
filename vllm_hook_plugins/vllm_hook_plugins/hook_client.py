@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.run_utils import dispatch_disk_analyze
 
 
@@ -94,12 +95,26 @@ class HookClient:
                 "hook_dir": self._hook_dir,
             })
 
-        response = self._openai.chat.completions.create(
-            model=model,
-            messages=messages,
-            extra_body=extra_body,
-            **openai_kwargs,
-        )
+        PROF.incr("client.request.calls")
+        with PROF.timed("client.request"):
+            response = self._openai.chat.completions.create(
+                model=model,
+                messages=messages,
+                extra_body=extra_body,
+                **openai_kwargs,
+            )
+
+        # Capture the wire size of the response when available.
+        try:
+            size = len(getattr(response, "_raw_response", None).text)  # type: ignore[union-attr]
+            PROF.gauge("client.response_bytes", size)
+        except Exception:
+            # Fallback: estimate via the OpenAI model_dump_json output.
+            try:
+                PROF.gauge("client.response_bytes_est",
+                           len(response.model_dump_json()))
+            except Exception:
+                pass
 
         self._last_response = response
         self._last_run_id = run_id
@@ -137,12 +152,14 @@ class HookClient:
                 "with the vllm_hook_plugins plugin loaded "
                 "(check VLLM_HOOK_WORKER env var and plugin entry point)."
             )
-        probes = self._deserialize_probes(raw_probes)
+        with PROF.timed("client.deserialize"):
+            probes = self._deserialize_probes(raw_probes)
 
         if "qk_cache" not in probes and "hs_cache" not in probes:
             raise RuntimeError(f"Unexpected probes keys: {list(probes.keys())}")
 
-        return self.analyzer.analyze(analyzer_spec, probes=probes)
+        with PROF.timed("analyzer.kernel"):
+            return self.analyzer.analyze(analyzer_spec, probes=probes)
 
     # ------------------------------------------------------------------
     # Private helpers

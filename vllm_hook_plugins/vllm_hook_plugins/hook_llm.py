@@ -8,6 +8,7 @@ os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 from vllm import LLM, SamplingParams
 from vllm_hook_plugins.registry import PluginRegistry
 from vllm_hook_plugins.run_utils import dispatch_disk_analyze
+from vllm_hook_plugins._profiler import PROF
 
 class HookLLM:
     def __init__(
@@ -145,36 +146,41 @@ class HookLLM:
         if hook and self.worker_name:
             if run_id is None:
                 run_id = str(uuid.uuid4())
-            sampling_params = copy.copy(sampling_params)
-            extra = dict(sampling_params.extra_args or {})
-            extra.update(self._build_extra_args(save_to_disk, run_id, request_extra_args=extra))
-            sampling_params.extra_args = extra
+            with PROF.timed("hookllm.build_extra"):
+                sampling_params = copy.copy(sampling_params)
+                extra = dict(sampling_params.extra_args or {})
+                extra.update(self._build_extra_args(save_to_disk, run_id, request_extra_args=extra))
+                sampling_params.extra_args = extra
             # Store last run_id so analyze() can find the artifact without
             # the caller needing to track it.
             self._last_run_id = run_id
 
-        outputs = self.llm.generate(prompts, sampling_params)
+        PROF.incr("hookllm.generate.calls")
+        PROF.gauge("hookllm.prompts", len(prompts))
+        with PROF.timed("hookllm.generate"):
+            outputs = self.llm.generate(prompts, sampling_params)
 
         if hook and self.worker_name and not save_to_disk and len(outputs) > 1 and getattr(outputs[0], "probes", None) is not None:
-            # Merge per-request probes onto outputs[0] so callers always use
-            # output[0].probes regardless of batch size. q/k_all become lists
-            # of per-request tensors (unbind dim 0), matching the disk format
-            # that unpack_qk expects. k_all varies in seq_len so can't be cat'd.
-            all_probes = [o.probes for o in outputs]
-            merged = {k: v for k, v in all_probes[0].items() if k not in ("qk_cache", "hs_cache")}
-            for cache_key in ("qk_cache", "hs_cache"):
-                if cache_key not in all_probes[0]:
-                    continue
-                merged[cache_key] = {}
-                for layer in all_probes[0][cache_key]:
-                    first = all_probes[0][cache_key][layer]
-                    entry = {k: v for k, v in first.items() if k not in ("q", "k_all", "hs")}
-                    for tensor_key in ("q", "k_all", "hs"):
-                        if tensor_key not in first:
-                            continue
-                        entry[tensor_key] = [p[cache_key][layer][tensor_key][0] for p in all_probes]
-                    merged[cache_key][layer] = entry
-            outputs[0].probes = merged
+            with PROF.timed("hookllm.merge_probes"):
+                # Merge per-request probes onto outputs[0] so callers always use
+                # output[0].probes regardless of batch size. q/k_all become lists
+                # of per-request tensors (unbind dim 0), matching the disk format
+                # that unpack_qk expects. k_all varies in seq_len so can't be cat'd.
+                all_probes = [o.probes for o in outputs]
+                merged = {k: v for k, v in all_probes[0].items() if k not in ("qk_cache", "hs_cache")}
+                for cache_key in ("qk_cache", "hs_cache"):
+                    if cache_key not in all_probes[0]:
+                        continue
+                    merged[cache_key] = {}
+                    for layer in all_probes[0][cache_key]:
+                        first = all_probes[0][cache_key][layer]
+                        entry = {k: v for k, v in first.items() if k not in ("q", "k_all", "hs")}
+                        for tensor_key in ("q", "k_all", "hs"):
+                            if tensor_key not in first:
+                                continue
+                            entry[tensor_key] = [p[cache_key][layer][tensor_key][0] for p in all_probes]
+                        merged[cache_key][layer] = entry
+                outputs[0].probes = merged
 
         return outputs
 
@@ -198,14 +204,23 @@ class HookLLM:
             print("No analyzer configured")
             return None
 
+        PROF.incr("hookllm.analyze.calls")
+
         if probes is not None:
-            return self.analyzer.analyze(analyzer_spec=analyzer_spec, probes=probes)
+            with PROF.timed("hookllm.analyze"):
+                with PROF.timed("analyzer.kernel"):
+                    return self.analyzer.analyze(analyzer_spec=analyzer_spec, probes=probes)
 
         # Disk path: resolve run_id from args or _last_run_id fallback.
         effective_run_id = run_id or getattr(self, "_last_run_id", None)
-        return dispatch_disk_analyze(self.analyzer, analyzer_spec,
-                                     run_id=effective_run_id, run_ids=run_ids)
+        with PROF.timed("hookllm.analyze"):
+            return dispatch_disk_analyze(self.analyzer, analyzer_spec,
+                                         run_id=effective_run_id, run_ids=run_ids)
 
     def __del__(self):
+        try:
+            PROF.dump()
+        except Exception:
+            pass
         from vllm_hook_plugins.shm_utils import teardown_shm
         teardown_shm(getattr(self, "_hook_shm", None))

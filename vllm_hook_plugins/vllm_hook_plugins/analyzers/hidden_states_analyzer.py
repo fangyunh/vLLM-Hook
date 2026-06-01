@@ -2,6 +2,7 @@ import os
 import torch
 from typing import Dict, List, Optional
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.run_utils import load_and_merge_hs_cache
 from vllm_hook_plugins.shm_utils import load_from_shm
 
@@ -16,7 +17,8 @@ class HiddenStatesAnalyzer:
         if probes is not None:
             hs_cache = probes["hs_cache"]
         elif os.environ.get("VLLM_HOOK_USE_SHM", "0") == "1":
-            hs_cache, peak_gpu_mb = load_from_shm(self.hook_dir, run_id)
+            with PROF.timed("io.shm_load"):
+                hs_cache, peak_gpu_mb = load_from_shm(self.hook_dir, run_id)
         else:
             if run_id is None:
                 raise ValueError("HiddenStatesAnalyzer.analyze: pass either probes= or run_id=.")
@@ -25,22 +27,23 @@ class HiddenStatesAnalyzer:
 
         reduce = (analyzer_spec or {}).get("reduce", "none")
 
-        result = {}
-        for layer_name, data in hs_cache.items():
-            tensors: List[torch.Tensor] = data["hidden_states"]
-            if reduce == "none":
-                result[layer_name] = tensors
-            elif reduce == "mean":
-                # meaningful for all_tokens mode: average over sequence dim
-                result[layer_name] = [
-                    t.mean(dim=0) if t.dim() > 1 else t for t in tensors
-                ]
-            elif reduce == "norm":
-                result[layer_name] = [
-                    torch.norm(t.float()).item() for t in tensors
-                ]
-            else:
-                raise NotImplementedError(f"Unknown reduce: {reduce}")
+        with PROF.timed("analyzer.kernel"):
+            result = {}
+            for layer_name, data in hs_cache.items():
+                tensors: List[torch.Tensor] = data["hidden_states"]
+                if reduce == "none":
+                    result[layer_name] = tensors
+                elif reduce == "mean":
+                    # meaningful for all_tokens mode: average over sequence dim
+                    result[layer_name] = [
+                        t.mean(dim=0) if t.dim() > 1 else t for t in tensors
+                    ]
+                elif reduce == "norm":
+                    result[layer_name] = [
+                        torch.norm(t.float()).item() for t in tensors
+                    ]
+                else:
+                    raise NotImplementedError(f"Unknown reduce: {reduce}")
 
         out = {"hidden_states": result}
         if peak_gpu_mb is not None:

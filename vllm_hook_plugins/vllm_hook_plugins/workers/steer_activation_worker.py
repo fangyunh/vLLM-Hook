@@ -3,6 +3,7 @@ import json
 import torch
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.workers._common import iter_matched_modules
 from vllm_hook_plugins.workers.probe_hidden_states_worker import match_layer
 
@@ -97,6 +98,8 @@ class SteerHookActWorker:
             if cfg is None:
                 return output
 
+            PROF.incr("steer.fire")
+
             method = cfg.get("method", "adjust_rs")
             coefficient = float(cfg.get("coefficient", 0))
             apply_at_all_positions = bool(cfg.get("apply_at_all_positions", True))
@@ -120,24 +123,25 @@ class SteerHookActWorker:
 
             steering_vec = data["dir"].to(residuals.device, dtype=residuals.dtype)
 
-            if method == "add_vector":
-                if not apply_at_all_positions:
-                    raise NotImplementedError("Only supports apply_at_all_positions=True for now.")
-                steering_vec = steering_vec.view(1, -1)
-                residuals = residuals + coefficient * steering_vec
+            with PROF.timed("steer.apply", tier=2):
+                if method == "add_vector":
+                    if not apply_at_all_positions:
+                        raise NotImplementedError("Only supports apply_at_all_positions=True for now.")
+                    steering_vec = steering_vec.view(1, -1)
+                    residuals = residuals + coefficient * steering_vec
 
-            elif method == "adjust_rs":
-                unit_vec = steering_vec  # use dir as unit vector (matches old behavior)
-                avg_proj = data["avg_proj"].to(residuals.device, dtype=residuals.dtype)
+                elif method == "adjust_rs":
+                    unit_vec = steering_vec  # use dir as unit vector (matches old behavior)
+                    avg_proj = data["avg_proj"].to(residuals.device, dtype=residuals.dtype)
 
-                current_projections = torch.matmul(residuals, unit_vec)
-                coeff = (avg_proj - current_projections).unsqueeze(-1)
-                unit_vec = unit_vec.view(1, -1)
+                    current_projections = torch.matmul(residuals, unit_vec)
+                    coeff = (avg_proj - current_projections).unsqueeze(-1)
+                    unit_vec = unit_vec.view(1, -1)
 
-                residuals = residuals + coeff * unit_vec
+                    residuals = residuals + coeff * unit_vec
 
-            else:
-                raise ValueError(f"Unknown steering method: {method}")
+                else:
+                    raise ValueError(f"Unknown steering method: {method}")
 
             if is_tuple:
                 return (hidden_states, residuals)
