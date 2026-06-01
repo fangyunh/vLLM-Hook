@@ -218,9 +218,12 @@ class HookLLM:
                                          run_id=effective_run_id, run_ids=run_ids)
 
     def __del__(self):
+        # Profile dump is handled by atexit in _profiler.py — see _atexit_dump.
+        # Calling PROF.dump() here is unreliable: __del__ fires during
+        # interpreter shutdown when sys.meta_path is None and silent
+        # ImportErrors swallow the dump entirely.
         try:
-            PROF.dump()
-        except Exception:
+            from vllm_hook_plugins.shm_utils import teardown_shm
+            teardown_shm(getattr(self, "_hook_shm", None))
+        except ImportError:
             pass
-        from vllm_hook_plugins.shm_utils import teardown_shm
-        teardown_shm(getattr(self, "_hook_shm", None))

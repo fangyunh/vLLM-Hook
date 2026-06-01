@@ -28,11 +28,14 @@ Usage
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import statistics
+import sys
 import threading
 import time
+import traceback
 from contextlib import contextmanager
 from collections import defaultdict
 from typing import Any, Dict, Iterator, List, Optional
@@ -216,9 +219,12 @@ class Profiler:
                 "gauges":   {k: self._summarize(v) for k, v in self.gauges.items()},
             }
 
-    def dump(self, path: Optional[str] = None) -> Optional[str]:
+    def dump(self, path: Optional[str] = None, *, role: str = "proc") -> Optional[str]:
         """Write the full snapshot as JSON. Returns the path written, or None
         if profiling is disabled.
+
+        ``role`` is a short tag baked into the filename (``driver`` / ``worker``
+        / ``proc``) so multi-process runs produce identifiable dumps.
         """
         if not _ENABLED:
             return None
@@ -226,7 +232,8 @@ class Profiler:
             os.makedirs(_DUMP_DIR, exist_ok=True)
             self._dump_seq += 1
             path = os.path.join(
-                _DUMP_DIR, f"profile-{os.getpid()}-{self._dump_seq}.json"
+                _DUMP_DIR,
+                f"profile-{role}-{os.getpid()}-{self._dump_seq}.json",
             )
         with open(path, "w") as f:
             json.dump(self.snapshot(), f, indent=2, default=str)
@@ -235,6 +242,51 @@ class Profiler:
 
 # Singleton — every wrap call sites the same instance.
 PROF = Profiler()
+
+
+# ---------------------------------------------------------------------------
+# atexit dump — runs while the import system is still alive, unlike __del__
+# ---------------------------------------------------------------------------
+
+# Best-effort identification of "is this the driver or a worker subprocess?"
+# Workers spawn with VLLM_DP_RANK / RANK / LOCAL_RANK set; the driver doesn't.
+def _detect_role() -> str:
+    for key in ("RANK", "LOCAL_RANK", "VLLM_DP_RANK", "PMI_RANK"):
+        v = os.environ.get(key)
+        if v is not None and v != "":
+            return f"worker-r{v}"
+    # vLLM v1 sometimes uses VLLM_WORKER_MULTIPROC_METHOD without populating
+    # a rank var; fall back to checking the main module name.
+    main = getattr(sys.modules.get("__main__"), "__file__", "") or ""
+    if "vllm" in main.lower() and "engine" in main.lower():
+        return "worker"
+    return "driver"
+
+
+_ROLE = _detect_role()
+
+
+def _atexit_dump() -> None:
+    """Called once per process during normal interpreter exit.
+
+    Safe to invoke even when profiling is disabled — dump() short-circuits.
+    Writes a sentinel line to stderr on failure so debugging doesn't depend
+    on a silent JSON-missing symptom.
+    """
+    try:
+        path = PROF.dump(role=_ROLE)
+        if path is not None:
+            print(f"[vllm-hook profiler] wrote {path}", file=sys.stderr, flush=True)
+    except Exception:
+        try:
+            print("[vllm-hook profiler] atexit dump FAILED:", file=sys.stderr)
+            traceback.print_exc()
+        except Exception:
+            pass
+
+
+if _ENABLED:
+    atexit.register(_atexit_dump)
 
 
 # ---------------------------------------------------------------------------
