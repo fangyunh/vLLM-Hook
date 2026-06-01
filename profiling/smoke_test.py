@@ -69,7 +69,6 @@ def main() -> int:
         worker_name="probe_hidden_states",
         analyzer_name="hidden_states",
         config_file="model_configs/hidden_states/Qwen2.5-3B-Instruct.json",
-        download_dir="./cache/",
         hook_dir=hook_dir,
         gpu_memory_utilization=0.5,
         max_model_len=2048,

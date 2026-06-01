@@ -17,7 +17,7 @@ class HookLLM:
         worker_name: str = None,
         analyzer_name: str = None,
         config_file: str = None,
-        download_dir: str = '~/.cache',
+        download_dir: Optional[str] = None,
         enable_hook: bool = True,
         hook_dir: str = None,
         enforce_eager: bool = True,
@@ -30,10 +30,17 @@ class HookLLM:
         self.enable_hook = enable_hook
         self.enforce_eager = enforce_eager
 
+        # Expand ~ so HF Hub never sees a literal tilde — it doesn't expand it
+        # itself and silently builds a bogus cache path under CWD.
+        if download_dir is not None:
+            download_dir = os.path.expanduser(download_dir)
+        self._download_dir = download_dir
+
         if hook_dir is not None:
             HOOK_DIR = hook_dir
         else:
-            HOOK_DIR = os.path.join(download_dir, '_v1_qk_peeks')
+            fallback_root = download_dir or os.path.expanduser('~/.cache')
+            HOOK_DIR = os.path.join(fallback_root, '_v1_qk_peeks')
         os.makedirs(HOOK_DIR, exist_ok=True)
         self._hook_dir = HOOK_DIR
 
@@ -57,12 +64,17 @@ class HookLLM:
             vllm.plugins.load_general_plugins()
             worker = PluginRegistry.get_worker(worker_name).path
 
+        llm_kwargs = dict(vllm_kwargs)
+        # Only forward download_dir when explicitly set — otherwise let HF Hub
+        # use its own default cache (~/.cache/huggingface/hub/), which is where
+        # the model snapshots and blobs actually live on this system.
+        if download_dir is not None:
+            llm_kwargs['download_dir'] = download_dir
         self.llm = LLM(
             model=model,
-            download_dir=download_dir,
             worker_extension_cls=worker,
             enforce_eager=enforce_eager,
-            **vllm_kwargs
+            **llm_kwargs,
         )
 
         self.tokenizer = self.llm.get_tokenizer()
