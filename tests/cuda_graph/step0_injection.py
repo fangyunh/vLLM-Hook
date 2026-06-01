@@ -67,6 +67,37 @@ def _increment_fake(counter: torch.Tensor) -> None:
     return None
 
 
+def _import_direct_register_custom_op():
+    """Locate direct_register_custom_op across vLLM versions.
+
+    Older vLLM:   vllm.utils                (flat module)
+    vLLM 0.7+:    vllm.utils.torch_utils    (utils became a package)
+    Some forks:   vllm.utils._custom_ops
+    """
+    errs = []
+    for modpath in (
+        "vllm.utils",
+        "vllm.utils.torch_utils",
+        "vllm.utils._custom_ops",
+        "vllm.compilation.decorators",
+    ):
+        try:
+            mod = __import__(modpath, fromlist=["direct_register_custom_op"])
+            fn = getattr(mod, "direct_register_custom_op", None)
+            if fn is not None:
+                return fn
+            errs.append(f"  {modpath}: imported but no symbol")
+        except ImportError as e:
+            errs.append(f"  {modpath}: {e}")
+    raise ImportError(
+        "Could not locate direct_register_custom_op in any known vLLM path.\n"
+        "Tried:\n" + "\n".join(errs) +
+        "\nRun on the server: "
+        "python -c \"import vllm, pkgutil; "
+        "[print(m.name) for m in pkgutil.walk_packages(vllm.utils.__path__, 'vllm.utils.')]\""
+    )
+
+
 def register_counter_op() -> None:
     """Register vllm_hook_counter.increment via vLLM's helper.
 
@@ -74,7 +105,7 @@ def register_counter_op() -> None:
     PyTorch's dispatcher AND the inductor side, with the mutates_args
     semantics that auto_functionalize needs to keep the node alive.
     """
-    from vllm.utils import direct_register_custom_op
+    direct_register_custom_op = _import_direct_register_custom_op()
 
     direct_register_custom_op(
         op_name="counter_increment",
