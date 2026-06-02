@@ -105,6 +105,62 @@ def _section_six_rows(rows: List[Dict[str, Any]]) -> Optional[str]:
     return "## R0–R5 six-row summary (plan.html §7)\n\n" + _table(body, headers)
 
 
+def _section_memory(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """Per-row memory comparison. Only emitted when the new memory columns
+    (added by the advanced memory stats pass) are present."""
+    mem_cols = ("cuda_peak_alloc_mb_max", "cuda_alloc_delta_mb_max",
+                "cuda_peak_reserved_mb_max", "host_rss_mb_max")
+    if not rows or not any(c in rows[0] for c in mem_cols):
+        return None
+
+    # Group by (row, mode) — same key the headline table uses — and pick
+    # the worst-case (max) cell for each, since the spike is what matters.
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        rname = r.get("row")
+        if rname is None:
+            continue
+        key = f"{rname}:{r.get('mode')}" if rname == "probe_hook_qk" else rname
+        prev = buckets.get(key)
+        if prev is None:
+            buckets[key] = r
+            continue
+        # Keep the row with the higher CUDA peak — that's the worst-case cell.
+        prev_peak = prev.get("cuda_peak_alloc_mb_max") or 0
+        new_peak  = r.get("cuda_peak_alloc_mb_max")    or 0
+        if isinstance(prev_peak, (int, float)) and isinstance(new_peak, (int, float)):
+            if new_peak > prev_peak:
+                buckets[key] = r
+
+    order = ["baseline", "plugin_idle",
+             "probe_hook_qk:last_token", "probe_hook_qk:all_tokens",
+             "probe_hidden_states", "steer_hook_act"]
+    headers = ["row", "cuda_alloc_mb",
+               "cuda_peak_alloc_mb", "cuda_alloc_delta_mb",
+               "cuda_peak_reserved_mb", "host_rss_mb", "nvml_used_mb"]
+    body = []
+    for key in order:
+        r = buckets.get(key)
+        if r is None:
+            continue
+        body.append([
+            key,
+            _f(r.get("cuda_alloc_mb_max")),
+            _f(r.get("cuda_peak_alloc_mb_max")),
+            _f(r.get("cuda_alloc_delta_mb_max")),
+            _f(r.get("cuda_peak_reserved_mb_max")),
+            _f(r.get("host_rss_mb_max")),
+            _f(r.get("peak_gpu_mb")),
+        ])
+    if not body:
+        return None
+    return ("## Memory footprint per row (worst-case cell)\n\n"
+            "_All values are MB. `cuda_alloc_delta_mb` is the per-rep "
+            "spike above the pre-rep working set — the cleanest signal of "
+            "what the hook itself costs in GPU memory._\n\n"
+            + _table(body, headers))
+
+
 def _section_storage_matrix(rows: List[Dict[str, Any]]) -> Optional[str]:
     storage_rows = [r for r in rows
                     if r.get("worker") == "probe_hidden_states"
@@ -193,8 +249,9 @@ def main() -> int:
     rows = _coerce(_read(args.csv))
     parts: List[str] = [f"# Profile report — `{args.csv}`",
                        f"_{len(rows)} rows_"]
-    for section in (_section_six_rows, _section_storage_matrix,
-                    _section_idle_tax, _section_top_timers):
+    for section in (_section_six_rows, _section_memory,
+                    _section_storage_matrix, _section_idle_tax,
+                    _section_top_timers):
         s = section(rows)
         if s:
             parts.append(s)

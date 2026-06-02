@@ -43,6 +43,7 @@ export VLLM_USE_V1=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export VLLM_HOOK_PROFILE=1
 export VLLM_HOOK_PROFILE_DIR="$PROFILE_DIR"
+export VLLM_HOOK_PROFILE_MEM=1
 
 # If resuming, OUT_CSV is the prior run's file. Otherwise mint a new one.
 TAG="${MODEL//\//_}-${LSB_JOBID:-$(date +%Y%m%d-%H%M)}"

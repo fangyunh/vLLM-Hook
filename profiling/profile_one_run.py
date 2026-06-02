@@ -41,7 +41,9 @@ from _common import (  # noqa: E402
     dir_size_kb,
     flatten_profile_into_row,
     gpu_used_mb,
+    mem_snapshot,
     profile_snapshot,
+    reset_cuda_peak_memory,
     reset_profiler,
     synth_prompts,
     variant_env,
@@ -182,6 +184,12 @@ def _one_rep(engine, is_hook_llm: bool, *, row: str, prompts: List[str],
                     or storage_variant == "shm")
     run_id = str(uuid.uuid4())
 
+    # Reset CUDA peak counters + take a baseline snapshot so the post-rep
+    # snapshot reflects ONLY this rep's allocations (not the cumulative
+    # high-water mark from warmup or prior reps).
+    reset_cuda_peak_memory()
+    mem_pre = mem_snapshot()
+
     t0 = time.perf_counter()
     if is_hook_llm:
         outputs = engine.generate(prompts, sp,
@@ -219,6 +227,10 @@ def _one_rep(engine, is_hook_llm: bool, *, row: str, prompts: List[str],
     if save_to_disk:
         artifact_kb = dir_size_kb(os.path.join(hook_dir, run_id))
 
+    # Post-rep memory snapshot — peaks include the entire rep (generate +
+    # analyze + flush) because we don't reset between phases here.
+    mem_post = mem_snapshot()
+
     return {
         "gen_lat":          t1 - t0,
         "wait_lat":         t_wait - t1,
@@ -231,6 +243,20 @@ def _one_rep(engine, is_hook_llm: bool, *, row: str, prompts: List[str],
         "peak_gpu_mb":      gpu_used_mb(),
         "artifact_kb":      artifact_kb,
         "run_id":           run_id,
+        # Advanced per-rep memory metrics (MB).
+        "cuda_alloc_mb_pre":      mem_pre["cuda_alloc_mb"],
+        "cuda_alloc_mb_post":     mem_post["cuda_alloc_mb"],
+        "cuda_peak_alloc_mb":     mem_post["cuda_peak_alloc_mb"],
+        "cuda_reserved_mb_post":  mem_post["cuda_reserved_mb"],
+        "cuda_peak_reserved_mb":  mem_post["cuda_peak_reserved_mb"],
+        # Hook-induced allocation spike: how much above the pre-rep working set
+        # this rep climbed. The interesting "what does the hook cost in GPU
+        # memory?" number, isolated from KV-cache + weights.
+        "cuda_alloc_delta_mb":    max(0.0, mem_post["cuda_peak_alloc_mb"]
+                                            - mem_pre["cuda_alloc_mb"]),
+        "host_rss_mb":            mem_post["host_rss_mb"],
+        "host_rss_delta_mb":      max(0.0, mem_post["host_rss_mb"]
+                                            - mem_pre["host_rss_mb"]),
     }
 
 
@@ -352,6 +378,10 @@ def run_cell(cfg: Dict[str, Any]) -> Dict[str, Any]:
         vals = [r[key] for r in per_rep if r.get(key) is not None]
         return sum(vals) / len(vals) if vals else 0.0
 
+    def _max(key: str) -> float:
+        vals = [r[key] for r in per_rep if r.get(key) is not None]
+        return max(vals) if vals else 0.0
+
     row_dict.update({
         "rep_count":           len(per_rep),
         "gen_lat_mean":        _mean("gen_lat"),
@@ -362,6 +392,17 @@ def run_cell(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "decode_tok_per_sec":  _mean("decode_tok_per_sec"),
         "peak_gpu_mb":         peak_gpu,
         "artifact_kb_mean":    _mean("artifact_kb"),
+        # Advanced memory aggregates — max across reps captures the
+        # worst-case spike; mean is what a steady stream would see.
+        "cuda_alloc_mb_max":         _max("cuda_alloc_mb_post"),
+        "cuda_peak_alloc_mb_max":    _max("cuda_peak_alloc_mb"),
+        "cuda_peak_alloc_mb_mean":   _mean("cuda_peak_alloc_mb"),
+        "cuda_reserved_mb_max":      _max("cuda_reserved_mb_post"),
+        "cuda_peak_reserved_mb_max": _max("cuda_peak_reserved_mb"),
+        "cuda_alloc_delta_mb_max":   _max("cuda_alloc_delta_mb"),
+        "cuda_alloc_delta_mb_mean":  _mean("cuda_alloc_delta_mb"),
+        "host_rss_mb_max":           _max("host_rss_mb"),
+        "host_rss_delta_mb_max":     _max("host_rss_delta_mb"),
     })
     row_dict = flatten_profile_into_row(row_dict, snap)
     return row_dict

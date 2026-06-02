@@ -57,6 +57,8 @@ export VLLM_HOOK_USE_SAFETENSORS=1
 export VLLM_HOOK_ASYNC_SAVE=1
 export VLLM_HOOK_PROFILE=1
 export VLLM_HOOK_PROFILE_DIR="$PROFILE_DIR"
+# Background NVML + psutil + torch.cuda memory sampler (50 ms).
+export VLLM_HOOK_PROFILE_MEM=1
 export HOOK_DIR
 
 echo "[smoke] env check:"

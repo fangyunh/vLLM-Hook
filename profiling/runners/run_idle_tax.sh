@@ -33,6 +33,9 @@ mkdir -p "$HOOK_DIR"
 
 export VLLM_USE_V1=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
+# Memory profiler so idle/loaded/hooks comparisons include RSS + CUDA stats.
+export VLLM_HOOK_PROFILE=1
+export VLLM_HOOK_PROFILE_MEM=1
 
 TAG="${MODEL//\//_}-${LSB_JOBID:-$(date +%Y%m%d-%H%M)}"
 OUT_CSV="profiling/results/idle-${TAG}.csv"

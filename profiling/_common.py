@@ -125,12 +125,16 @@ def synth_prompts(target_tokens: int, tokenizer, n: int, jitter_pct: int = 0) ->
 
 
 # ---------------------------------------------------------------------------
-# NVML peek (cross-process GPU memory)
+# NVML peek (cross-process GPU memory) + advanced per-rep memory snapshots
 # ---------------------------------------------------------------------------
 
 
 _NVML_HANDLE = None
 _NVML_TRIED = False
+_PSUTIL_PROC: Any = None
+_PSUTIL_TRIED = False
+_TORCH: Any = None
+_TORCH_TRIED = False
 
 
 def gpu_used_mb(gpu_index: int = 0) -> float:
@@ -149,6 +153,83 @@ def gpu_used_mb(gpu_index: int = 0) -> float:
     import pynvml
     info = pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
     return info.used / 1024 ** 2
+
+
+def _maybe_torch():
+    global _TORCH, _TORCH_TRIED
+    if not _TORCH_TRIED:
+        _TORCH_TRIED = True
+        try:
+            import torch
+            _TORCH = torch
+        except ImportError:
+            _TORCH = None
+    return _TORCH
+
+
+def _maybe_psutil_proc():
+    global _PSUTIL_PROC, _PSUTIL_TRIED
+    if not _PSUTIL_TRIED:
+        _PSUTIL_TRIED = True
+        try:
+            import psutil
+            _PSUTIL_PROC = psutil.Process(os.getpid())
+        except ImportError:
+            _PSUTIL_PROC = None
+    return _PSUTIL_PROC
+
+
+def reset_cuda_peak_memory(gpu_index: int = 0) -> None:
+    """Reset peak alloc/reserved stats on the given device so the next
+    ``mem_snapshot()`` call observes the per-rep peak only.
+
+    No-op when torch / CUDA / a CUDA context is not present in this process.
+    """
+    t = _maybe_torch()
+    if t is None or not t.cuda.is_available() or not t.cuda.is_initialized():
+        return
+    try:
+        t.cuda.reset_peak_memory_stats(gpu_index)
+    except Exception:
+        pass
+
+
+def mem_snapshot(gpu_index: int = 0) -> Dict[str, float]:
+    """Return a dict of per-process memory metrics (all in MB).
+
+    Keys (always present; 0.0 when the source is unavailable):
+      cuda_alloc_mb         — torch.cuda.memory_allocated()      (caching alloc)
+      cuda_reserved_mb      — torch.cuda.memory_reserved()       (caching alloc)
+      cuda_peak_alloc_mb    — torch.cuda.max_memory_allocated()  (since last reset)
+      cuda_peak_reserved_mb — torch.cuda.max_memory_reserved()   (since last reset)
+      host_rss_mb           — process RSS via psutil
+      nvml_used_mb          — system-wide GPU mem (NVML)
+    """
+    out = {
+        "cuda_alloc_mb":         0.0,
+        "cuda_reserved_mb":      0.0,
+        "cuda_peak_alloc_mb":    0.0,
+        "cuda_peak_reserved_mb": 0.0,
+        "host_rss_mb":           0.0,
+        "nvml_used_mb":          0.0,
+    }
+    t = _maybe_torch()
+    if t is not None and t.cuda.is_available() and t.cuda.is_initialized():
+        try:
+            out["cuda_alloc_mb"]         = t.cuda.memory_allocated(gpu_index)     / 1024 ** 2
+            out["cuda_reserved_mb"]      = t.cuda.memory_reserved(gpu_index)      / 1024 ** 2
+            out["cuda_peak_alloc_mb"]    = t.cuda.max_memory_allocated(gpu_index) / 1024 ** 2
+            out["cuda_peak_reserved_mb"] = t.cuda.max_memory_reserved(gpu_index)  / 1024 ** 2
+        except Exception:
+            pass
+    proc = _maybe_psutil_proc()
+    if proc is not None:
+        try:
+            out["host_rss_mb"] = proc.memory_info().rss / 1024 ** 2
+        except Exception:
+            pass
+    out["nvml_used_mb"] = gpu_used_mb(gpu_index)
+    return out
 
 
 # ---------------------------------------------------------------------------

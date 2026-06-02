@@ -308,6 +308,7 @@ class MemorySampler:
         self._thread: Optional[threading.Thread] = None
         self._nvml_handle = None
         self._psutil_proc = None
+        self._torch = None  # lazy import; None until first successful sample
 
     def _try_init(self) -> bool:
         try:
@@ -321,7 +322,14 @@ class MemorySampler:
             self._psutil_proc = psutil.Process(os.getpid())
         except Exception:
             self._psutil_proc = None
-        return self._nvml_handle is not None or self._psutil_proc is not None
+        try:
+            import torch
+            self._torch = torch
+        except Exception:
+            self._torch = None
+        return (self._nvml_handle is not None
+                or self._psutil_proc is not None
+                or self._torch is not None)
 
     def _loop(self) -> None:
         import pynvml  # may be imported lazily
@@ -336,6 +344,19 @@ class MemorySampler:
                 try:
                     rss = self._psutil_proc.memory_info().rss
                     PROF.gauge("mem.host_rss_mb", rss / 1024 ** 2)
+                except Exception:
+                    pass
+            # Per-process CUDA caching-allocator view. Skip until torch's CUDA
+            # context exists (driver process imports torch eagerly; workers
+            # only after they construct the model).
+            if (self._torch is not None
+                    and self._torch.cuda.is_available()
+                    and self._torch.cuda.is_initialized()):
+                try:
+                    alloc    = self._torch.cuda.memory_allocated(self.gpu_index)
+                    reserved = self._torch.cuda.memory_reserved(self.gpu_index)
+                    PROF.gauge("mem.cuda_alloc_mb",    alloc    / 1024 ** 2)
+                    PROF.gauge("mem.cuda_reserved_mb", reserved / 1024 ** 2)
                 except Exception:
                     pass
             self._stop.wait(self.interval)
