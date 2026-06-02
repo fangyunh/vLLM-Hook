@@ -14,7 +14,7 @@
 #BSUB -J vllm_hook_prof_full
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
-#BSUB -R "rusage[ngpus=1,mem=48GB]"
+#BSUB -R "rusage[ngpus=1,mem=48GB] span[hosts=1]"
 #BSUB -W 12:00
 #BSUB -o profiling/runners/logs/full.%J.out
 #BSUB -e profiling/runners/logs/full.%J.err

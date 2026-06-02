@@ -64,11 +64,14 @@ def main() -> int:
               file=sys.stderr, flush=True)
         return 2
 
+    # Use the same model the benchmarks use — it's already cached in
+    # ~/.cache/huggingface/hub on this cluster. Picking Qwen2.5-3B here
+    # silently triggers a multi-GB GPFS download that looks like a hang.
     llm = HookLLM(
-        model="Qwen/Qwen2.5-3B-Instruct",
+        model="Qwen/Qwen2-1.5B-Instruct",
         worker_name="probe_hidden_states",
         analyzer_name="hidden_states",
-        config_file="model_configs/hidden_states/Qwen2.5-3B-Instruct.json",
+        config_file="model_configs/hidden_states/Qwen2-1.5B-Instruct.json",
         hook_dir=hook_dir,
         gpu_memory_utilization=0.5,
         max_model_len=2048,

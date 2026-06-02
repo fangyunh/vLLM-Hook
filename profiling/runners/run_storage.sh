@@ -9,7 +9,7 @@
 #BSUB -J vllm_hook_prof_storage
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
-#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -R "rusage[ngpus=1,mem=32GB] span[hosts=1]"
 #BSUB -W 4:00
 #BSUB -o profiling/runners/logs/storage.%J.out
 #BSUB -e profiling/runners/logs/storage.%J.err

@@ -17,7 +17,7 @@
 #BSUB -J vllm_hook_prof_smoke
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
-#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -R "rusage[ngpus=1,mem=32GB] span[hosts=1]"
 #BSUB -o profiling/runners/logs/smoke.%J.out
 #BSUB -e profiling/runners/logs/smoke.%J.err
 
@@ -66,7 +66,7 @@ echo
 # Pre-launch import probe — runs in a throwaway PROFILE_DIR so its atexit
 # dump can't be mistaken for the real smoke dump.
 VLLM_HOOK_PROFILE_DIR=/tmp/vllm_hook_profile_smoke_probe \
-python -c "
+python -u -c "
 from vllm_hook_plugins._profiler import PROF, is_enabled
 import os
 print(f'[smoke] _profiler imported. enabled={is_enabled()}  '
@@ -76,7 +76,9 @@ print(f'[smoke] _profiler imported. enabled={is_enabled()}  '
 echo
 
 echo "[smoke] running profiling/smoke_test.py with profiling on..."
-python profiling/smoke_test.py
+# -u so model-load progress and the [smoke_test] prints stream live to the
+# LSF .out file instead of buffering until the process exits.
+python -u profiling/smoke_test.py
 
 echo
 echo "[smoke] profile dumps in $PROFILE_DIR:"

@@ -18,7 +18,7 @@
 #BSUB -J vllm_hook_prof_quick
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
-#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -R "rusage[ngpus=1,mem=32GB] span[hosts=1]"
 #BSUB -o profiling/runners/logs/quick.%J.out
 #BSUB -e profiling/runners/logs/quick.%J.err
 
