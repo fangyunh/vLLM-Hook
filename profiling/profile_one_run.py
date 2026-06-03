@@ -39,10 +39,12 @@ from _common import (  # noqa: E402
     cell_context,
     clean_hook_dir,
     dir_size_kb,
+    find_worker_engine_dump,
     flatten_profile_into_row,
     gpu_used_mb,
     mem_snapshot,
     profile_snapshot,
+    read_worker_sidecar_profile,
     reset_cuda_peak_memory,
     reset_profiler,
     synth_prompts,
@@ -52,13 +54,25 @@ from _common import (  # noqa: E402
 
 
 # Row name → (worker_name, analyzer_name)
+# Rows ending in "_v010" use the vendored v0.1.0 code under
+# profiling/peers/v010/ via the V010Engine driver; they share the same
+# (worker, analyzer) labels for symmetry with the current rows.
 ROW_TO_WORKER = {
-    "baseline":            (None, None),
-    "plugin_idle":         (None, None),                 # plugin imported, no worker_extension
-    "probe_hidden_states": ("probe_hidden_states", "hidden_states"),
-    "probe_hook_qk":       ("probe_hook_qk",       "attn_tracker"),  # any QK analyzer works
-    "steer_hook_act":      ("steer_hook_act",      None),
+    "baseline":                 (None, None),
+    "plugin_idle":              (None, None),                 # plugin imported, no worker_extension
+    "probe_hidden_states":      ("probe_hidden_states", "hidden_states"),
+    "probe_hook_qk":            ("probe_hook_qk",       "attn_tracker"),  # any QK analyzer works
+    "steer_hook_act":           ("steer_hook_act",      None),
+    # v0.1.0 peer rows — same workers reimplemented with the older
+    # file-flag control plane; used for the v0.2.0-vs-v0.1.0 comparison.
+    "probe_hidden_states_v010": ("probe_hidden_states", "hidden_states"),
+    "probe_hook_qk_v010":       ("probe_hook_qk",       "attn_tracker"),
+    "steer_hook_act_v010":      ("steer_hook_act",      None),
 }
+
+
+def _is_v010_row(row: str) -> bool:
+    return row.endswith("_v010")
 
 
 # ---------------------------------------------------------------------------
@@ -75,12 +89,15 @@ def _write_temp_config(base_cfg_path: Optional[str], *, row: str,
     """
     if row in ("baseline", "plugin_idle"):
         return None
+    # Strip the _v010 suffix so config synthesis uses the same JSON schema
+    # as the v0.2.0 path — only the runtime layer differs.
+    base_row = row[:-len("_v010")] if row.endswith("_v010") else row
     if base_cfg_path is None or not os.path.exists(base_cfg_path):
         # Steer needs a config (it specifies the vector); the others can run
         # with a synthesized minimal one when no path is given.
-        if row == "probe_hidden_states":
+        if base_row == "probe_hidden_states":
             cfg = {"hidden_states": {"layers": layers or [], "mode": mode}}
-        elif row == "probe_hook_qk":
+        elif base_row == "probe_hook_qk":
             cfg = {"hookq": {"hookq_mode": mode},
                    "params": {"important_heads": [[ln, 0] for ln in (layers or [1])]}}
         else:
@@ -88,10 +105,10 @@ def _write_temp_config(base_cfg_path: Optional[str], *, row: str,
     else:
         with open(base_cfg_path) as f:
             cfg = json.load(f)
-        if row == "probe_hidden_states" and "hidden_states" in cfg:
+        if base_row == "probe_hidden_states" and "hidden_states" in cfg:
             cfg["hidden_states"]["layers"] = layers if layers is not None else cfg["hidden_states"].get("layers", [])
             cfg["hidden_states"]["mode"]   = mode
-        elif row == "probe_hook_qk" and "hookq" in cfg:
+        elif base_row == "probe_hook_qk" and "hookq" in cfg:
             cfg["hookq"]["hookq_mode"] = mode
 
     tmp = tempfile.NamedTemporaryFile(
@@ -140,7 +157,28 @@ def _build_llm(*, row: str, model: str, dtype: str, hook_dir: str,
         )
         return engine, False
 
-    # All hook rows go through HookLLM.
+    # v0.1.0 peer rows: dispatch to the vendored V010Engine. v0.1.0 has no
+    # prefix-cache prefix-recon path, so we force prefix caching off for
+    # parity with the original Numerical_Analysis benchmark — even if the
+    # caller asked for it on. This is a measurement requirement, not a
+    # capability gap to hide.
+    if _is_v010_row(row):
+        from profiling.peers.v010.driver import build_engine as _build_v010
+        engine = _build_v010(
+            row,
+            model=model,
+            hook_dir=hook_dir,
+            config_file=cfg_path,
+            dtype=torch_dtype,
+            tp_size=tp_size,
+            max_model_len=max_model_len,
+            gpu_memory_utilization=gpu_memory_utilization,
+            enable_prefix_caching=False,
+            enforce_eager=enforce_eager,
+        )
+        return engine, True
+
+    # All v0.2.0 hook rows go through HookLLM.
     from vllm_hook_plugins import register_plugins
     from vllm_hook_plugins.hook_llm import HookLLM
     register_plugins()
@@ -334,6 +372,7 @@ def run_cell(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
         # Timed reps — reset profiler so the snapshot is per-cell.
         reset_profiler()
+        cell_start_ts = time.time()
         peak_gpu = 0.0
         per_rep: List[Dict[str, Any]] = []
         for i in range(reps):
@@ -346,6 +385,16 @@ def run_cell(cfg: Dict[str, Any]) -> Dict[str, Any]:
             peak_gpu = max(peak_gpu, ret["peak_gpu_mb"])
 
         snap = profile_snapshot()
+
+        # Try to grab the worker's PROF snapshot via the safetensors sidecar
+        # BEFORE we tear the engine down — for disk-st* cells this is
+        # synchronously available with the latest rep's artifacts. If the
+        # cell didn't write safetensors (rpc / disk-pt / shm), the engine-dump
+        # poll below picks it up after `del engine` triggers atexit.
+        worker_snap = None
+        if per_rep and storage_variant.startswith("disk-st"):
+            last_rid = per_rep[-1].get("run_id")
+            worker_snap = read_worker_sidecar_profile(hook_dir, last_rid)
 
         # Cleanup
         if cfg_path and cfg_path.startswith(tempfile.gettempdir()):
@@ -361,6 +410,18 @@ def run_cell(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 torch.cuda.empty_cache()
         except Exception:
             pass
+
+        # Fallback worker-snapshot source: the EngineCore subprocess writes
+        # ``profile-worker-<pid>-<seq>.json`` to VLLM_HOOK_PROFILE_DIR via
+        # its atexit handler. Used when the sidecar path didn't fire
+        # (rpc / disk-pt / shm storage variants, or no artifact written).
+        # We poll briefly because the worker process exits asynchronously.
+        if worker_snap is None:
+            worker_snap = find_worker_engine_dump(
+                os.environ.get("VLLM_HOOK_PROFILE_DIR"),
+                since_ts=cell_start_ts,
+                timeout_s=5.0,
+            )
 
     # Aggregate
     row_dict = cell_context(
@@ -405,6 +466,15 @@ def run_cell(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "host_rss_delta_mb_max":     _max("host_rss_delta_mb"),
     })
     row_dict = flatten_profile_into_row(row_dict, snap)
+    # Overlay the worker-process snapshot. Driver and worker timer names are
+    # disjoint (driver: hookllm.*, rpc.*, analyzer.*, io.*; worker:
+    # hook.fire.*, worker.*, async.*) so there are no collisions in the
+    # ``timer.*`` namespace. The ``gauge.mem.*`` columns DO overlap — the
+    # worker's values overwrite the driver's, which is what we want because
+    # the worker process is the one that actually has a CUDA context and
+    # thus the only place ``mem.cuda_alloc_mb`` is meaningful.
+    if worker_snap:
+        row_dict = flatten_profile_into_row(row_dict, worker_snap)
     return row_dict
 
 

@@ -106,15 +106,33 @@ def _section_six_rows(rows: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def _section_memory(rows: List[Dict[str, Any]]) -> Optional[str]:
-    """Per-row memory comparison. Only emitted when the new memory columns
-    (added by the advanced memory stats pass) are present."""
-    mem_cols = ("cuda_peak_alloc_mb_max", "cuda_alloc_delta_mb_max",
-                "cuda_peak_reserved_mb_max", "host_rss_mb_max")
-    if not rows or not any(c in rows[0] for c in mem_cols):
+    """Per-row memory comparison. Pulls CUDA stats from the *worker* sidecar
+    merge (``gauge.mem.cuda_alloc_mb.*``) when present, since the driver
+    process has no CUDA context and its own ``cuda_*_mb_*`` columns are
+    structurally zero. Falls back to whatever's there for older CSVs."""
+
+    has_worker_cuda  = bool(rows and "gauge.mem.cuda_alloc_mb.max" in rows[0])
+    has_driver_cuda  = bool(rows and "cuda_peak_alloc_mb_max" in rows[0])
+    has_host_rss     = bool(rows and ("host_rss_mb_max" in rows[0]
+                                      or "gauge.mem.host_rss_mb.max" in rows[0]))
+    if not rows or not (has_worker_cuda or has_driver_cuda or has_host_rss):
+        return None
+
+    def _v(r, *keys):
+        """First non-zero / non-empty value from a list of column names."""
+        for k in keys:
+            v = r.get(k)
+            if v in (None, "", "None"):
+                continue
+            try:
+                if float(v) != 0:
+                    return v
+            except (TypeError, ValueError):
+                return v
         return None
 
     # Group by (row, mode) — same key the headline table uses — and pick
-    # the worst-case (max) cell for each, since the spike is what matters.
+    # the worst-case (max-CUDA) cell for each.
     buckets: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         rname = r.get("row")
@@ -125,19 +143,22 @@ def _section_memory(rows: List[Dict[str, Any]]) -> Optional[str]:
         if prev is None:
             buckets[key] = r
             continue
-        # Keep the row with the higher CUDA peak — that's the worst-case cell.
-        prev_peak = prev.get("cuda_peak_alloc_mb_max") or 0
-        new_peak  = r.get("cuda_peak_alloc_mb_max")    or 0
-        if isinstance(prev_peak, (int, float)) and isinstance(new_peak, (int, float)):
-            if new_peak > prev_peak:
+        prev_peak = _v(prev, "gauge.mem.cuda_alloc_mb.max",
+                       "cuda_peak_alloc_mb_max") or 0
+        new_peak  = _v(r,    "gauge.mem.cuda_alloc_mb.max",
+                       "cuda_peak_alloc_mb_max") or 0
+        try:
+            if float(new_peak) > float(prev_peak):
                 buckets[key] = r
+        except (TypeError, ValueError):
+            pass
 
     order = ["baseline", "plugin_idle",
              "probe_hook_qk:last_token", "probe_hook_qk:all_tokens",
              "probe_hidden_states", "steer_hook_act"]
-    headers = ["row", "cuda_alloc_mb",
-               "cuda_peak_alloc_mb", "cuda_alloc_delta_mb",
-               "cuda_peak_reserved_mb", "host_rss_mb", "nvml_used_mb"]
+    headers = ["row", "worker cuda_alloc_mb",
+               "worker cuda_reserved_mb", "worker host_rss_mb",
+               "driver host_rss_mb", "nvml peak (mb)"]
     body = []
     for key in order:
         r = buckets.get(key)
@@ -145,19 +166,20 @@ def _section_memory(rows: List[Dict[str, Any]]) -> Optional[str]:
             continue
         body.append([
             key,
-            _f(r.get("cuda_alloc_mb_max")),
-            _f(r.get("cuda_peak_alloc_mb_max")),
-            _f(r.get("cuda_alloc_delta_mb_max")),
-            _f(r.get("cuda_peak_reserved_mb_max")),
-            _f(r.get("host_rss_mb_max")),
+            _f(_v(r, "gauge.mem.cuda_alloc_mb.max",  "cuda_peak_alloc_mb_max")),
+            _f(_v(r, "gauge.mem.cuda_reserved_mb.max", "cuda_peak_reserved_mb_max")),
+            _f(_v(r, "gauge.mem.host_rss_mb.max")),
+            _f(_v(r, "host_rss_mb_max")),
             _f(r.get("peak_gpu_mb")),
         ])
     if not body:
         return None
+    note = ("_All values are MB. `worker cuda_alloc_mb` is the high-water "
+            "mark of `torch.cuda.memory_allocated()` sampled every 50 ms "
+            "inside the EngineCore process — the cleanest signal of what "
+            "the hook itself costs in GPU memory._")
     return ("## Memory footprint per row (worst-case cell)\n\n"
-            "_All values are MB. `cuda_alloc_delta_mb` is the per-rep "
-            "spike above the pre-rep working set — the cleanest signal of "
-            "what the hook itself costs in GPU memory._\n\n"
+            + note + "\n\n"
             + _table(body, headers))
 
 
@@ -216,6 +238,63 @@ def _section_top_timers(rows: List[Dict[str, Any]]) -> Optional[str]:
     return "## Top per-stage timers (global mean ms)\n\n" + _table(body, headers)
 
 
+def _section_v010_vs_current(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """Per-(prompt, batch, max_tok) comparison of v0.2.0 vs v0.1.0 for each
+    worker that has both rows. Skipped when no _v010 rows are present."""
+    pairs = [
+        ("probe_hidden_states", "probe_hidden_states_v010"),
+        ("probe_hook_qk",       "probe_hook_qk_v010"),
+        ("steer_hook_act",      "steer_hook_act_v010"),
+    ]
+    has_any_v010 = any(r.get("row", "").endswith("_v010") for r in rows)
+    if not has_any_v010:
+        return None
+
+    def keyof(r):
+        return (r.get("row"), r.get("mode"), r.get("prompt_len"),
+                r.get("batch_size"), r.get("max_tokens"))
+
+    by_key = {keyof(r): r for r in rows}
+
+    sections = []
+    for current, v010 in pairs:
+        # Find every workload cell where BOTH the v0.2.0 row and the matching
+        # v0.1.0 row ran in the same mode.
+        body = []
+        for r in rows:
+            if r.get("row") != current:
+                continue
+            v010_key = (v010, r.get("mode"), r.get("prompt_len"),
+                        r.get("batch_size"), r.get("max_tokens"))
+            v = by_key.get(v010_key)
+            if v is None:
+                continue
+            cur_ms = (r.get("gen_lat_mean") or 0) * 1000
+            v_ms   = (v.get("gen_lat_mean") or 0) * 1000
+            delta_pct = ((v_ms - cur_ms) / cur_ms * 100) if cur_ms else 0
+            body.append([
+                _f(r.get("prompt_len")), _f(r.get("batch_size")),
+                _f(r.get("max_tokens")), r.get("mode") or "—",
+                _f(cur_ms), _f(v_ms), _f(delta_pct) + "%",
+                _f(r.get("artifact_kb_mean")), _f(v.get("artifact_kb_mean")),
+            ])
+        if not body:
+            continue
+        headers = ["prompt_len", "batch", "max_tok", "mode",
+                   "v0.2.0 gen_ms", "v0.1.0 gen_ms", "v0.1.0 − v0.2.0",
+                   "v0.2.0 art_kb", "v0.1.0 art_kb"]
+        sections.append(f"### {current}\n\n" + _table(body, headers))
+
+    if not sections:
+        return None
+    intro = ("## v0.2.0 vs v0.1.0 (paired cells)\n\n"
+             "_Negative `v0.1.0 − v0.2.0` means v0.1.0 was faster on that "
+             "cell; positive means the current version wins. v0.1.0 has no "
+             "prefix-cache prefix-recon path, so its artifact size may "
+             "differ when prefix caching is on._\n\n")
+    return intro + "\n\n".join(sections)
+
+
 def _section_idle_tax(rows: List[Dict[str, Any]]) -> Optional[str]:
     base = {(r.get("prompt_len"), r.get("batch_size"), r.get("max_tokens")):
             r for r in rows if r.get("row") == "baseline"}
@@ -250,6 +329,7 @@ def main() -> int:
     parts: List[str] = [f"# Profile report — `{args.csv}`",
                        f"_{len(rows)} rows_"]
     for section in (_section_six_rows, _section_memory,
+                    _section_v010_vs_current,
                     _section_storage_matrix, _section_idle_tax,
                     _section_top_timers):
         s = section(rows)

@@ -35,6 +35,11 @@ BATCH_SIZES="${BATCH_SIZES:-1 16}"
 MAX_TOKENS="${MAX_TOKENS:-1 32}"
 REPS="${REPS:-5}"
 WARMUP="${WARMUP:-2}"
+# Set INCLUDE_V010=1 to also queue R6..R8 (v0.1.0 peer rows) for the direct
+# v0.2.0-vs-v0.1.0 comparison. Roughly doubles wall time.
+INCLUDE_V010="${INCLUDE_V010:-0}"
+V010_FLAG=""
+[[ "$INCLUDE_V010" == "1" ]] && V010_FLAG="--include-v010"
 # Per-job tmpfs paths — see run_smoke.sh for the collision rationale.
 HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook_${USER:-noname}_${LSB_JOBID:-$$}}"
 PROFILE_DIR="${PROFILE_DIR:-/dev/shm/vllm_hook_profile_${USER:-noname}_${LSB_JOBID:-$$}}"
@@ -54,7 +59,7 @@ TAG="${MODEL//\//_}-${LSB_JOBID:-$(date +%Y%m%d-%H%M)}"
 OUT_CSV="profiling/results/quick-${TAG}.csv"
 OUT_MD="profiling/results/quick-${TAG}-summary.md"
 
-echo "[quick] model=$MODEL  out=$OUT_CSV"
+echo "[quick] model=$MODEL  out=$OUT_CSV  include_v010=$INCLUDE_V010"
 python -u profiling/bench_grid.py \
     --plan         plan-quick \
     --model        "$MODEL" \
@@ -65,6 +70,7 @@ python -u profiling/bench_grid.py \
     --gpu-mem-util "$GPU_MEM_UTIL" \
     --reps         "$REPS" \
     --warmup       "$WARMUP" \
+    $V010_FLAG \
     --output       "$OUT_CSV"
 
 echo

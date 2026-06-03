@@ -44,23 +44,46 @@ from profile_one_run import ROW_TO_WORKER, run_cell  # noqa: E402
 
 
 def _plan_quick(args) -> List[Dict[str, Any]]:
-    """The R0..R5 six-row deliverable from plan.html §7."""
-    rows = ["baseline", "plugin_idle", "probe_hook_qk", "probe_hook_qk",
-            "probe_hidden_states", "steer_hook_act"]
-    # extra per-row overrides
+    """The R0..R5 six-row deliverable from plan.html §7, plus optional
+    v0.1.0 peer rows (R6..R8) when ``args.include_v010`` is set.
+
+    R6..R8 use the vendored v0.1.0 workers under profiling/peers/v010/ for
+    a direct hook-vs-hook comparison. Prefix caching is forced off inside
+    the v010 engine, since v0.1.0 has no prefix-recon path.
+    """
+    # (row, mode) pairs in display order.
+    rows: List[tuple] = [
+        ("baseline",            "last_token"),
+        ("plugin_idle",         "last_token"),
+        ("probe_hook_qk",       "last_token"),
+        ("probe_hook_qk",       "all_tokens"),
+        ("probe_hidden_states", "all_tokens"),
+        ("steer_hook_act",      "last_token"),
+    ]
+    if getattr(args, "include_v010", False):
+        rows.extend([
+            ("probe_hook_qk_v010",       "last_token"),
+            ("probe_hook_qk_v010",       "all_tokens"),
+            ("probe_hidden_states_v010", "all_tokens"),
+            ("steer_hook_act_v010",      "last_token"),
+        ])
+
+    # Storage-variant overrides per row. v010 rows use the same storage
+    # variants v0.1.0 actually supported in Numerical_Analysis so the
+    # apples-to-apples comparison is on the same I/O path.
     overrides = {
-        "baseline":             {"storage_variant": "rpc", "mode": "last_token"},
-        "plugin_idle":          {"storage_variant": "rpc", "mode": "last_token"},
-        "probe_hook_qk":        {"storage_variant": "disk-st-async"},
-        "probe_hidden_states":  {"storage_variant": "disk-st-async", "mode": "all_tokens"},
-        "steer_hook_act":       {"storage_variant": "rpc", "mode": "last_token"},
+        "baseline":                  {"storage_variant": "rpc"},
+        "plugin_idle":               {"storage_variant": "rpc"},
+        "probe_hook_qk":             {"storage_variant": "disk-st-async"},
+        "probe_hidden_states":       {"storage_variant": "disk-st-async"},
+        "steer_hook_act":            {"storage_variant": "rpc"},
+        "probe_hook_qk_v010":        {"storage_variant": "disk-st-async"},
+        "probe_hidden_states_v010":  {"storage_variant": "disk-st-async"},
+        "steer_hook_act_v010":       {"storage_variant": "rpc"},
     }
-    # R3 is the all_tokens repeat of R2
-    mode_per_idx = ["last_token", "last_token", "last_token", "all_tokens",
-                    "all_tokens", "last_token"]
 
     plan: List[Dict[str, Any]] = []
-    for idx, row in enumerate(rows):
+    for row, mode in rows:
         for prompt_len in args.prompt_lens:
             for batch in args.batch_sizes:
                 for max_tok in args.max_tokens:
@@ -77,7 +100,7 @@ def _plan_quick(args) -> List[Dict[str, Any]]:
                         enforce_eager=(not args.no_enforce_eager),
                         reps=args.reps, warmup=args.warmup,
                         hooks_on=args.hooks_on,
-                        mode=mode_per_idx[idx],
+                        mode=mode,
                     )
                     cell.update(overrides[row])
                     plan.append(cell)
@@ -231,6 +254,11 @@ def main() -> int:
     p.add_argument("--output-jsonl", default=None,
                    help="JSONL path. Default: same basename as CSV.")
     p.add_argument("--start-from",  type=int, default=1)
+    p.add_argument("--include-v010", action="store_true",
+                   help="Add R6..R8 = v0.1.0 peer rows to plan-quick for a "
+                        "direct v0.2.0-vs-v0.1.0 comparison (probe_hidden_states, "
+                        "probe_hook_qk, steer_hook_act each get a _v010 sibling). "
+                        "v0.1.0 prefix caching is forced off inside the engine.")
     p.add_argument("--dry-run",     action="store_true",
                    help="Print the plan without running any cells.")
     args = p.parse_args()

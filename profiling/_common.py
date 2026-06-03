@@ -302,6 +302,100 @@ def profile_snapshot() -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Worker-side profile recovery
+# ---------------------------------------------------------------------------
+#
+# Two sources for the worker's PROF snapshot:
+#
+#   1. Safetensors sidecar  — the .json that lives next to *.safetensors
+#      under ``hook_dir/run_id/tp_rank_*/``. The worker embeds
+#      ``meta["profile"] = PROF.summary_only()`` synchronously before the
+#      generate() call returns, so this file exists by the time the driver
+#      finishes a rep. Only present for storage variants that use safetensors
+#      (``disk-st`` / ``disk-st-async``).
+#
+#   2. End-of-cell engine dump — the worker's atexit handler writes
+#      ``profile-worker-<pid>-<seq>.json`` under VLLM_HOOK_PROFILE_DIR when
+#      the EngineCore subprocess exits. Fires for *every* cell regardless
+#      of storage variant, but only AFTER ``del engine`` triggers shutdown,
+#      so the caller must wait a moment for the file to appear.
+#
+# Both functions return the snapshot in the same shape ``flatten_profile_into_row``
+# expects (timers / counters / gauges) — driver and worker snapshots can be
+# flattened into the same row with no collisions because driver timer names
+# (hookllm.*, rpc.*, analyzer.*) are disjoint from worker names (hook.fire.*,
+# worker.*, async.*). The only overlapping namespace is ``gauge.mem.*``,
+# where the worker value overwrites the driver value — which is desirable
+# because the worker has a real CUDA context and the driver doesn't.
+
+
+def read_worker_sidecar_profile(hook_dir: str, run_id: str) -> Optional[Dict[str, Any]]:
+    """Read the worker PROF snapshot embedded in a safetensors sidecar JSON.
+
+    Looks under ``hook_dir/run_id/tp_rank_*/*.json`` for the most recent
+    sidecar and returns its ``meta["profile"]`` field, or None if no sidecar
+    is found (e.g. the cell used ``rpc`` or ``disk-pt`` storage).
+    """
+    base = os.path.join(hook_dir, run_id) if run_id else hook_dir
+    if not run_id or not os.path.isdir(base):
+        return None
+    candidates: List[str] = []
+    try:
+        for tp_dir in os.listdir(base):
+            tp_path = os.path.join(base, tp_dir)
+            if not os.path.isdir(tp_path):
+                continue
+            for fn in os.listdir(tp_path):
+                if fn.endswith(".json"):
+                    candidates.append(os.path.join(tp_path, fn))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    try:
+        with open(candidates[0]) as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return meta.get("profile")
+
+
+def find_worker_engine_dump(profile_dir: Optional[str], since_ts: float,
+                             *, timeout_s: float = 5.0) -> Optional[Dict[str, Any]]:
+    """Poll for the worker's atexit profile dump.
+
+    Returns the parsed snapshot dict from the freshest
+    ``profile-worker-*.json`` under ``profile_dir`` with mtime > ``since_ts``,
+    or None if nothing appears within ``timeout_s`` seconds. Polled at 200 ms
+    cadence so we don't busy-loop.
+    """
+    if not profile_dir or not os.path.isdir(profile_dir):
+        return None
+    import glob as _glob
+    pattern = os.path.join(profile_dir, "profile-worker-*.json")
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        fresh: List[tuple] = []
+        for p in _glob.glob(pattern):
+            try:
+                m = os.path.getmtime(p)
+            except OSError:
+                continue
+            if m > since_ts:
+                fresh.append((p, m))
+        if fresh:
+            fresh.sort(key=lambda kv: kv[1], reverse=True)
+            try:
+                with open(fresh[0][0]) as f:
+                    return json.load(f)
+            except (OSError, json.JSONDecodeError):
+                return None
+        time.sleep(0.2)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # CSV / JSONL writers
 # ---------------------------------------------------------------------------
 
