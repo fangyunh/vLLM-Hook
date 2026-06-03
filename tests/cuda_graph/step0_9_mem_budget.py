@@ -61,6 +61,11 @@ os.environ["PYTHONPATH"] = _THIS_DIR + os.pathsep + os.environ.get("PYTHONPATH",
 # graphs). This test installs its own worker_cls and does not need the plugin.
 # setdefault lets a user override; set before vLLM import / subprocesses.
 os.environ.setdefault("VLLM_PLUGINS", "")
+# In-process EngineCore: avoids the fork/CUDA re-init crash on a single GPU.
+# (For multi-GPU, export VLLM_ENABLE_V1_MULTIPROCESSING=1 +
+# VLLM_WORKER_MULTIPROC_METHOD=spawn.) The num_gpu_blocks accounting is
+# unaffected — baseline vs buffers still boot as separate processes here.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 _LAYER_PATTERNS = [
     re.compile(r"^model\.layers\.\d+$"),

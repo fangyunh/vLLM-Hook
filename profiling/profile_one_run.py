@@ -102,8 +102,22 @@ def _write_temp_config(base_cfg_path: Optional[str], *, row: str,
         if base_row == "probe_hidden_states":
             cfg = {"hidden_states": {"layers": layers or [], "mode": mode}}
         elif base_row == "probe_hook_qk":
+            # Realistic AttentionTracker-like density: 4 layers spread across
+            # the model × all 12 attention heads = 48 important_heads. Matches
+            # the order of magnitude of demo_attntracker.py's published
+            # important_heads list (~40 entries) and avoids the previous
+            # synthesized fallback's 1-layer / 1-head minimum, which made
+            # the R2/R3 numbers a lower bound on QK probe cost rather than
+            # a realistic measurement.
+            #
+            # Qwen2-1.5B has num_attention_heads=12 and num_hidden_layers=28;
+            # picking {3, 11, 18, 25} as target layers spans early / mid /
+            # late.
+            target_layers = layers if layers else [3, 11, 18, 25]
             cfg = {"hookq": {"hookq_mode": mode},
-                   "params": {"important_heads": [[ln, 0] for ln in (layers or [1])]}}
+                   "params": {"important_heads":
+                                  [[ln, h] for ln in target_layers
+                                           for h in range(12)]}}
         else:
             return base_cfg_path
     else:

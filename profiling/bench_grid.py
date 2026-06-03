@@ -83,15 +83,26 @@ def _plan_quick(args) -> List[Dict[str, Any]]:
     # Storage-variant overrides per row. v010 rows use the same storage
     # variants v0.1.0 actually supported in Numerical_Analysis so the
     # apples-to-apples comparison is on the same I/O path.
+    #
+    # Steer rows additionally override ``base_config`` to point at the
+    # Qwen2-1.5B steering config (with a dummy random vector). Without
+    # this, the steer worker has no steering config to apply and the R5
+    # measurement collapses to "28 hooks fire and return early" — the
+    # dispatch-overhead lower bound rather than the actual applied-steering
+    # cost (matmul + add at one layer × all tokens).
+    _QWEN2_STEER_CFG = "model_configs/activation_steer/Qwen2-1.5B-Instruct.json"
+
     overrides = {
         "baseline":                  {"storage_variant": "rpc"},
         "plugin_idle":               {"storage_variant": "rpc"},
         "probe_hook_qk":             {"storage_variant": "disk-st-async"},
         "probe_hidden_states":       {"storage_variant": "disk-st-async"},
-        "steer_hook_act":            {"storage_variant": "rpc"},
+        "steer_hook_act":            {"storage_variant": "rpc",
+                                      "base_config":     _QWEN2_STEER_CFG},
         "probe_hook_qk_v010":        {"storage_variant": "disk-st-async"},
         "probe_hidden_states_v010":  {"storage_variant": "disk-st-async"},
-        "steer_hook_act_v010":       {"storage_variant": "rpc"},
+        "steer_hook_act_v010":       {"storage_variant": "rpc",
+                                      "base_config":     _QWEN2_STEER_CFG},
     }
 
     plan: List[Dict[str, Any]] = []

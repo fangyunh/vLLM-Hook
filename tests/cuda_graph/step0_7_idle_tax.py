@@ -36,6 +36,10 @@ import torch
 # disable CUDA graphs and make the "wrapped" timings meaningless. (setdefault
 # lets a user override.) Set before vLLM is imported / before subprocesses.
 os.environ.setdefault("VLLM_PLUGINS", "")
+# Run the EngineCore in-process: avoids the fork/CUDA re-init crash and lets
+# this driver-side test wrap the in-process model. (Multi-GPU: instead export
+# VLLM_ENABLE_V1_MULTIPROCESSING=1 + VLLM_WORKER_MULTIPROC_METHOD=spawn.)
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 
 def measure(llm, prompts: List[str], n_decode: int) -> float:
@@ -69,10 +73,10 @@ def run(model: str, n_decode: int, batches: List[int], with_wrap: bool) -> dict:
     if with_wrap:
         # Inject the Step 0 wrap on every matched decoder-layer class.
         from step0_injection import (
-            install_class_wrap, register_counter_op, _get_counter
+            install_class_wrap, register_counter_op, _get_counter, find_model
         )
         register_counter_op()
-        inner = llm.llm_engine.model_executor.driver_worker.model_runner.model
+        inner = find_model(llm)
         install_class_wrap(inner)
 
         import re

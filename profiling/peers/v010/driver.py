@@ -165,14 +165,27 @@ class V010Engine:
         os.environ["VLLM_RUN_ID"]    = os.path.abspath(self._run_id_file)
         self._cfg_env_snap = _populate_env_from_config(row, config_file)
 
+        # Force vllm_hook_plugins to auto-inject the *steering* worker_extension
+        # instead of its default ProbeHiddenStatesWorker.
+        #
+        # vllm_hook_plugins registers a vllm.general_plugins entry_point that
+        # patches create_engine_config: if ``worker_extension_cls`` is falsy,
+        # it auto-fills it with the worker named by ``VLLM_HOOK_WORKER``
+        # (default: hidden_states). That auto-injected extension class is
+        # mixed into V1Worker via ``Worker.__bases__ += (extension,)``. The
+        # v010 worker classes (which we pass as ``worker_cls``) subclass
+        # V1Worker AND define ``_background_save_loop``; so do
+        # ProbeHookQKWorker and ProbeHiddenStatesWorker → method-name
+        # collision → ``AssertionError`` at engine init.
+        #
+        # SteerHookActWorker has no ``_background_save_loop`` (steering is
+        # in-place, no async save thread), so injecting it is harmless: the
+        # v010 worker_cls is what actually executes hooks via load_model().
+        self._prior_hook_worker = os.environ.get("VLLM_HOOK_WORKER")
+        os.environ["VLLM_HOOK_WORKER"] = "steer"
+
         worker_cls = V010_WORKERS[row]["worker"]
 
-        # Once vllm_hook_plugins is imported in this driver process for the
-        # earlier v0.2.0 cells, its entry_points auto-inject the v0.2.0
-        # worker_extension_cls into every subsequent LLM(...) call. That
-        # collides with the v010 worker_cls on the shared ``_background_save_loop``
-        # method name (both define it). Pass an empty string to override the
-        # auto-injection — vLLM accepts "" and skips the extension layer.
         self.llm = LLM(
             model=model,
             dtype=dtype,
@@ -182,7 +195,6 @@ class V010Engine:
             enable_prefix_caching=enable_prefix_caching,
             enforce_eager=enforce_eager,
             worker_cls=worker_cls,
-            worker_extension_cls="",
         )
         self.tokenizer = self.llm.get_tokenizer()
         self.llm_engine = self.llm.llm_engine
@@ -251,6 +263,12 @@ class V010Engine:
         _restore_env(self._cfg_env_snap)
         for var in ("VLLM_HOOK_DIR", "VLLM_HOOK_FLAG", "VLLM_RUN_ID"):
             os.environ.pop(var, None)
+        # Restore the VLLM_HOOK_WORKER override so subsequent v0.2.0 cells
+        # see whatever the user originally had (almost always unset).
+        if getattr(self, "_prior_hook_worker", None) is None:
+            os.environ.pop("VLLM_HOOK_WORKER", None)
+        else:
+            os.environ["VLLM_HOOK_WORKER"] = self._prior_hook_worker
 
     def __del__(self):
         try:

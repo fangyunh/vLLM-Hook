@@ -49,6 +49,16 @@ import torch
 # so it also applies to any worker subprocess that inherits this environment.
 os.environ.setdefault("VLLM_PLUGINS", "")
 
+# Run the v1 EngineCore IN-PROCESS (no subprocess). Two reasons:
+#   (1) vLLM defaults to forking the EngineCore (VLLM_WORKER_MULTIPROC_METHOD=
+#       fork); since this parent process touches CUDA, the fork hits
+#       "Cannot re-initialize CUDA in forked subprocess". In-process avoids it.
+#   (2) This driver-install test wraps the model from the client side, so the
+#       model must live in THIS process — which in-process guarantees.
+# For multi-GPU / true cross-process validation, instead export
+# VLLM_ENABLE_V1_MULTIPROCESSING=1 and VLLM_WORKER_MULTIPROC_METHOD=spawn.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
 
 # ---------------------------------------------------------------------------
 # 1. The counter custom op — opaque, side-effecting, must survive DCE.
@@ -260,6 +270,36 @@ def realized_mode(llm) -> str:
         return "?"
 
 
+def find_model(llm):
+    """Locate the nn.Module model on an in-process LLM, across vLLM versions.
+
+    v0 exposed it at llm_engine.model_executor; v1 nests the executor under an
+    (possibly doubly-wrapped) engine_core. Requires the engine to run
+    in-process (VLLM_ENABLE_V1_MULTIPROCESSING=0) — otherwise the model lives
+    in a subprocess and is not reachable from here.
+    """
+    eng = getattr(llm, "llm_engine", None)
+    roots = [
+        eng,
+        getattr(eng, "engine_core", None),
+        getattr(getattr(eng, "engine_core", None), "engine_core", None),
+    ]
+    for root in roots:
+        if root is None:
+            continue
+        me = getattr(root, "model_executor", None)
+        dw = getattr(me, "driver_worker", None) if me is not None else None
+        mr = getattr(dw, "model_runner", None) if dw is not None else None
+        m = getattr(mr, "model", None) if mr is not None else None
+        if m is not None and hasattr(m, "named_modules"):
+            return m
+    raise RuntimeError(
+        "could not locate the model on the LLM (engine internals differ on this "
+        "vLLM version, or the engine is not in-process). Set "
+        "VLLM_ENABLE_V1_MULTIPROCESSING=0, or use step0_8_plugin_install.py "
+        "(worker_cls + collective_rpc), which does not reach into engine internals.")
+
+
 def run_test(
     model: str,
     num_decode_tokens: int,
@@ -286,9 +326,9 @@ def run_test(
     # CAVEAT: vLLM v1 may run a profile_run before LLM() returns. If so,
     # this wrap is too late and Step 0 will report "counter fired only at
     # warmup." That diagnostic itself is the signal — the wrap needs to
-    # move into a worker_extension_cls's load_model override. See the
-    # README for the production install path.
-    inner_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    # move into a worker_cls's load_model override. step0_8_plugin_install.py
+    # is exactly that production install path.
+    inner_model = find_model(llm)
     num_classes_wrapped = install_class_wrap(inner_model)
 
     num_layers = sum(

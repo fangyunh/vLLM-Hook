@@ -87,6 +87,28 @@ python profiling/analyze/summarize.py profiling/results/storage-*.csv --output p
 - **R4 probe_hidden_states is the dominant-cost hook.** The mean +32% understates it: at the worst-case cell it's +34% gen latency and a **97 MB artifact per request**. The cost is dominated by the volume of activations being captured, not by the hook firing.
 - The relative cost is workload-dependent: at the largest cell, even the hook-loaded rows are within ~6% of baseline. The plug-in tax amortises into the much larger generation cost.
 
+<details>
+<summary><strong>⚠ Capture-coverage caveat for the run that produced these numbers</strong></summary>
+
+The numbers in the table above came from a quick run where `--base-config` was not passed. With that synthesized-fallback configuration:
+
+| Row | What was actually captured |
+|---|---|
+| R4 `probe_hidden_states` | ✅ All 28 layers, mode honoured. Matches `Numerical_Analysis/`'s setup. Real measurement. |
+| R2 `probe_hook_qk:last_token` | ⚠ Only **1 layer × 1 head** (`important_heads=[[1, 0]]`), much smaller than typical AttentionTracker workloads (40+ heads). |
+| R3 `probe_hook_qk:all_tokens` | ⚠ Same — 1 layer × 1 head. |
+| R5 `steer_hook_act` | ⚠⚠ Hooks were installed on all 28 layers and fired, but **no steering vector was applied** — the closure returned early on every fire because no steering config existed. R5's +5.2% is the *dispatch overhead* of empty steering hooks, not the cost of applied steering. |
+
+A subsequent patch (2026-06-03) addresses all three:
+
+1. Authored `model_configs/activation_steer/Qwen2-1.5B-Instruct.json` + `steering_vectors/qwen2_dummy.pt` (random fp16, seed 0) — used by R5 only to exercise the `add_vector` matmul path. The direction is meaningless; we measure cost, not steering quality.
+2. `bench_grid._plan_quick` now overrides `base_config` for steer rows to point at that config, so the worker loads a real steering vector and the hook actually steers (1 layer × all tokens, as the worker is designed to).
+3. `_write_temp_config`'s QK fallback now emits `important_heads = [[ln, h] for ln in {3, 11, 18, 25} for h in range(12)]` = **48 important_heads** (4 layers × 12 heads), matching the order of magnitude of `demo_attntracker.py`'s published list.
+
+The next paired-run (`STAGES="quick" INCLUDE_V010=1 bash submit_all.sh`) will produce updated R2/R3/R5 numbers that reflect realistic captures, and those will replace the table above in the following revision of this report.
+
+</details>
+
 ### 3.2 Memory footprint per row
 
 ![Memory footprint](plots/02_memory_footprint.png)

@@ -53,7 +53,7 @@ Recommended dev model: **`Qwen/Qwen2-1.5B-Instruct`** (small, fast, **ungated**,
 standard `model.layers.<i>` decoder). All scripts default to it. Override with
 `--model <repo>` (Python) or `MODEL=<repo>` (LSF wrappers).
 
-> **Two environment facts these scripts rely on (and handle for you):**
+> **Three environment facts these scripts rely on (and handle for you):**
 > 1. **The vllm-hook plugin forces `enforce_eager=True`** (`_hook_plugin.py`),
 >    which would disable CUDA graphs. The scripts set `VLLM_PLUGINS=""` so the
 >    plugin does **not** load — they register their own op / install their own
@@ -63,6 +63,13 @@ standard `model.layers.<i>` decoder). All scripts default to it. Override with
 >    `compilation_config={"cudagraph_mode": ...}` and the **realized** mode is
 >    printed at boot (`realized cudagraph_mode = ...`) — check that line to be
 >    sure the requested mode actually took.
+> 3. **vLLM forks the EngineCore by default** (`VLLM_WORKER_MULTIPROC_METHOD=fork`),
+>    which crashes with *"Cannot re-initialize CUDA in forked subprocess"* once
+>    the parent has touched CUDA — and a subprocess engine also hides the model
+>    from the driver-install tests. The scripts set
+>    `VLLM_ENABLE_V1_MULTIPROCESSING=0` (engine in-process). For multi-GPU /
+>    true cross-process validation, export `VLLM_ENABLE_V1_MULTIPROCESSING=1`
+>    **and** `VLLM_WORKER_MULTIPROC_METHOD=spawn` instead.
 
 ---
 

@@ -62,6 +62,11 @@ os.environ["PYTHONPATH"] = _THIS_DIR + os.pathsep + os.environ.get("PYTHONPATH",
 # CUDA graphs). This test installs its own worker_cls; it does not need the
 # plugin. setdefault lets a user override; set before vLLM import / subprocesses.
 os.environ.setdefault("VLLM_PLUGINS", "")
+# In-process EngineCore: avoids the fork/CUDA re-init crash on a single GPU.
+# worker_cls.load_model still runs and collective_rpc still works in-process, so
+# the install path is exercised. For TRUE cross-process / multi-GPU validation,
+# export VLLM_ENABLE_V1_MULTIPROCESSING=1 and VLLM_WORKER_MULTIPROC_METHOD=spawn.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 
 # ---------------------------------------------------------------------------
