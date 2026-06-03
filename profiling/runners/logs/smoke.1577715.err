@@ -1,0 +1,16 @@
+/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[vllm-hook profiler] wrote /tmp/vllm_hook_profile_smoke_probe/profile-driver-1524829-1.json
+/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+(EngineCore pid=1525638) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=1525638) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:20<00:00, 20.72s/it]
+(EngineCore pid=1525638) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:20<00:00, 20.72s/it]
+(EngineCore pid=1525638) 
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 41.33it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  2.90it/s, est. speed input: 14.52 toks/s, output: 29.03 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  2.90it/s, est. speed input: 14.52 toks/s, output: 29.03 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  2.90it/s, est. speed input: 14.52 toks/s, output: 29.03 toks/s]
+(EngineCore pid=1525638) [vllm-hook profiler] wrote /dev/shm/vllm_hook_profile_yunhuafang_1577715/profile-driver-1525638-1.json
+[rank0]:[W602 14:58:28.947737423 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[vllm-hook profiler] wrote /dev/shm/vllm_hook_profile_yunhuafang_1577715/profile-driver-1525314-1.json

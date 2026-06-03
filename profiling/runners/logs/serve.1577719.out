@@ -1,0 +1,128 @@
+[serve] model=Qwen/Qwen2-1.5B-Instruct  workers=baseline,qk,hidden_states  out=profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1577719.csv
+[serve] launching: vllm serve Qwen/Qwen2-1.5B-Instruct --port 8770 --max-model-len 2048 --enforce-eager
+[serve] waiting for /health at http://127.0.0.1:8770/v1
+[bench] worker=baseline concurrency=1 duration=30.0s
+        completed=57 req/s=1.89 p99=1.696s
+[bench] worker=baseline concurrency=2 duration=30.0s
+        completed=122 req/s=4.02 p99=0.530s
+[bench] worker=baseline concurrency=4 duration=30.0s
+        completed=228 req/s=7.52 p99=0.539s
+[bench] worker=baseline concurrency=8 duration=30.0s
+        completed=452 req/s=14.87 p99=0.556s
+[serve] launching: vllm serve Qwen/Qwen2-1.5B-Instruct --port 8770 --max-model-len 2048 --enforce-eager
+[serve] waiting for /health at http://127.0.0.1:8770/v1
+[bench] worker=qk concurrency=1 duration=30.0s
+        completed=28 req/s=0.90 p99=1.992s
+[bench] worker=qk concurrency=2 duration=30.0s
+        completed=51 req/s=1.65 p99=1.532s
+[bench] worker=qk concurrency=4 duration=30.0s
+        completed=75 req/s=2.38 p99=2.538s
+[bench] worker=qk concurrency=8 duration=30.0s
+        completed=91 req/s=2.83 p99=4.557s
+[serve] launching: vllm serve Qwen/Qwen2-1.5B-Instruct --port 8770 --max-model-len 2048 --enforce-eager
+[serve] waiting for /health at http://127.0.0.1:8770/v1
+[bench] worker=hidden_states concurrency=1 duration=30.0s
+        completed=35 req/s=1.16 p99=1.725s
+[bench] worker=hidden_states concurrency=2 duration=30.0s
+        completed=62 req/s=2.04 p99=1.121s
+[bench] worker=hidden_states concurrency=4 duration=30.0s
+        completed=104 req/s=3.34 p99=1.536s
+[bench] worker=hidden_states concurrency=8 duration=30.0s
+        completed=121 req/s=3.90 p99=2.910s
+[bench] CSV → profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1577719.csv
+
+[serve] CSV → profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1577719.csv
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@cccxc525>
+Subject: Job 1577719: <vllm_hook_prof_serve> in cluster <CCCFP15Cluster> Done
+
+Job <vllm_hook_prof_serve> was submitted from host <ccc-login3> by user <yunhuafang> in cluster <CCCFP15Cluster> at Tue Jun  2 14:54:39 2026
+Job was executed on host(s) <8*cccxc525>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Tue Jun  2 15:10:03 2026
+</u/yunhuafang> was used as the home directory.
+</u/yunhuafang/vLLM-Hook> was used as the working directory.
+Started at Tue Jun  2 15:10:03 2026
+Terminated at Tue Jun  2 15:18:20 2026
+Results reported at Tue Jun  2 15:18:20 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_serve.sh — serve-path throughput. Reproduces the plan.html §7 asyncio jam.
+#
+# Auto-launches `vllm serve` per worker, drives k concurrent clients,
+# tears down. Watch gen_lat_p99 collapse as concurrency rises for the
+# QK+all_tokens worker.
+#
+# Submit:  bsub < profiling/runners/run_serve.sh
+# Logs:    profiling/runners/logs/serve.<JOBID>.{out,err}
+#
+# Override:
+#   WORKERS="baseline qk hidden_states" CONCURRENCY="1 2 4 8" DURATION=30 \
+#       bsub < profiling/runners/run_serve.sh
+#BSUB -J vllm_hook_prof_serve
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 8
+#BSUB -R "rusage[ngpus=1,mem=48GB] span[hosts=1]"
+#BSUB -W 3:00
+#BSUB -o profiling/runners/logs/serve.%J.out
+#BSUB -e profiling/runners/logs/serve.%J.err
+
+set -euo pipefail
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p profiling/runners/logs profiling/results
+
+MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+WORKERS="${WORKERS:-baseline qk hidden_states}"
+CONCURRENCY="${CONCURRENCY:-1 2 4 8}"
+DURATION="${DURATION:-30}"
+MAX_TOKENS="${MAX_TOKENS:-64}"
+PORT="${PORT:-8770}"
+HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook_${USER:-noname}_${LSB_JOBID:-$$}}"
+PROFILE_DIR="${PROFILE_DIR:-/dev/shm/vllm_hook_profile_serve_${USER:-noname}_${LSB_JOBID:-$$}}"
+
+mkdir -p "$HOOK_DIR" "$PROFILE_DIR"
+
+export VLLM_USE_V1=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export VLLM_HOOK_PROFILE=1
+export VLLM_HOOK_PROFILE_DIR="$PROFILE_DIR"
+export VLLM_HOOK_PROFILE_MEM=1
+
+TAG="${MODEL//\//_}-${LSB_JOBID:-$(date +%Y%m%d-%H%M)}"
+OUT_CSV="profiling/results/serve-${TAG}.csv"
+
+# Comma-join WORKERS for the CLI flag (the CLI expects "a,b,c").
+WORKERS_CSV="$(echo "$WORKERS" | tr ' ' ',')"
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   756.00 sec.
+    Max Memory :                                 3 GB
+    Average Memory :                             2.38 GB
+    Total Requested Memory :                     48.00 GB
+    Delta Memory :                               45.00 GB
+    Max Swap :                                   -
+    Max Processes :                              7
+    Max Threads :                                836
+    Run time :                                   497 sec.
+    Turnaround time :                            1421 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <profiling/runners/logs/serve.1577719.err> for stderr output of this job.
+

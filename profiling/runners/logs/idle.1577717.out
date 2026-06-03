@@ -1,0 +1,236 @@
+[idle] model=Qwen/Qwen2-1.5B-Instruct  out=profiling/results/idle-Qwen_Qwen2-1.5B-Instruct-1577717.csv
+[idle_tax] === BASELINE ===
+INFO 06-02 15:01:47 [utils.py:240] non-default args: {'max_model_len': 512, 'gpu_memory_utilization': 0.4, 'disable_log_stats': True, 'enforce_eager': True, 'model': 'Qwen/Qwen2-1.5B-Instruct'}
+WARNING 06-02 15:01:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PROFILE
+WARNING 06-02 15:01:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PROFILE_MEM
+WARNING 06-02 15:01:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+INFO 06-02 15:01:48 [model.py:568] Resolved architecture: Qwen2ForCausalLM
+INFO 06-02 15:01:48 [model.py:1697] Using max model len 512
+INFO 06-02 15:01:48 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 06-02 15:01:48 [vllm.py:886] Asynchronous scheduling is enabled.
+WARNING 06-02 15:01:48 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-02 15:01:48 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 06-02 15:01:48 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+INFO 06-02 15:01:48 [vllm.py:1135] Cudagraph is disabled under eager mode
+INFO 06-02 15:01:48 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+(EngineCore pid=1603690) INFO 06-02 15:02:09 [core.py:109] Initializing a V1 LLM engine (v0.21.0) with config: model='Qwen/Qwen2-1.5B-Instruct', speculative_config=None, tokenizer='Qwen/Qwen2-1.5B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=512, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen2-1.5B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [16384], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native']), enable_flashinfer_autotune=False, moe_backend='auto')
+(EngineCore pid=1603690) INFO 06-02 15:02:09 [worker_base.py:274] Injected <class 'vllm_hook_plugins.workers.probe_hidden_states_worker.ProbeHiddenStatesWorker'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['_background_save_loop', '_save_safetensors', 'clear_captured_states', 'flush_disk', 'get_captured_states', 'install_hooks']
+(EngineCore pid=1603690) INFO 06-02 15:02:09 [parallel_state.py:1410] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://9.47.194.3:47397 backend=nccl
+(EngineCore pid=1603690) INFO 06-02 15:02:09 [parallel_state.py:1723] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=1603690) INFO 06-02 15:02:11 [topk_topp_sampler.py:45] Using FlashInfer for top-p & top-k sampling.
+(EngineCore pid=1603690) INFO 06-02 15:02:11 [gpu_model_runner.py:4857] Starting to load model Qwen/Qwen2-1.5B-Instruct...
+(EngineCore pid=1603690) INFO 06-02 15:02:12 [cuda.py:372] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=1603690) INFO 06-02 15:02:12 [flash_attn.py:641] Using FlashAttention version 3
+(EngineCore pid=1603690) INFO 06-02 15:02:12 [weight_utils.py:663] No model.safetensors.index.json found in remote.
+(EngineCore pid=1603690) INFO 06-02 15:02:12 [weight_utils.py:938] Filesystem type for checkpoints: GPFS. Checkpoint size: 2.88 GiB. Available RAM: 2850.22 GiB.
+(EngineCore pid=1603690) INFO 06-02 15:02:12 [weight_utils.py:961] Auto-prefetch is disabled because the filesystem (GPFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=1603690) INFO 06-02 15:02:17 [default_loader.py:397] Loading weights took 4.65 seconds
+(EngineCore pid=1603690) INFO 06-02 15:02:18 [gpu_model_runner.py:4959] Model loading took 2.98 GiB memory and 5.538714 seconds
+(EngineCore pid=1603690) INFO 06-02 15:02:19 [gpu_worker.py:462] Available KV cache memory: 26.28 GiB
+(EngineCore pid=1603690) INFO 06-02 15:02:19 [kv_cache_utils.py:1710] GPU KV cache size: 983,984 tokens
+(EngineCore pid=1603690) INFO 06-02 15:02:19 [kv_cache_utils.py:1711] Maximum concurrency for 512 tokens per request: 1921.84x
+(EngineCore pid=1603690) INFO 06-02 15:02:19 [kernel_warmup.py:44] Skipping FlashInfer autotune because it is disabled.
+(EngineCore pid=1603690) INFO 06-02 15:02:19 [jit_monitor.py:54] Kernel JIT monitor activated — Triton JIT compilations during inference will be logged as warnings.
+(EngineCore pid=1603690) INFO 06-02 15:02:19 [core.py:306] init engine (profile, create kv cache, warmup model) took 1.56 s
+(EngineCore pid=1603690) INFO 06-02 15:02:21 [vllm.py:886] Asynchronous scheduling is enabled.
+(EngineCore pid=1603690) WARNING 06-02 15:02:21 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1603690) WARNING 06-02 15:02:21 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1603690) INFO 06-02 15:02:21 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+(EngineCore pid=1603690) INFO 06-02 15:02:21 [vllm.py:1135] Cudagraph is disabled under eager mode
+(EngineCore pid=1603690) INFO 06-02 15:02:21 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+(EngineCore pid=1603690) WARNING 06-02 15:02:21 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1603690) INFO 06-02 15:02:35 [core.py:1242] Shutdown initiated (timeout=0)
+(EngineCore pid=1603690) INFO 06-02 15:02:35 [core.py:1265] Shutdown complete
+  bs=  1    8978.7 us/tok  (   111.4 tok/s)
+  bs=  8    1131.1 us/tok  (   884.1 tok/s)
+  bs= 64     155.1 us/tok  (  6449.5 tok/s)
+[idle_tax] === PLUGIN LOADED (no hook install) ===
+INFO 06-02 15:02:37 [utils.py:240] non-default args: {'max_model_len': 512, 'gpu_memory_utilization': 0.4, 'disable_log_stats': True, 'enforce_eager': True, 'model': 'Qwen/Qwen2-1.5B-Instruct'}
+WARNING 06-02 15:02:37 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PROFILE
+WARNING 06-02 15:02:37 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PROFILE_MEM
+WARNING 06-02 15:02:37 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+INFO 06-02 15:02:37 [model.py:568] Resolved architecture: Qwen2ForCausalLM
+INFO 06-02 15:02:37 [model.py:1697] Using max model len 512
+WARNING 06-02 15:02:37 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-02 15:02:37 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 06-02 15:02:37 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+INFO 06-02 15:02:37 [vllm.py:1135] Cudagraph is disabled under eager mode
+(EngineCore pid=1604637) INFO 06-02 15:02:54 [core.py:109] Initializing a V1 LLM engine (v0.21.0) with config: model='Qwen/Qwen2-1.5B-Instruct', speculative_config=None, tokenizer='Qwen/Qwen2-1.5B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=512, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen2-1.5B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [16384], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native']), enable_flashinfer_autotune=False, moe_backend='auto')
+(EngineCore pid=1604637) INFO 06-02 15:02:55 [worker_base.py:274] Injected <class 'vllm_hook_plugins.workers.probe_hidden_states_worker.ProbeHiddenStatesWorker'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['_background_save_loop', '_save_safetensors', 'clear_captured_states', 'flush_disk', 'get_captured_states', 'install_hooks']
+(EngineCore pid=1604637) INFO 06-02 15:02:55 [parallel_state.py:1410] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://9.47.194.3:33537 backend=nccl
+(EngineCore pid=1604637) INFO 06-02 15:02:55 [parallel_state.py:1723] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=1604637) INFO 06-02 15:02:56 [topk_topp_sampler.py:45] Using FlashInfer for top-p & top-k sampling.
+(EngineCore pid=1604637) INFO 06-02 15:02:56 [gpu_model_runner.py:4857] Starting to load model Qwen/Qwen2-1.5B-Instruct...
+(EngineCore pid=1604637) INFO 06-02 15:02:57 [cuda.py:372] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=1604637) INFO 06-02 15:02:57 [flash_attn.py:641] Using FlashAttention version 3
+(EngineCore pid=1604637) INFO 06-02 15:02:58 [weight_utils.py:663] No model.safetensors.index.json found in remote.
+(EngineCore pid=1604637) INFO 06-02 15:02:58 [weight_utils.py:938] Filesystem type for checkpoints: GPFS. Checkpoint size: 2.88 GiB. Available RAM: 2851.48 GiB.
+(EngineCore pid=1604637) INFO 06-02 15:02:58 [weight_utils.py:961] Auto-prefetch is disabled because the filesystem (GPFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=1604637) INFO 06-02 15:03:02 [default_loader.py:397] Loading weights took 4.03 seconds
+(EngineCore pid=1604637) INFO 06-02 15:03:02 [gpu_model_runner.py:4959] Model loading took 2.98 GiB memory and 4.797451 seconds
+(EngineCore pid=1604637) INFO 06-02 15:03:03 [gpu_worker.py:462] Available KV cache memory: 26.28 GiB
+(EngineCore pid=1604637) INFO 06-02 15:03:03 [kv_cache_utils.py:1710] GPU KV cache size: 983,984 tokens
+(EngineCore pid=1604637) INFO 06-02 15:03:03 [kv_cache_utils.py:1711] Maximum concurrency for 512 tokens per request: 1921.84x
+(EngineCore pid=1604637) INFO 06-02 15:03:03 [kernel_warmup.py:44] Skipping FlashInfer autotune because it is disabled.
+(EngineCore pid=1604637) INFO 06-02 15:03:03 [jit_monitor.py:54] Kernel JIT monitor activated — Triton JIT compilations during inference will be logged as warnings.
+(EngineCore pid=1604637) INFO 06-02 15:03:03 [core.py:306] init engine (profile, create kv cache, warmup model) took 1.38 s
+(EngineCore pid=1604637) INFO 06-02 15:03:05 [vllm.py:886] Asynchronous scheduling is enabled.
+(EngineCore pid=1604637) WARNING 06-02 15:03:05 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1604637) WARNING 06-02 15:03:05 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1604637) INFO 06-02 15:03:05 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+(EngineCore pid=1604637) INFO 06-02 15:03:05 [vllm.py:1135] Cudagraph is disabled under eager mode
+(EngineCore pid=1604637) INFO 06-02 15:03:05 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+(EngineCore pid=1604637) WARNING 06-02 15:03:05 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1604637) INFO 06-02 15:03:20 [core.py:1242] Shutdown initiated (timeout=0)
+(EngineCore pid=1604637) INFO 06-02 15:03:20 [core.py:1265] Shutdown complete
+  bs=  1    8975.2 us/tok
+  bs=  8    1161.1 us/tok
+  bs= 64     158.6 us/tok
+[idle_tax] === HOOKS INSTALLED, REQUEST OPTS OUT ===
+INFO 06-02 15:03:21 [utils.py:240] non-default args: {'dtype': torch.float16, 'max_model_len': 512, 'gpu_memory_utilization': 0.4, 'disable_log_stats': True, 'enforce_eager': True, 'worker_extension_cls': 'vllm_hook_plugins.workers.probe_hidden_states_worker.ProbeHiddenStatesWorker', 'model': 'Qwen/Qwen2-1.5B-Instruct'}
+WARNING 06-02 15:03:21 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PROFILE
+WARNING 06-02 15:03:21 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PROFILE_MEM
+WARNING 06-02 15:03:21 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+INFO 06-02 15:03:22 [model.py:568] Resolved architecture: Qwen2ForCausalLM
+WARNING 06-02 15:03:22 [model.py:2035] Casting torch.bfloat16 to torch.float16.
+INFO 06-02 15:03:22 [model.py:1697] Using max model len 512
+WARNING 06-02 15:03:22 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-02 15:03:22 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 06-02 15:03:22 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+INFO 06-02 15:03:22 [vllm.py:1135] Cudagraph is disabled under eager mode
+(EngineCore pid=1605314) INFO 06-02 15:03:39 [core.py:109] Initializing a V1 LLM engine (v0.21.0) with config: model='Qwen/Qwen2-1.5B-Instruct', speculative_config=None, tokenizer='Qwen/Qwen2-1.5B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=512, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen2-1.5B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [16384], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native']), enable_flashinfer_autotune=False, moe_backend='auto')
+(EngineCore pid=1605314) INFO 06-02 15:03:39 [worker_base.py:274] Injected <class 'vllm_hook_plugins.workers.probe_hidden_states_worker.ProbeHiddenStatesWorker'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['_background_save_loop', '_save_safetensors', 'clear_captured_states', 'flush_disk', 'get_captured_states', 'install_hooks']
+(EngineCore pid=1605314) INFO 06-02 15:03:39 [parallel_state.py:1410] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://9.47.194.3:57931 backend=nccl
+(EngineCore pid=1605314) INFO 06-02 15:03:39 [parallel_state.py:1723] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=1605314) INFO 06-02 15:03:41 [topk_topp_sampler.py:45] Using FlashInfer for top-p & top-k sampling.
+(EngineCore pid=1605314) INFO 06-02 15:03:41 [gpu_model_runner.py:4857] Starting to load model Qwen/Qwen2-1.5B-Instruct...
+(EngineCore pid=1605314) INFO 06-02 15:03:41 [cuda.py:372] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=1605314) INFO 06-02 15:03:41 [flash_attn.py:641] Using FlashAttention version 3
+(EngineCore pid=1605314) INFO 06-02 15:03:42 [weight_utils.py:663] No model.safetensors.index.json found in remote.
+(EngineCore pid=1605314) INFO 06-02 15:03:42 [weight_utils.py:938] Filesystem type for checkpoints: GPFS. Checkpoint size: 2.88 GiB. Available RAM: 2850.63 GiB.
+(EngineCore pid=1605314) INFO 06-02 15:03:42 [weight_utils.py:961] Auto-prefetch is disabled because the filesystem (GPFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=1605314) INFO 06-02 15:03:56 [default_loader.py:397] Loading weights took 13.64 seconds
+(EngineCore pid=1605314) INFO 06-02 15:03:56 [gpu_model_runner.py:4959] Model loading took 2.98 GiB memory and 14.408764 seconds
+(EngineCore pid=1605314) INFO 06-02 15:03:58 [gpu_worker.py:462] Available KV cache memory: 26.28 GiB
+(EngineCore pid=1605314) INFO 06-02 15:03:58 [kv_cache_utils.py:1710] GPU KV cache size: 983,984 tokens
+(EngineCore pid=1605314) INFO 06-02 15:03:58 [kv_cache_utils.py:1711] Maximum concurrency for 512 tokens per request: 1921.84x
+(EngineCore pid=1605314) INFO 06-02 15:03:58 [kernel_warmup.py:44] Skipping FlashInfer autotune because it is disabled.
+(EngineCore pid=1605314) INFO 06-02 15:03:58 [jit_monitor.py:54] Kernel JIT monitor activated — Triton JIT compilations during inference will be logged as warnings.
+(EngineCore pid=1605314) INFO 06-02 15:03:58 [core.py:306] init engine (profile, create kv cache, warmup model) took 1.46 s
+(EngineCore pid=1605314) INFO 06-02 15:03:59 [vllm.py:886] Asynchronous scheduling is enabled.
+(EngineCore pid=1605314) WARNING 06-02 15:03:59 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1605314) WARNING 06-02 15:03:59 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1605314) INFO 06-02 15:03:59 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'], fused_add_rms_norm=['vllm_c', 'native'])
+(EngineCore pid=1605314) INFO 06-02 15:03:59 [vllm.py:1135] Cudagraph is disabled under eager mode
+(EngineCore pid=1605314) INFO 06-02 15:03:59 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+(EngineCore pid=1605314) Installed 28 hidden-state hooks on layers: ['model.layers.0', 'model.layers.1', 'model.layers.2', 'model.layers.3', 'model.layers.4', 'model.layers.5', 'model.layers.6', 'model.layers.7', 'model.layers.8', 'model.layers.9', 'model.layers.10', 'model.layers.11', 'model.layers.12', 'model.layers.13', 'model.layers.14', 'model.layers.15', 'model.layers.16', 'model.layers.17', 'model.layers.18', 'model.layers.19', 'model.layers.20', 'model.layers.21', 'model.layers.22', 'model.layers.23', 'model.layers.24', 'model.layers.25', 'model.layers.26', 'model.layers.27']
+(EngineCore pid=1605314) WARNING 06-02 15:03:59 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1605314) INFO 06-02 15:04:14 [core.py:1242] Shutdown initiated (timeout=0)
+(EngineCore pid=1605314) INFO 06-02 15:04:14 [core.py:1265] Shutdown complete
+  bs=  1    9299.1 us/tok
+  bs=  8    1185.1 us/tok
+  bs= 64     162.0 us/tok
+
+==============================================================================
+    bs  baseline_us    plugin_us     hooks_us plugin_pct  hooks_pct
+     1     8978.7us     8975.2us     9299.1us    -0.04%    +3.57%  PASS
+     8     1131.1us     1161.1us     1185.1us    +2.66%    +4.78%  PASS
+    64      155.1us      158.6us      162.0us    +2.29%    +4.51%  PASS
+==============================================================================
+[idle_tax] CSV → profiling/results/idle-Qwen_Qwen2-1.5B-Instruct-1577717.csv
+
+[idle] CSV → profiling/results/idle-Qwen_Qwen2-1.5B-Instruct-1577717.csv
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@cccxc703>
+Subject: Job 1577717: <vllm_hook_prof_idle> in cluster <CCCFP15Cluster> Done
+
+Job <vllm_hook_prof_idle> was submitted from host <ccc-login3> by user <yunhuafang> in cluster <CCCFP15Cluster> at Tue Jun  2 14:54:39 2026
+Job was executed on host(s) <4*cccxc703>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Tue Jun  2 15:01:16 2026
+</u/yunhuafang> was used as the home directory.
+</u/yunhuafang/vLLM-Hook> was used as the working directory.
+Started at Tue Jun  2 15:01:16 2026
+Terminated at Tue Jun  2 15:04:17 2026
+Results reported at Tue Jun  2 15:04:17 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_idle_tax.sh — measure the per-layer launch cost of the plugin.
+# Three configurations × {1, 8, 64} batch sizes, ~15 min total.
+#
+# PASS criterion (from cuda_graph_plan.html):
+#   per-layer overhead ≤ 3 µs, aggregate idle overhead ≤ 5% at bs=1.
+# Non-zero exit => FAIL on at least one cell.
+#
+# Submit:  bsub < profiling/runners/run_idle_tax.sh
+# Logs:    profiling/runners/logs/idle.<JOBID>.{out,err}
+#BSUB -J vllm_hook_prof_idle
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB] span[hosts=1]"
+#BSUB -W 1:00
+#BSUB -o profiling/runners/logs/idle.%J.out
+#BSUB -e profiling/runners/logs/idle.%J.err
+
+set -euo pipefail
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p profiling/runners/logs profiling/results
+
+MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+BATCHES="${BATCHES:-1 8 64}"
+N_DECODE="${N_DECODE:-128}"
+HOOK_DIR="${HOOK_DIR:-/dev/shm/vllm_hook_${USER:-noname}_${LSB_JOBID:-$$}}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.4}"
+
+mkdir -p "$HOOK_DIR"
+
+export VLLM_USE_V1=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+# Memory profiler so idle/loaded/hooks comparisons include RSS + CUDA stats.
+export VLLM_HOOK_PROFILE=1
+export VLLM_HOOK_PROFILE_MEM=1
+
+TAG="${MODEL//\//_}-${LSB_JOBID:-$(date +%Y%m%d-%H%M)}"
+OUT_CSV="profiling/results/idle-${TAG}.csv"
+
+echo "[idle] model=$MODEL  out=$OUT_CSV"
+python -u profiling/bench_idle_tax.py \
+    --model              "$MODEL" \
+    --num-decode-tokens  "$N_DECODE" \
+    --batches            $BATCHES \
+    --hook-dir           "$HOOK_DIR" \
+    --gpu-mem-util       "$GPU_MEM_UTIL" \
+    --output             "$OUT_CSV"
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   549.00 sec.
+    Max Memory :                                 3 GB
+    Average Memory :                             1.71 GB
+    Total Requested Memory :                     32.00 GB
+    Delta Memory :                               29.00 GB
+    Max Swap :                                   -
+    Max Processes :                              7
+    Max Threads :                                780
+    Run time :                                   181 sec.
+    Turnaround time :                            578 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <profiling/runners/logs/idle.1577717.err> for stderr output of this job.
+
