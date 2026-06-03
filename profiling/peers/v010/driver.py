@@ -167,6 +167,12 @@ class V010Engine:
 
         worker_cls = V010_WORKERS[row]["worker"]
 
+        # Once vllm_hook_plugins is imported in this driver process for the
+        # earlier v0.2.0 cells, its entry_points auto-inject the v0.2.0
+        # worker_extension_cls into every subsequent LLM(...) call. That
+        # collides with the v010 worker_cls on the shared ``_background_save_loop``
+        # method name (both define it). Pass an empty string to override the
+        # auto-injection — vLLM accepts "" and skips the extension layer.
         self.llm = LLM(
             model=model,
             dtype=dtype,
@@ -176,6 +182,7 @@ class V010Engine:
             enable_prefix_caching=enable_prefix_caching,
             enforce_eager=enforce_eager,
             worker_cls=worker_cls,
+            worker_extension_cls="",
         )
         self.tokenizer = self.llm.get_tokenizer()
         self.llm_engine = self.llm.llm_engine
