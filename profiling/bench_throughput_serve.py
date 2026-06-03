@@ -59,6 +59,37 @@ def _wait_for_health(base_url: str, timeout_s: float = 120.0) -> bool:
     return False
 
 
+def _port_in_use(port: int) -> bool:
+    """Return True if a process is bound to ``port`` on localhost."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        result = s.connect_ex(("127.0.0.1", port)) == 0
+    except OSError:
+        result = False
+    finally:
+        s.close()
+    return result
+
+
+def _wait_for_port_free(port: int, timeout_s: float = 60.0) -> bool:
+    """Poll until ``port`` is free or the deadline passes.
+
+    Critical between workers: ``vllm serve`` spawns an ``EngineCore``
+    subprocess that holds the GPU and the TCP port. ``proc.terminate()``
+    sends SIGTERM to the parent only — the child often outlives it for a
+    handful of seconds. Without this wait, the next launch can find the
+    port still bound and time-out at /health.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not _port_in_use(port):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def _start_server(model: str, port: int, worker: str,
                   hook_dir: str, log_path: str,
                   enforce_eager: bool, max_model_len: int) -> subprocess.Popen:
@@ -75,8 +106,41 @@ def _start_server(model: str, port: int, worker: str,
         cmd.append("--enforce-eager")
     print(f"[serve] launching: {' '.join(cmd)}")
     log_f = open(log_path, "w")
-    proc = subprocess.Popen(cmd, env=env, stdout=log_f, stderr=subprocess.STDOUT)
+    # ``start_new_session=True`` puts the child + every grandchild into a
+    # fresh process group. That lets us later kill the whole group with one
+    # signal so the EngineCore subprocess can't outlive ``vllm serve``.
+    proc = subprocess.Popen(cmd, env=env, stdout=log_f, stderr=subprocess.STDOUT,
+                            start_new_session=True)
     return proc
+
+
+def _stop_server(proc: subprocess.Popen, port: int) -> None:
+    """Terminate the server's entire process group, then wait for the port
+    to fully release before returning. Safe to call on a None / dead proc."""
+    if proc is None:
+        return
+    import signal
+    try:
+        # SIGTERM to the whole process group (negative PID).
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    # Belt-and-suspenders: even after wait() returns, the OS may hold the
+    # TCP port in TIME_WAIT for a few seconds. Poll until it's free.
+    if not _wait_for_port_free(port, timeout_s=60.0):
+        print(f"[serve] WARN: port {port} still bound after teardown — "
+              f"next worker may fail health-check")
 
 
 # ---------------------------------------------------------------------------
@@ -226,16 +290,27 @@ def main() -> int:
         base_url = args.base_url
         if base_url is None:
             log_path = os.path.join("/tmp", f"vllm-serve-{worker}.log")
+            # Defensive: previous worker's process group + port should have
+            # been released by _stop_server in the finally block of the prior
+            # iteration. If something still holds the port here, the next
+            # launch's bind will silently fail; wait it out before launching.
+            if _port_in_use(args.port):
+                print(f"[serve] port {args.port} still bound from previous run "
+                      f"— waiting for release...")
+                _wait_for_port_free(args.port, timeout_s=60.0)
+
             owned_proc = _start_server(args.model, args.port, worker,
                                        args.hook_dir, log_path,
                                        enforce_eager=(not args.no_enforce_eager),
                                        max_model_len=args.max_model_len)
             base_url = f"http://127.0.0.1:{args.port}/v1"
-            print(f"[serve] waiting for /health at {base_url}")
-            if not _wait_for_health(base_url, timeout_s=300):
+            print(f"[serve] waiting for /health at {base_url} (timeout 600 s)")
+            # 600 s gives slow workers (probe_hidden_states installs 28 hooks
+            # and copies KV cache state, on GPFS this can take several minutes
+            # cold) enough time to come up. Previously 300 s caught HS short.
+            if not _wait_for_health(base_url, timeout_s=600):
                 print(f"[serve] HEALTH TIMEOUT (worker={worker}) — see {log_path}")
-                if owned_proc:
-                    owned_proc.terminate()
+                _stop_server(owned_proc, args.port)
                 continue
 
         try:
@@ -253,12 +328,9 @@ def main() -> int:
                 if args.output:
                     save_csv(all_rows, args.output)
         finally:
-            if owned_proc is not None:
-                owned_proc.terminate()
-                try:
-                    owned_proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    owned_proc.kill()
+            # Process-group kill + port-release wait, so the next worker
+            # in the loop sees a clean GPU and an unbound port.
+            _stop_server(owned_proc, args.port)
 
     if args.output:
         save_csv(all_rows, args.output)
