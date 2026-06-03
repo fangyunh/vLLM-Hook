@@ -1,0 +1,80 @@
+[step0] model=google/gemma-3-4b-it  mode=PIECEWISE  num_decode_tokens=64
+[step0] booting vLLM with model=google/gemma-3-4b-it mode=PIECEWISE
+INFO 06-03 12:24:39 [utils.py:240] non-default args: {'max_model_len': 512, 'gpu_memory_utilization': 0.85, 'disable_log_stats': True, 'model': 'google/gemma-3-4b-it'}
+WARNING 06-03 12:24:39 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-03 12:24:39 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_CUDAGRAPH_MODE
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@cccxc570>
+Subject: Job 1599411: <vllm_hook_step0> in cluster <CCCFP15Cluster> Exited
+
+Job <vllm_hook_step0> was submitted from host <ccc-login4> by user <yunhuafang> in cluster <CCCFP15Cluster> at Wed Jun  3 12:23:09 2026
+Job was executed on host(s) <4*cccxc570>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Wed Jun  3 12:22:36 2026
+</u/yunhuafang> was used as the home directory.
+</u/yunhuafang/vLLM-Hook> was used as the working directory.
+Started at Wed Jun  3 12:22:36 2026
+Terminated at Wed Jun  3 12:24:42 2026
+Results reported at Wed Jun  3 12:24:42 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_step0_injection.sh — Gate 1 (decisive kill-switch) of the CUDA-graph plan.
+# Settles C1 (opacity) + C4 (class-level wrap survival).
+#
+# Submit:  bsub < tests/cuda_graph/run_step0_injection.sh
+# Logs:    tests/cuda_graph/logs/step0.<JOBID>.{out,err}
+#BSUB -J vllm_hook_step0
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/step0.%J.out
+#BSUB -e tests/cuda_graph/logs/step0.%J.err
+
+set -euo pipefail
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+# Gemma-3-4B is gated on HF; ensure auth is configured on this node.
+# (Run `huggingface-cli login` once on the server, or set HF_TOKEN.)
+
+MODEL="${MODEL:-google/gemma-3-4b-it}"
+NUM_TOKENS="${NUM_TOKENS:-64}"
+MODE="${MODE:-PIECEWISE}"
+
+mkdir -p tests/cuda_graph/logs
+
+echo "[step0] model=$MODEL  mode=$MODE  num_decode_tokens=$NUM_TOKENS"
+python tests/cuda_graph/step0_injection.py \
+    --model "$MODEL" \
+    --num-decode-tokens "$NUM_TOKENS" \
+    --cudagraph-mode "$MODE"
+
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   17.03 sec.
+    Max Memory :                                 1 GB
+    Average Memory :                             0.20 GB
+    Total Requested Memory :                     32.00 GB
+    Delta Memory :                               31.00 GB
+    Max Swap :                                   -
+    Max Processes :                              6
+    Max Threads :                                196
+    Run time :                                   126 sec.
+    Turnaround time :                            93 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/step0.1599411.err> for stderr output of this job.
+
