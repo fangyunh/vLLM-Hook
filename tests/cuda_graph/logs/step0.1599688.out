@@ -1,0 +1,117 @@
+[step0] model=Qwen/Qwen2-1.5B-Instruct  mode=PIECEWISE  num_decode_tokens=64
+[step0] booting vLLM with model=Qwen/Qwen2-1.5B-Instruct mode=PIECEWISE
+INFO 06-03 12:45:46 [utils.py:240] non-default args: {'max_model_len': 512, 'gpu_memory_utilization': 0.85, 'disable_log_stats': True, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.PIECEWISE: 1>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}, 'model': 'Qwen/Qwen2-1.5B-Instruct'}
+INFO 06-03 12:45:47 [model.py:568] Resolved architecture: Qwen2ForCausalLM
+INFO 06-03 12:45:47 [model.py:1697] Using max model len 512
+INFO 06-03 12:45:47 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 06-03 12:45:47 [vllm.py:886] Asynchronous scheduling is enabled.
+INFO 06-03 12:45:47 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(EngineCore pid=67828) INFO 06-03 12:45:51 [core.py:109] Initializing a V1 LLM engine (v0.21.0) with config: model='Qwen/Qwen2-1.5B-Instruct', speculative_config=None, tokenizer='Qwen/Qwen2-1.5B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=512, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen2-1.5B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'ir_enable_torch_wrap': True, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.PIECEWISE: 1>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 512, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=False, moe_backend='auto')
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140] EngineCore failed to start.
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140] Traceback (most recent call last):
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 1114, in run_engine_core
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 880, in __init__
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     super().__init__(
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 118, in __init__
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     self.model_executor = executor_class(vllm_config)
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/executor/abstract.py", line 109, in __init__
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     self._init_executor()
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/executor/uniproc_executor.py", line 60, in _init_executor
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     self.driver_worker.init_device()
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/worker/worker_base.py", line 317, in init_device
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     self.worker.init_device()  # type: ignore
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/worker/gpu_worker.py", line 275, in init_device
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     torch.accelerator.set_device_index(self.device)
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/accelerator/__init__.py", line 191, in set_device_index
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     torch._C._accelerator_setDeviceIndex(device_index)
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py", line 466, in _lazy_init
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140]     raise RuntimeError(
+(EngineCore pid=67828) ERROR 06-03 12:45:53 [core.py:1140] RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing, you must use the 'spawn' start method
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@cccxc558>
+Subject: Job 1599688: <vllm_hook_step0> in cluster <CCCFP15Cluster> Exited
+
+Job <vllm_hook_step0> was submitted from host <ccc-login4> by user <yunhuafang> in cluster <CCCFP15Cluster> at Wed Jun  3 12:45:02 2026
+Job was executed on host(s) <4*cccxc558>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Wed Jun  3 12:44:29 2026
+</u/yunhuafang> was used as the home directory.
+</u/yunhuafang/vLLM-Hook> was used as the working directory.
+Started at Wed Jun  3 12:44:29 2026
+Terminated at Wed Jun  3 12:45:55 2026
+Results reported at Wed Jun  3 12:45:55 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_step0_injection.sh — Gate 1 (decisive kill-switch) of the CUDA-graph plan.
+# Settles C1 (opacity) + C4 (class-level wrap survival).
+#
+# Submit:  bsub < tests/cuda_graph/run_step0_injection.sh
+# Logs:    tests/cuda_graph/logs/step0.<JOBID>.{out,err}
+#BSUB -J vllm_hook_step0
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/step0.%J.out
+#BSUB -e tests/cuda_graph/logs/step0.%J.err
+
+set -euo pipefail
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+# Default model is ungated (no HF auth needed). Override with MODEL=<repo> for a
+# gated model — run `huggingface-cli login` first if so.
+
+MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+NUM_TOKENS="${NUM_TOKENS:-64}"
+MODE="${MODE:-PIECEWISE}"
+
+mkdir -p tests/cuda_graph/logs
+
+echo "[step0] model=$MODEL  mode=$MODE  num_decode_tokens=$NUM_TOKENS"
+python tests/cuda_graph/step0_injection.py \
+    --model "$MODEL" \
+    --num-decode-tokens "$NUM_TOKENS" \
+    --cudagraph-mode "$MODE"
+
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   30.11 sec.
+    Max Memory :                                 1 GB
+    Average Memory :                             0.36 GB
+    Total Requested Memory :                     32.00 GB
+    Delta Memory :                               31.00 GB
+    Max Swap :                                   -
+    Max Processes :                              7
+    Max Threads :                                196
+    Run time :                                   86 sec.
+    Turnaround time :                            53 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/step0.1599688.err> for stderr output of this job.
+

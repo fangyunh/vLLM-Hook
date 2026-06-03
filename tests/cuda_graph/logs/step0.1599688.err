@@ -1,0 +1,80 @@
+/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+(EngineCore pid=67828) Process EngineCore:
+(EngineCore pid=67828) Traceback (most recent call last):
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
+(EngineCore pid=67828)     self.run()
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/multiprocessing/process.py", line 108, in run
+(EngineCore pid=67828)     self._target(*self._args, **self._kwargs)
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 1144, in run_engine_core
+(EngineCore pid=67828)     raise e
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 1114, in run_engine_core
+(EngineCore pid=67828)     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+(EngineCore pid=67828)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=67828)     return func(*args, **kwargs)
+(EngineCore pid=67828)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 880, in __init__
+(EngineCore pid=67828)     super().__init__(
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 118, in __init__
+(EngineCore pid=67828)     self.model_executor = executor_class(vllm_config)
+(EngineCore pid=67828)                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=67828)     return func(*args, **kwargs)
+(EngineCore pid=67828)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/executor/abstract.py", line 109, in __init__
+(EngineCore pid=67828)     self._init_executor()
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/executor/uniproc_executor.py", line 60, in _init_executor
+(EngineCore pid=67828)     self.driver_worker.init_device()
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/worker/worker_base.py", line 317, in init_device
+(EngineCore pid=67828)     self.worker.init_device()  # type: ignore
+(EngineCore pid=67828)     ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=67828)     return func(*args, **kwargs)
+(EngineCore pid=67828)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/worker/gpu_worker.py", line 275, in init_device
+(EngineCore pid=67828)     torch.accelerator.set_device_index(self.device)
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/accelerator/__init__.py", line 191, in set_device_index
+(EngineCore pid=67828)     torch._C._accelerator_setDeviceIndex(device_index)
+(EngineCore pid=67828)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py", line 466, in _lazy_init
+(EngineCore pid=67828)     raise RuntimeError(
+(EngineCore pid=67828) RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing, you must use the 'spawn' start method
+Traceback (most recent call last):
+  File "/u/yunhuafang/vLLM-Hook/tests/cuda_graph/step0_injection.py", line 429, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/u/yunhuafang/vLLM-Hook/tests/cuda_graph/step0_injection.py", line 417, in main
+    rc = run_test(
+         ^^^^^^^^^
+  File "/u/yunhuafang/vLLM-Hook/tests/cuda_graph/step0_injection.py", line 278, in run_test
+    llm = boot_llm(model, cudagraph_mode)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/u/yunhuafang/vLLM-Hook/tests/cuda_graph/step0_injection.py", line 245, in boot_llm
+    return LLM(compilation_config={"cudagraph_mode": cudagraph_mode}, **base)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/entrypoints/llm.py", line 381, in __init__
+    self.llm_engine = LLMEngine.from_engine_args(
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/llm_engine.py", line 170, in from_engine_args
+    return cls(
+           ^^^^
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/llm_engine.py", line 104, in __init__
+    self.engine_core = EngineCoreClient.make_client(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core_client.py", line 101, in make_client
+    return SyncMPClient(vllm_config, executor_class, log_stats)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core_client.py", line 723, in __init__
+    super().__init__(
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core_client.py", line 535, in __init__
+    with launch_core_engines(
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/contextlib.py", line 144, in __exit__
+    next(self.gen)
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/utils.py", line 1128, in launch_core_engines
+    wait_for_engine_startup(
+  File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/utils.py", line 1187, in wait_for_engine_startup
+    raise RuntimeError(
+RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
