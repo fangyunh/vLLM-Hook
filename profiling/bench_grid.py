@@ -44,26 +44,38 @@ from profile_one_run import ROW_TO_WORKER, run_cell  # noqa: E402
 
 
 def _plan_quick(args) -> List[Dict[str, Any]]:
-    """The R0..R5 six-row deliverable from plan.html §7, plus optional
-    v0.1.0 peer rows (R6..R8) when ``args.include_v010`` is set.
+    """The R0..R6 seven-row headline. v0.2.0 hooks each get both modes as a
+    row so QK and HS are directly comparable.
 
-    R6..R8 use the vendored v0.1.0 workers under profiling/peers/v010/ for
-    a direct hook-vs-hook comparison. Prefix caching is forced off inside
-    the v010 engine, since v0.1.0 has no prefix-recon path.
+    Plus optional v0.1.0 peer rows when ``args.include_v010`` is set. The
+    v010 rows use the vendored v0.1.0 workers under profiling/peers/v010/
+    for a direct hook-vs-hook comparison. Prefix caching is forced off
+    inside the v010 engine, since v0.1.0 has no prefix-recon path.
+
+    Row map:
+        R0  baseline                        (rpc / last_token, but mode unused)
+        R1  plugin_idle                     (rpc / last_token, mode unused)
+        R2  probe_hook_qk        last_token
+        R3  probe_hook_qk        all_tokens
+        R4  probe_hidden_states  last_token   ← new in 2026-06-03 patch;
+        R5  probe_hidden_states  all_tokens     symmetric with QK above
+        R6  steer_hook_act       (in-place, mode unused)
     """
-    # (row, mode) pairs in display order.
+    # (row, mode) pairs in display order — R0..R6.
     rows: List[tuple] = [
         ("baseline",            "last_token"),
         ("plugin_idle",         "last_token"),
         ("probe_hook_qk",       "last_token"),
         ("probe_hook_qk",       "all_tokens"),
-        ("probe_hidden_states", "all_tokens"),
+        ("probe_hidden_states", "last_token"),   # R4 — typical-use HS
+        ("probe_hidden_states", "all_tokens"),   # R5 — worst-case HS
         ("steer_hook_act",      "last_token"),
     ]
     if getattr(args, "include_v010", False):
         rows.extend([
             ("probe_hook_qk_v010",       "last_token"),
             ("probe_hook_qk_v010",       "all_tokens"),
+            ("probe_hidden_states_v010", "last_token"),
             ("probe_hidden_states_v010", "all_tokens"),
             ("steer_hook_act_v010",      "last_token"),
         ])

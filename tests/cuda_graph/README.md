@@ -10,18 +10,32 @@ worked anyway.
 
 ```
 tests/cuda_graph/
-├── step0_injection.py       ← decisive: does the wrap land in the captured graph?
+├── step0_injection.py       ← decisive: does the wrap land in the captured graph? (driver install)
 ├── step0_5_mode_matrix.py   ← which CUDAGraphModes survive the wrap?
-├── step0_7_idle_tax.py      ← does the per-layer launch cost fit the throughput budget?
+├── step0_7_idle_tax.py      ← LATENCY: does the per-layer launch cost fit the budget? (+ VRAM readout)
+├── step0_8_plugin_install.py← production path: install in the WORKER at load_model, read back via collective_rpc
+├── step0_9_mem_budget.py    ← MEMORY: static-buffer VRAM footprint, KV-cache impact, churn boundedness
 ├── run_step0_injection.sh        ← LSF batch wrapper (1 GPU)
 ├── run_step0_5_mode_matrix.sh    ← LSF batch wrapper (1 GPU)
 ├── run_step0_7_idle_tax.sh       ← LSF batch wrapper (1 GPU)
-└── submit_all_gates.sh           ← login-node helper; chains the three with bsub -w
+├── run_step0_8_plugin_install.sh ← LSF batch wrapper (1 GPU)
+├── run_step0_9_mem_budget.sh     ← LSF batch wrapper (1 GPU)
+└── submit_all_gates.sh           ← login-node helper; chains them with bsub -w
 ```
 
-All three run on a **single GPU host** with vLLM ≥ 0.7 installed. They
+All run on a **single GPU host** with vLLM ≥ 0.7 installed. They
 do not modify any project source; they import vLLM and the plugin only
 when invoked.
+
+**Two injection tests, on purpose.** `step0_injection.py` installs the wrap
+from the *driver* (after `LLM()` returns) — the simplest way to answer "can a
+class-level wrap be captured at all," but single-process only and not the
+production path. `step0_8_plugin_install.py` installs inside the *worker* at
+`load_model` via a `worker_cls` subclass — the same process and timing the
+plugin's monkey-patch of `Worker.load_model` uses, so it survives the
+driver→worker boundary and is representative of `vllm serve` / multi-GPU.
+Run step0 first (cheaper, isolates the mechanism); step0_8 confirms the real
+install path.
 
 ---
 
@@ -156,20 +170,127 @@ Failure pivots:
   → expected (overhead scales linearly with depth); the plan ships
   with a documented bs=1-on-large-models caveat.
 
+> **Guard added.** `step0_7` now reads the counter after the wrapped run and
+> **FAILs if it is 0** — that would mean the op never fired, so the "wrapped"
+> timings measured an *absent* op (a false PASS). Confirm injection with
+> `step0_injection.py` / `step0_8_plugin_install.py` first.
+>
+> **VRAM readout added.** `step0_7` also prints device-global VRAM used
+> (baseline vs wrapped, via `torch.cuda.mem_get_info()`). This is a *sanity*
+> readout only — baseline and wrapped boot sequentially in one process and the
+> counter wrap allocates ~nothing, so it is **not** an isolated buffer cost.
+> The authoritative memory numbers come from **Step 0.9**.
+
 ---
 
-## What passing all three gates proves
+## Step 0.8 — Production-path injection (worker install) — ½ day
+
+Only after Step 0 PASSes. Runs in parallel with Step 0.5 / 0.7.
+
+```bash
+python tests/cuda_graph/step0_8_plugin_install.py \
+    --model <model-you-can-access> \
+    --num-decode-tokens 64 \
+    --cudagraph-mode PIECEWISE
+    # add --async to also exercise the AsyncLLM (serve-shape) engine
+```
+
+What it does:
+
+1. Defines a `worker_cls` **subclass** whose `load_model` registers the counter
+   op and installs the class-level wrap — **inside the worker process**, after
+   the model is built and before warm-up/capture.
+2. Boots vLLM with `worker_cls=step0_8_plugin_install.InjectingWorker`,
+   `enforce_eager=False`.
+3. Resets the per-worker counter via `collective_rpc("reset_counter")`,
+   greedy-decodes, then reads it back via `collective_rpc("read_counter")`
+   (counts summed across workers, so TP/PP are handled).
+4. Applies the same PASS/FAIL verdict as Step 0.
+
+Why this exists, on top of Step 0: Step 0 installs from the *driver*, which
+only works single-process and is **not** the production path. Step 0.8 installs
+in the *worker* at `load_model` — the same process and timing the plan's
+monkey-patch of `Worker.load_model` uses — and reads results back over
+`collective_rpc`, exactly like the real egress path. A `worker_cls` subclass is
+used because a `worker_extension_cls` mixin cannot override `load_model` (vLLM
+asserts no attribute conflicts and appends the extension to `Worker.__bases__`);
+the subclass installs at the identical point, so it answers the same question
+the production monkey-patch would. Because `worker_cls` is resolved by qualified
+name in the worker subprocess, a PASS here is representative of multi-GPU and of
+`vllm serve` / AsyncLLM (which use the same machinery).
+
+Decisions:
+
+- **PASS** → the production install path lands the op in the captured graph;
+  the install-mechanism risk is retired (not just the driver-harness one).
+- **prefill-only FAIL** → the wrap landed after the decode graph was captured;
+  move the install earlier (the monkey-patch must run before
+  `compile_or_warm_up_model`).
+- **`--async` inconclusive** → the async harness is version-sensitive; the
+  offline `worker_cls` result already validates the worker-process path.
+
+---
+
+## Step 0.9 — Memory budget (VRAM + KV-cache impact) — ½ day
+
+Only after Step 0 PASSes. Runs in parallel with Step 0.5 / 0.7 / 0.8.
+
+```bash
+python tests/cuda_graph/step0_9_mem_budget.py \
+    --model <model-you-can-access> --policy last_token
+# stress the worst case (per-step / all-tokens sizing):
+python tests/cuda_graph/step0_9_mem_budget.py --model <model> --policy all_tokens
+```
+
+Step 0.7 measures the *latency* idle tax. Step 0.9 measures the *other* cost —
+**VRAM** — which is usually the bigger throughput risk at scale: static capture
+buffers occupy memory that would otherwise be KV cache, so fewer concurrent
+requests fit. The step0_7 counter op allocates ~nothing, so it cannot measure
+this; Step 0.9 allocates **real-shaped** per-layer buffers instead.
+
+What it does (baseline and buffers boot in **separate processes** so the KV
+numbers are apples-to-apples):
+
+1. Allocates per-layer static buffers (capture rank only) sized by policy —
+   `last_token`: `(max_num_seqs+1) × hidden`; `all_tokens`:
+   `max_num_batched_tokens × hidden` — **before** vLLM profiles the KV cache,
+   so their effect on `num_gpu_blocks` is real.
+2. Reports **measured vs predicted** static footprint and buffers as a % of
+   device VRAM.
+3. Reports **KV-block retention** = `num_gpu_blocks(buffers) / num_gpu_blocks(baseline)`.
+4. **Churns** many short requests, samples worker `memory_allocated`, and
+   reports drift — confirming the footprint stays flat (no growth/leak).
+
+Pass criteria (defaults; override on the CLI):
+
+- KV-block retention ≥ `--min-kv-retention` (default **0.90**)
+- churn drift ≤ `--max-drift-pct` (default **2.0%**) over `--churn-requests` (200)
+
+Failure pivots: switch to `last_token` sizing, narrow the activatable set via
+`VLLM_HOOK_ACTIVE_LAYERS`, or accept fewer concurrent requests and document it.
+
+**Scope honesty:** this validates the *static-buffer* design (footprint, KV
+impact, boundedness). It does **not** validate the not-yet-built per-request
+capture egress / row-allocator (free-on-completion, no stale-row reads) — that
+is a Step-2 correctness item once the real ops exist.
+
+---
+
+## What passing all gates proves
 
 | Gate | Settles | If green |
 |---|---|---|
-| Step 0 | C1, C4 | Class-level wrap lands in the captured graph and replays |
+| Step 0 | C1, C4 (driver install) | Class-level wrap lands in the captured graph and replays |
 | Step 0.5 | C5 per-mode | Which `CUDAGraphMode`s the plan ships under |
-| Step 0.7 | Idle-tax floor | Per-layer launch cost is within the throughput budget |
+| Step 0.7 | Idle-tax floor (latency) | Per-layer launch cost is within the throughput budget |
+| Step 0.8 | C4 via the production install path | Worker-side install at `load_model` lands in the graph; valid for serve/multi-GPU |
+| Step 0.9 | Memory budget | Static-buffer VRAM + KV-cache impact within budget; footprint bounded under churn |
 
-Greens on all three means the *mechanism is feasible and competitive*
-on the dev model. The remaining validation (Steps 1-7 in the plan) is
-correctness and family generality work — substantial, but no longer
-load-bearing on a single unproven claim.
+Greens on all of them mean the *mechanism is feasible and competitive*
+on the dev model — in **both** time and memory — **and** the real install
+path (not just the driver harness) works. The remaining validation (Steps
+1-7 in the plan) is correctness and family generality work — substantial,
+but no longer load-bearing on a single unproven claim.
 
 A red on any one gate is the cheapest possible signal that the plan
 needs to be revised (or that the goal needs to be re-stated as
@@ -195,19 +316,20 @@ bpeek <NNNN>                                  # live stdout
 tail -f tests/cuda_graph/logs/step0.<NNNN>.out  # after it lands on a node
 ```
 
-The same command form works for `run_step0_5_mode_matrix.sh` and
-`run_step0_7_idle_tax.sh`. Run order: **step0 first**; step0_5 and
-step0_7 can run in either order (or in parallel) once step0 is green.
+The same command form works for `run_step0_5_mode_matrix.sh`,
+`run_step0_7_idle_tax.sh`, `run_step0_8_plugin_install.sh` and
+`run_step0_9_mem_budget.sh`. Run order: **step0 first**; step0_5, step0_7,
+step0_8 and step0_9 can run in any order (or in parallel) once step0 is green.
 
-### Submit all three with dependencies
+### Submit all gates with dependencies
 
 ```bash
 bash tests/cuda_graph/submit_all_gates.sh
 ```
 
-This is a login-node helper (don't bsub it — it just calls `bsub` three
-times itself). It submits step0 first, captures its job ID, and queues
-step0_5 and step0_7 each with `-w "done(<step0-id>)"` so they only run
+This is a login-node helper (don't bsub it — it just calls `bsub` itself).
+It submits step0 first, captures its job ID, and queues
+step0_5, step0_7, step0_8 and step0_9 each with `-w "done(<step0-id>)"` so they only run
 if step0 finishes cleanly. If step0 fails, LSF leaves the dependents
 pending — `bkill` them and diagnose step0 first.
 

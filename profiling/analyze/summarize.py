@@ -58,18 +58,17 @@ def _table(rows: List[List[str]], headers: List[str]) -> str:
     return "\n".join(lines)
 
 
-def _section_six_rows(rows: List[Dict[str, Any]]) -> Optional[str]:
-    """The §7 deliverable. Filter to one rep per row label."""
-    target = ["baseline", "plugin_idle", "probe_hook_qk", "probe_hook_qk",
-              "probe_hidden_states", "steer_hook_act"]
+def _section_seven_rows(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """The seven-row headline. Both `probe_hook_qk` and `probe_hidden_states`
+    get one row per mode so the modes are directly comparable."""
+    mode_split = {"probe_hook_qk", "probe_hidden_states"}
     pick: Dict[str, Dict[str, Any]] = {}
-    # Distinguish R2 (last_token) from R3 (all_tokens) for probe_hook_qk
     for r in rows:
-        row = r.get("row")
-        if row not in target:
+        row = r.get("row") or ""
+        if not row or row.endswith("_v010"):
             continue
-        if row == "probe_hook_qk":
-            key = f"probe_hook_qk:{r.get('mode')}"
+        if row in mode_split:
+            key = f"{row}:{r.get('mode')}"
         else:
             key = row
         if key in pick:
@@ -83,8 +82,9 @@ def _section_six_rows(rows: List[Dict[str, Any]]) -> Optional[str]:
         ("R1", "plugin_idle"),
         ("R2", "probe_hook_qk:last_token"),
         ("R3", "probe_hook_qk:all_tokens"),
-        ("R4", "probe_hidden_states"),
-        ("R5", "steer_hook_act"),
+        ("R4", "probe_hidden_states:last_token"),
+        ("R5", "probe_hidden_states:all_tokens"),
+        ("R6", "steer_hook_act"),
     ]
     headers = ["#", "row", "gen_lat_ms", "prefill_tok/s", "decode_tok/s",
                "peak_gpu_mb", "artifact_kb"]
@@ -102,7 +102,11 @@ def _section_six_rows(rows: List[Dict[str, Any]]) -> Optional[str]:
             _f(r.get("peak_gpu_mb")),
             _f(r.get("artifact_kb_mean")),
         ])
-    return "## R0–R5 six-row summary (plan.html §7)\n\n" + _table(body, headers)
+    return "## R0–R6 seven-row summary\n\n" + _table(body, headers)
+
+
+# Back-compat alias so any importer using the old name still works.
+_section_six_rows = _section_seven_rows
 
 
 def _section_memory(rows: List[Dict[str, Any]]) -> Optional[str]:
@@ -138,7 +142,7 @@ def _section_memory(rows: List[Dict[str, Any]]) -> Optional[str]:
         rname = r.get("row")
         if rname is None:
             continue
-        key = f"{rname}:{r.get('mode')}" if rname == "probe_hook_qk" else rname
+        key = f"{rname}:{r.get('mode')}" if rname in ("probe_hook_qk", "probe_hidden_states") else rname
         prev = buckets.get(key)
         if prev is None:
             buckets[key] = r
@@ -155,7 +159,8 @@ def _section_memory(rows: List[Dict[str, Any]]) -> Optional[str]:
 
     order = ["baseline", "plugin_idle",
              "probe_hook_qk:last_token", "probe_hook_qk:all_tokens",
-             "probe_hidden_states", "steer_hook_act"]
+             "probe_hidden_states:last_token", "probe_hidden_states:all_tokens",
+             "steer_hook_act"]
     headers = ["row", "worker cuda_alloc_mb",
                "worker cuda_reserved_mb", "worker host_rss_mb",
                "driver host_rss_mb", "nvml peak (mb)"]

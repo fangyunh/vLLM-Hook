@@ -59,32 +59,47 @@ def _latest(pattern: str, results_dir: str) -> Optional[str]:
 # Consistent colour palette across every figure so the reader doesn't have
 # to relearn which colour means which row from one plot to the next.
 ROW_COLORS = {
-    "baseline":                  "#6c757d",  # neutral grey — the ceiling
-    "plugin_idle":               "#0d6efd",  # blue — the import tax
-    "probe_hook_qk:last_token":  "#fd7e14",  # orange — minimal QK
-    "probe_hook_qk:all_tokens":  "#e8590c",  # darker orange — full QK
-    "probe_hidden_states":       "#dc3545",  # red — the heavy worker
-    "steer_hook_act":            "#198754",  # green — in-place, near-free
+    "baseline":                      "#6c757d",  # neutral grey — the ceiling
+    "plugin_idle":                   "#0d6efd",  # blue — the import tax
+    "probe_hook_qk:last_token":      "#fd7e14",  # orange — minimal QK
+    "probe_hook_qk:all_tokens":      "#e8590c",  # darker orange — full QK
+    "probe_hidden_states:last_token":"#f06595",  # pink — typical-use HS
+    "probe_hidden_states:all_tokens":"#dc3545",  # red — heavy HS
+    "steer_hook_act":                "#198754",  # green — in-place, near-free
     # v0.1.0 peer rows when --include-v010 was on
-    "probe_hook_qk_v010":        "#ffc107",
-    "probe_hidden_states_v010":  "#f06595",
-    "steer_hook_act_v010":       "#20c997",
+    "probe_hook_qk_v010:last_token":     "#ffc107",
+    "probe_hook_qk_v010:all_tokens":     "#ffb703",
+    "probe_hidden_states_v010:last_token":"#fb6f92",
+    "probe_hidden_states_v010:all_tokens":"#e63946",
+    "steer_hook_act_v010":               "#20c997",
 }
 
 ROW_DISPLAY = {
-    "baseline":                  "R0 baseline",
-    "plugin_idle":               "R1 plugin_idle",
-    "probe_hook_qk:last_token":  "R2 QK · last_token",
-    "probe_hook_qk:all_tokens":  "R3 QK · all_tokens",
-    "probe_hidden_states":       "R4 hidden_states",
-    "steer_hook_act":            "R5 steer",
+    "baseline":                      "R0 baseline",
+    "plugin_idle":                   "R1 plugin_idle",
+    "probe_hook_qk:last_token":      "R2 QK · last_token",
+    "probe_hook_qk:all_tokens":      "R3 QK · all_tokens",
+    "probe_hidden_states:last_token":"R4 HS · last_token",
+    "probe_hidden_states:all_tokens":"R5 HS · all_tokens",
+    "steer_hook_act":                "R6 steer",
 }
+
+# Canonical row order — used by every figure that iterates rows.
+ROW_ORDER = [
+    "baseline", "plugin_idle",
+    "probe_hook_qk:last_token", "probe_hook_qk:all_tokens",
+    "probe_hidden_states:last_token", "probe_hidden_states:all_tokens",
+    "steer_hook_act",
+]
 
 
 def _row_key(r: Dict[str, Any]) -> str:
+    """Workers that have multiple modes get a ``<row>:<mode>`` key so each
+    mode shows up as its own bar / line."""
     row = r.get("row") or ""
-    if row == "probe_hook_qk":
-        return f"probe_hook_qk:{r.get('mode')}"
+    if row in ("probe_hook_qk", "probe_hidden_states",
+               "probe_hook_qk_v010", "probe_hidden_states_v010"):
+        return f"{row}:{r.get('mode')}"
     return row
 
 
@@ -109,9 +124,7 @@ def plot_r0_r5_latency(quick_csv: str, out_path: str) -> None:
                         int(_f(r['max_tokens']) or 0))
                        for r in rows if _f(r.get("gen_lat_mean")) is not None})
 
-    row_order = ["baseline", "plugin_idle",
-                 "probe_hook_qk:last_token", "probe_hook_qk:all_tokens",
-                 "probe_hidden_states", "steer_hook_act"]
+    row_order = list(ROW_ORDER)
     # bar group positions
     n_groups = len(workloads)
     n_rows   = len(row_order)
@@ -180,10 +193,7 @@ def plot_memory_footprint(quick_csv: str, out_path: str) -> None:
         if key not in buckets or get_worker_cuda(r) > get_worker_cuda(buckets[key]):
             buckets[key] = r
 
-    order = ["baseline", "plugin_idle",
-             "probe_hook_qk:last_token", "probe_hook_qk:all_tokens",
-             "probe_hidden_states", "steer_hook_act"]
-    keys = [k for k in order if k in buckets]
+    keys = [k for k in ROW_ORDER if k in buckets]
     if not keys:
         print(f"[plots] no rows match expected labels — skipping memory"); return
 
@@ -398,19 +408,16 @@ def plot_stage_breakdown(quick_csv: str, out_path: str) -> None:
 
     # One bar per row at the largest workload cell (highest gen_lat) so the
     # stages have measurable values.
-    order = ["baseline", "plugin_idle",
-             "probe_hook_qk:last_token", "probe_hook_qk:all_tokens",
-             "probe_hidden_states", "steer_hook_act"]
     buckets: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         key = _row_key(r)
-        if key not in order:
+        if key not in ROW_ORDER:
             continue
         if key not in buckets or (_f(r.get("gen_lat_mean")) or 0) > \
                                  (_f(buckets[key].get("gen_lat_mean")) or 0):
             buckets[key] = r
 
-    keys = [k for k in order if k in buckets]
+    keys = [k for k in ROW_ORDER if k in buckets]
     if not keys:
         print(f"[plots] no stage data — skipping breakdown"); return
 

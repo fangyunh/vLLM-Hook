@@ -92,7 +92,19 @@ def run(model: str, n_decode: int, batches: List[int], with_wrap: bool) -> dict:
               f"{s_per_tok * 1e6:8.1f} us/token "
               f"({1.0 / s_per_tok:8.1f} tok/s)")
 
-    return {"per_bs": out, "num_layers": num_layers}
+    # Device-global VRAM in use after the run (model + KV cache + any wrap
+    # buffers). mem_get_info() reflects the whole device, so it is valid even
+    # when the worker runs in a separate process.
+    # NOTE: baseline and wrapped boot sequentially in ONE process here, so this
+    # is a SANITY readout, not an apples-to-apples buffer cost. The counter wrap
+    # also allocates ~nothing. For the authoritative memory gate — separate
+    # processes, real-shaped buffers, KV-block accounting — use
+    # step0_9_mem_budget.py.
+    torch.cuda.synchronize()
+    _free, _total = torch.cuda.mem_get_info()
+    used_gib = (_total - _free) / 2**30
+
+    return {"per_bs": out, "num_layers": num_layers, "used_gib": used_gib}
 
 
 def main() -> int:
@@ -111,6 +123,34 @@ def main() -> int:
 
     print("\n[step0.7] === WRAPPED (counter op on every layer, idle) ===")
     wrap = run(args.model, args.num_decode_tokens, args.batches, with_wrap=True)
+
+    # Guard: confirm the wrap actually executed. If the counter is still 0,
+    # the op never ran (class-level wrap bypassed, or installed too late), so
+    # the "wrapped" timings above measure an ABSENT op, not an idle one — the
+    # idle-tax numbers would be meaningless and could read as a false PASS.
+    # Settle injection first: step0_injection.py (driver install) or
+    # step0_8_plugin_install.py (worker-process install).
+    from step0_injection import _get_counter
+    torch.cuda.synchronize()
+    fired = int(_get_counter().item())
+    if fired == 0:
+        print("\n[step0.7] FAIL — counter is 0 after the wrapped run.")
+        print("          The op never executed, so the 'wrapped' timings do NOT")
+        print("          include it; the idle-tax numbers are meaningless. Run")
+        print("          step0_injection.py / step0_8_plugin_install.py first to")
+        print("          confirm injection lands in the captured graph.")
+        return 1
+    print(f"[step0.7] wrap fired {fired} times during the wrapped run "
+          f"(op confirmed present).")
+
+    b_used = base.get("used_gib")
+    w_used = wrap.get("used_gib")
+    if b_used is not None and w_used is not None:
+        print(f"[step0.7] VRAM (device-global, post-run): baseline {b_used:.2f} GiB "
+              f" wrapped {w_used:.2f} GiB  delta {w_used - b_used:+.2f} GiB")
+        print("          (sanity readout — sequential single-process boots + a "
+              "zero-byte counter wrap;")
+        print("           use step0_9_mem_budget.py for the authoritative memory gate.)")
 
     num_layers = wrap["num_layers"]
     print("\n" + "=" * 70)
