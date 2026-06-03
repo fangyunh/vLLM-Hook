@@ -30,6 +30,10 @@ from typing import Any, Dict, List, Optional
 # Ensure profiling/_common.py is importable and the plugin package is on sys.path
 PROFILING_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT  = PROFILING_DIR.parent
+# PROJECT_ROOT must be on sys.path so ``from profiling.peers.v010 ...``
+# resolves for the v0.1.0 peer rows (which need to be imported as
+# fully-qualified package paths to avoid clobbering vllm_hook_plugins).
+sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "vllm_hook_plugins"))
 sys.path.insert(0, str(PROFILING_DIR))
 
