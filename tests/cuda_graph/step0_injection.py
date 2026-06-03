@@ -35,10 +35,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import Any
 
 import torch
+
+# Disable general plugins for the feasibility gates: the installed vllm-hook
+# plugin patches create_engine_config to force enforce_eager=True, which would
+# turn CUDA graphs OFF and silently break every gate. We register our own op and
+# install our own wrap, so we do not need the plugin. setdefault lets a user
+# re-enable it by exporting VLLM_PLUGINS explicitly. Set before vLLM is imported
+# so it also applies to any worker subprocess that inherits this environment.
+os.environ.setdefault("VLLM_PLUGINS", "")
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +226,40 @@ def inspect_captured_graph_for_op() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def boot_llm(model: str, cudagraph_mode: str, **extra):
+    """Boot an LLM with CUDA graphs ON and the requested graph mode, robustly
+    across vLLM versions.
+
+    The graph mode is set via `compilation_config={"cudagraph_mode": ...}` —
+    the env var VLLM_CUDAGRAPH_MODE is NOT a real vLLM variable (it logs as
+    "unknown" and is ignored). `enforce_eager=False` keeps graphs enabled. If
+    the installed vLLM predates the `cudagraph_mode` field, we fall back to the
+    engine default and say so.
+    """
+    os.environ.setdefault("VLLM_PLUGINS", "")  # keep the eager-forcing plugin out
+    from vllm import LLM
+    base = dict(model=model, enforce_eager=False, max_model_len=512,
+                gpu_memory_utilization=0.85)
+    base.update(extra)
+    try:
+        return LLM(compilation_config={"cudagraph_mode": cudagraph_mode}, **base)
+    except Exception as e:  # noqa: BLE001 - only retry the compile-config case
+        if "compilation" in str(e).lower() or "cudagraph" in str(e).lower():
+            print(f"[boot] compilation_config not supported ({e}); booting without "
+                  f"an explicit graph mode (engine default).", flush=True)
+            return LLM(**base)
+        raise
+
+
+def realized_mode(llm) -> str:
+    """Read back the cudagraph mode the engine actually built with."""
+    try:
+        cc = llm.llm_engine.vllm_config.compilation_config
+        return str(getattr(cc, "cudagraph_mode", "?"))
+    except Exception:
+        return "?"
+
+
 def run_test(
     model: str,
     num_decode_tokens: int,
@@ -229,30 +272,11 @@ def run_test(
     # the dispatcher when Dynamo traces the wrapped forward.
     register_counter_op()
 
-    from vllm import LLM, SamplingParams
-
-    # Force the targeted cudagraph mode. PIECEWISE is the safest default;
-    # Step 0.5 sweeps the other modes.
-    llm_kwargs = dict(
-        model=model,
-        enforce_eager=False,  # MUST be False — CUDA graphs are the whole point
-        max_model_len=512,
-        gpu_memory_utilization=0.85,
-    )
-
-    # The compilation_config knob lives in vllm.config; the env var below
-    # is the supported override in vLLM v1.
-    import os
-    os.environ["VLLM_USE_V1"] = "1"
-    # CUDAGraphMode is mapped by vLLM; valid strings: NONE, PIECEWISE,
-    # FULL_DECODE_ONLY, FULL_AND_PIECEWISE. Set via compilation_config.
-    # Some vLLM versions accept this via env var; if yours does not, set
-    # it on EngineArgs explicitly. This script assumes the env override
-    # works on the target vLLM version (>= 0.7).
-    os.environ["VLLM_CUDAGRAPH_MODE"] = cudagraph_mode
+    from vllm import SamplingParams
 
     print(f"[step0] booting vLLM with model={model} mode={cudagraph_mode}", flush=True)
-    llm = LLM(**llm_kwargs)
+    llm = boot_llm(model, cudagraph_mode)
+    print(f"[step0] realized cudagraph_mode = {realized_mode(llm)}", flush=True)
 
     # Install the wrap AFTER load but BEFORE any forward — this is where
     # the plan installs hooks (in worker.load_model). Doing it here from
@@ -375,9 +399,9 @@ def run_test(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="google/gemma-3-4b-it",
-                        help="Development model — small, fast, has standard "
-                             "decoder layer.")
+    parser.add_argument("--model", default="Qwen/Qwen2-1.5B-Instruct",
+                        help="Development model — small, fast, ungated, standard "
+                             "decoder layer (model.layers.<i>).")
     parser.add_argument("--num-decode-tokens", type=int, default=64)
     parser.add_argument("--cudagraph-mode", default="PIECEWISE",
                         choices=["PIECEWISE", "FULL_DECODE_ONLY",

@@ -19,7 +19,7 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate vllm_hook_env
 cd ~/vLLM-Hook
 
-MODEL="${MODEL:-google/gemma-3-4b-it}"
+MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
 NUM_TOKENS="${NUM_TOKENS:-128}"
 BATCHES="${BATCHES:-1 8 64}"
 

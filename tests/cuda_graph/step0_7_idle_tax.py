@@ -24,12 +24,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import sys
 import time
 from typing import List
 
 import torch
+
+# Keep the vllm-hook plugin out: it forces enforce_eager=True, which would
+# disable CUDA graphs and make the "wrapped" timings meaningless. (setdefault
+# lets a user override.) Set before vLLM is imported / before subprocesses.
+os.environ.setdefault("VLLM_PLUGINS", "")
 
 
 def measure(llm, prompts: List[str], n_decode: int) -> float:
@@ -54,14 +60,10 @@ def measure(llm, prompts: List[str], n_decode: int) -> float:
 
 def run(model: str, n_decode: int, batches: List[int], with_wrap: bool) -> dict:
     """Boot vLLM (optionally with Step 0's counter wrap) and time decode."""
-    import os
-    os.environ["VLLM_USE_V1"] = "1"
-    os.environ["VLLM_CUDAGRAPH_MODE"] = "PIECEWISE"
+    from step0_injection import boot_llm, realized_mode
 
-    from vllm import LLM
-
-    llm = LLM(model=model, enforce_eager=False, max_model_len=512,
-              gpu_memory_utilization=0.85)
+    llm = boot_llm(model, "PIECEWISE")
+    print(f"[step0.7] realized cudagraph_mode = {realized_mode(llm)}", flush=True)
 
     num_layers = 0
     if with_wrap:
@@ -109,7 +111,7 @@ def run(model: str, n_decode: int, batches: List[int], with_wrap: bool) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="google/gemma-3-4b-it")
+    parser.add_argument("--model", default="Qwen/Qwen2-1.5B-Instruct")
     parser.add_argument("--num-decode-tokens", type=int, default=128)
     parser.add_argument("--batches", type=int, nargs="+", default=[1, 8, 64])
     args = parser.parse_args()

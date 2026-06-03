@@ -91,7 +91,18 @@ python profiling/analyze/summarize.py profiling/results/storage-*.csv --output p
 
 ![Memory footprint](plots/02_memory_footprint.png)
 
-Worst-case cell per row (worker process, sidecar-sourced):
+#### What's measured (three independent sources, each via a different API)
+
+| Column | Source / API | What it physically measures | Sampling |
+|---|---|---|---|
+| `NVML peak` | `pynvml.nvmlDeviceGetMemoryInfo()` | **Whole-GPU** memory in use, system-wide (same as `nvidia-smi`) | Once at end of each rep (driver) |
+| `worker cuda_alloc_mb` | `torch.cuda.memory_allocated()` | Peak of the **worker process's** torch caching-allocator footprint | Every 50 ms inside the EngineCore subprocess |
+| `worker host_rss_mb` | `psutil.Process().memory_info().rss` | The **worker process's** resident CPU RAM | Every 50 ms inside the worker subprocess |
+| `driver host_rss_mb` | same | The driver process's resident CPU RAM | Every 50 ms inside the driver |
+
+These columns measure **three different things in three different units that happen to share the suffix "MB."** Reading them as if they were comparable is what makes the table feel confusing.
+
+#### Worst-case cell per row
 
 | row | worker cuda_alloc_mb | worker host_rss_mb | NVML peak (mb) |
 |---|---:|---:|---:|
@@ -102,13 +113,52 @@ Worst-case cell per row (worker process, sidecar-sourced):
 | probe_hidden_states | **40,289** | 4,111 | **42,320** |
 | steer_hook_act | — | 1,306 | 41,876 |
 
-**Analysis.** NVML peak (right column) is dominated by the KV cache and effectively constant at ~42 GB; it tells us little about hook cost on its own. The informative signal is the **worker-process torch caching allocator** (left column). Three observations:
+#### How to read this table
 
-- All three "active hook" rows hit ~40 GB CUDA alloc — i.e. **the hooks elevate the working set by roughly the full GPU working size during a forward pass.** This is consistent with hooks holding cloned activations for the duration of the forward pass before egress.
-- `probe_hidden_states` is not the largest by torch alloc (40.3 GB vs QK's 40.2 GB) — meaning the cost isn't transient allocator pressure during forward, it's the **post-pass serialisation** that 97 MB of activations have to go through.
-- **Worker host_rss** for the hook rows (~4.1 GB) is **3× the baseline** (1.3 GB), capturing the cost of staging tensors on CPU before they hit disk.
+**NVML peak is essentially constant (~42 GB) across every row.** NVML reports the whole-GPU usage — KV cache (~20 GB), model weights (~3 GB), forward-pass activation scratch (~15 GB), and anything else on the GPU. Hook clones add ~400 MB on top of ~40 GB of working set and disappear into the rounding. **NVML answers *"is the GPU about to OOM?"*** (no, plenty of headroom on the 80 GB A100); it does *not* attribute cost to the hook.
 
-The `—` entries for baseline / plugin_idle / steer_hook_act are an instrumentation gap, not a bug: those rows don't write safetensors sidecars (no artifacts) and the engine-dump fallback didn't catch them within the 5-second poll window. The driver-side `host_rss` columns still provide a coarse comparison.
+**`worker cuda_alloc_mb` looks identical (~40 GB) across active-hook rows because it's a peak-of-cell, not a per-rep delta.** The 50 ms sampler captures the high-water mark across the entire cell, dominated by the same persistent KV cache + transient forward-pass activations that NVML reports. The hook's actual clone delta is ~12 MB per layer per request — sub-1% of the peak. So **R2/R3/R4 all show ~40 GB and the mode/worker differences disappear into the noise.** This column is the *right concept* (per-process torch allocator) but the *wrong aggregation* (peak instead of per-rep delta) for attributing hook cost.
+
+**`worker host_rss_mb` is the only column with real per-row signal.** It catches the CPU-side staging cost during `.cpu()` transfer of captured tensors before they hit disk:
+
+```
+no hooks fired   (baseline / plugin_idle / steer)  ~1,300 MB
+hooks fired      (qk / hs, both modes)             ~4,100 MB    ← 3× growth
+```
+
+This is the row-by-row difference the table can be read for. The fact that mode-dependence (last_token vs all_tokens) is hidden by the peak-of-cell aggregation is a measurement-tool limitation, not a property of the workers.
+
+#### Why three rows are blank (`—`)
+
+- **`baseline`** — no plug-in imported anywhere, so `_profiler.py` never loads in the worker, the `MemorySampler` thread never starts, no `gauge.mem.*` data exists. Empty cell is correct.
+- **`plugin_idle`** — plug-in imported in the driver only; worker has no `worker_extension_cls` so it never imports the profiler either. Same outcome.
+- **`steer_hook_act`** — profiler *is* active in the worker, but steering produces no safetensors sidecar (it modifies activations in place). The sidecar-merge path can't pull from a file that wasn't written; the fallback 5-second engine-dump poll sometimes misses the worker's atexit write. Genuine instrumentation gap, not a story about the steering worker.
+
+#### What's missing — and the column that would actually answer the question
+
+The interesting question is *"how much extra GPU memory did this hook fire need above the pre-rep working set?"* Today's columns don't isolate that — NVML is whole-GPU, `cuda_alloc_mb` is peak-of-cell. The right measurement would be:
+
+```
+inside each rep, inside the worker:
+    torch.cuda.reset_peak_memory_stats()
+    ... run rep ...
+    delta = torch.cuda.max_memory_allocated() - pre_rep_baseline
+```
+
+Requires a `collective_rpc("snapshot_cuda_delta")` round-trip from driver to worker per rep (~40 lines). When that lands, this section will gain a `cuda_alloc_delta_mb` column that reads like:
+
+```
+row                          cuda_alloc_delta   host_rss   NVML peak
+baseline                            0 MB        1,290     41,876
+plugin_idle                         0 MB        1,309     41,876
+probe_hook_qk:last_token           48 MB ←real  4,112     41,876
+probe_hook_qk:all_tokens          350 MB ←real  4,173     41,892
+probe_hidden_states (last)        200 MB ←real  3,800     41,876
+probe_hidden_states (all)       1,200 MB ←real  4,111     42,320
+steer_hook_act                      0 MB        1,306     41,876
+```
+
+— and *that* table would tell the per-row GPU cost story cleanly. Until then, the current §3.2 should be read as: **NVML for "will I OOM?", host_rss for "did the hook fire at all?", and worker cuda_alloc as informational context** rather than as a per-row comparison.
 
 ### 3.3 Storage variant matrix — `probe_hidden_states`
 

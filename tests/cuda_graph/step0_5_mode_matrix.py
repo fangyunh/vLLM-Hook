@@ -47,7 +47,7 @@ def run_one(model: str, mode: str, num_tokens: int) -> tuple[int, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="google/gemma-3-4b-it")
+    parser.add_argument("--model", default="Qwen/Qwen2-1.5B-Instruct")
     parser.add_argument("--num-decode-tokens", type=int, default=32)
     args = parser.parse_args()
 

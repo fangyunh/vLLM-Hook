@@ -57,6 +57,11 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 os.environ["PYTHONPATH"] = _THIS_DIR + os.pathsep + os.environ.get("PYTHONPATH", "")
 
+# Keep the vllm-hook plugin out: it forces enforce_eager=True (disabling CUDA
+# graphs). This test installs its own worker_cls and does not need the plugin.
+# setdefault lets a user override; set before vLLM import / subprocesses.
+os.environ.setdefault("VLLM_PLUGINS", "")
+
 _LAYER_PATTERNS = [
     re.compile(r"^model\.layers\.\d+$"),
     re.compile(r"^language_model\.model\.layers\.\d+$"),
@@ -194,9 +199,7 @@ def run_mode(mode: str, model: str, policy: str, churn_requests: int,
              cudagraph_mode: str) -> int:
     from vllm import LLM, SamplingParams
 
-    os.environ["VLLM_USE_V1"] = "1"
-    os.environ["VLLM_CUDAGRAPH_MODE"] = cudagraph_mode
-    os.environ["STEP0_9_POLICY"] = policy
+    os.environ["STEP0_9_POLICY"] = policy   # read by MemProbeWorker.load_model
 
     kwargs: dict[str, Any] = dict(
         model=model, enforce_eager=False, max_model_len=512,
@@ -207,7 +210,16 @@ def run_mode(mode: str, model: str, policy: str, churn_requests: int,
 
     print(f"[step0.9] booting {mode} engine (model={model}, mode={cudagraph_mode})",
           flush=True)
-    llm = LLM(**kwargs)
+    # Set the graph mode via compilation_config (the env var is ignored by vLLM);
+    # retry without it on older versions.
+    try:
+        llm = LLM(compilation_config={"cudagraph_mode": cudagraph_mode}, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        if "compilation" not in str(e).lower() and "cudagraph" not in str(e).lower():
+            raise
+        print(f"[step0.9] compilation_config not supported ({e}); engine default "
+              f"graph mode.", flush=True)
+        llm = LLM(**kwargs)
 
     blocks = _get_num_gpu_blocks(llm)
     rep = None
@@ -341,7 +353,7 @@ def main() -> int:
                         choices=["compare", "baseline", "buffers"],
                         help="compare (default) spawns baseline + buffers; the "
                              "other two are the per-engine workers it spawns.")
-    parser.add_argument("--model", default="google/gemma-3-4b-it")
+    parser.add_argument("--model", default="Qwen/Qwen2-1.5B-Instruct")
     parser.add_argument("--policy", default="last_token",
                         choices=["last_token", "all_tokens"],
                         help="Buffer sizing policy: last_token (default, cheap) "

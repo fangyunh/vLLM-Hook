@@ -58,6 +58,11 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 os.environ["PYTHONPATH"] = _THIS_DIR + os.pathsep + os.environ.get("PYTHONPATH", "")
 
+# Keep the vllm-hook plugin out: it forces enforce_eager=True (which disables
+# CUDA graphs). This test installs its own worker_cls; it does not need the
+# plugin. setdefault lets a user override; set before vLLM import / subprocesses.
+os.environ.setdefault("VLLM_PLUGINS", "")
+
 
 # ---------------------------------------------------------------------------
 # Counter custom op (self-contained; mirrors step0_injection's op).
@@ -277,22 +282,31 @@ def _verdict(delta: int, total_layers: int, n_gen: int, n_prompt: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _boot(model: str, cudagraph_mode: str, **extra):
+    """Boot with graphs ON + the requested mode (via compilation_config, not the
+    bogus env var), retrying without the mode on older vLLM."""
+    from vllm import LLM
+    base = dict(model=model, enforce_eager=False, max_model_len=512,
+                gpu_memory_utilization=0.85)
+    base.update(extra)
+    try:
+        return LLM(compilation_config={"cudagraph_mode": cudagraph_mode}, **base)
+    except Exception as e:  # noqa: BLE001
+        if "compilation" in str(e).lower() or "cudagraph" in str(e).lower():
+            print(f"[step0.8] compilation_config not supported ({e}); engine "
+                  f"default graph mode.", flush=True)
+            return LLM(**base)
+        raise
+
+
 def run_offline(model: str, num_decode_tokens: int, cudagraph_mode: str,
                 prompt: str) -> int:
-    from vllm import LLM, SamplingParams
-
-    os.environ["VLLM_USE_V1"] = "1"
-    os.environ["VLLM_CUDAGRAPH_MODE"] = cudagraph_mode
+    from vllm import SamplingParams
 
     print(f"[step0.8] booting offline LLM model={model} mode={cudagraph_mode} "
           f"worker_cls={WORKER_CLS}", flush=True)
-    llm = LLM(
-        model=model,
-        worker_cls=WORKER_CLS,        # <-- install happens in the worker, at load_model
-        enforce_eager=False,          # CUDA graphs ON — the whole point
-        max_model_len=512,
-        gpu_memory_utilization=0.85,
-    )
+    # install happens in the worker, at load_model; CUDA graphs ON.
+    llm = _boot(model, cudagraph_mode, worker_cls=WORKER_CLS)
 
     # Warmup/capture already happened during LLM(). Reset the per-worker
     # counters, confirm they're zero, then decode.
@@ -322,9 +336,6 @@ def run_async(model: str, num_decode_tokens: int, cudagraph_mode: str,
               prompt: str) -> int:
     import asyncio
 
-    os.environ["VLLM_USE_V1"] = "1"
-    os.environ["VLLM_CUDAGRAPH_MODE"] = cudagraph_mode
-
     async def _amain() -> int:
         from vllm import SamplingParams
         from vllm.v1.engine.async_llm import AsyncLLM
@@ -339,13 +350,17 @@ def run_async(model: str, num_decode_tokens: int, cudagraph_mode: str,
 
         print(f"[step0.8] booting AsyncLLM model={model} mode={cudagraph_mode}",
               flush=True)
-        engine = AsyncLLM.from_engine_args(AsyncEngineArgs(
-            model=model,
-            worker_cls=WORKER_CLS,
-            enforce_eager=False,
-            max_model_len=512,
-            gpu_memory_utilization=0.85,
-        ))
+        eargs = dict(model=model, worker_cls=WORKER_CLS, enforce_eager=False,
+                     max_model_len=512, gpu_memory_utilization=0.85)
+        try:
+            engine = AsyncLLM.from_engine_args(AsyncEngineArgs(
+                compilation_config={"cudagraph_mode": cudagraph_mode}, **eargs))
+        except Exception as e:  # noqa: BLE001
+            if "compilation" not in str(e).lower() and "cudagraph" not in str(e).lower():
+                raise
+            print(f"[step0.8] compilation_config not supported ({e}); engine "
+                  f"default graph mode.", flush=True)
+            engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**eargs))
         try:
             await _arpc(engine, "reset_counter")
             total_layers = sum(await _arpc(engine, "num_matched_layers"))
@@ -384,7 +399,7 @@ def run_async(model: str, num_decode_tokens: int, cudagraph_mode: str,
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="google/gemma-3-4b-it")
+    parser.add_argument("--model", default="Qwen/Qwen2-1.5B-Instruct")
     parser.add_argument("--num-decode-tokens", type=int, default=64)
     parser.add_argument("--cudagraph-mode", default="PIECEWISE",
                         choices=["PIECEWISE", "FULL_DECODE_ONLY",

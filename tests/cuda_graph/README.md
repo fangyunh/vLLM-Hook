@@ -45,11 +45,24 @@ install path.
 # On the GPU host:
 pip install -r requirement.txt           # vLLM + zstandard + safetensors
 pip install -e vllm_hook_plugins         # this project, in editable mode
-huggingface-cli login                    # for the gated dev model below
+# No HF login needed for the default model. For a gated model
+# (e.g. google/gemma-3-4b-it), `huggingface-cli login` first and pass --model.
 ```
 
-Recommended dev model: **`google/gemma-3-4b-it`** (small, fast,
-standard decoder-layer class). All scripts default to it.
+Recommended dev model: **`Qwen/Qwen2-1.5B-Instruct`** (small, fast, **ungated**,
+standard `model.layers.<i>` decoder). All scripts default to it. Override with
+`--model <repo>` (Python) or `MODEL=<repo>` (LSF wrappers).
+
+> **Two environment facts these scripts rely on (and handle for you):**
+> 1. **The vllm-hook plugin forces `enforce_eager=True`** (`_hook_plugin.py`),
+>    which would disable CUDA graphs. The scripts set `VLLM_PLUGINS=""` so the
+>    plugin does **not** load — they register their own op / install their own
+>    `worker_cls`, so they don't need it. (`setdefault`, so you can override.)
+> 2. **`VLLM_CUDAGRAPH_MODE` is not a real vLLM variable** (it logs as "unknown"
+>    and is ignored). The graph mode is set via
+>    `compilation_config={"cudagraph_mode": ...}` and the **realized** mode is
+>    printed at boot (`realized cudagraph_mode = ...`) — check that line to be
+>    sure the requested mode actually took.
 
 ---
 
@@ -59,7 +72,7 @@ Run:
 
 ```bash
 python tests/cuda_graph/step0_injection.py \
-    --model google/gemma-3-4b-it \
+    --model Qwen/Qwen2-1.5B-Instruct \
     --num-decode-tokens 64 \
     --cudagraph-mode PIECEWISE
 ```
@@ -101,7 +114,7 @@ Only after Step 0 PASSes on PIECEWISE. Run:
 
 ```bash
 python tests/cuda_graph/step0_5_mode_matrix.py \
-    --model google/gemma-3-4b-it
+    --model Qwen/Qwen2-1.5B-Instruct
 ```
 
 What it does: spawns three subprocesses, one per `CUDAGraphMode`
@@ -117,9 +130,11 @@ Decisions:
 
 Notes:
 
-- If your vLLM build does not honour `VLLM_CUDAGRAPH_MODE`, the script
-  will still run but every mode collapses to whatever the default is.
-  Confirm in the boot logs (`Using cudagraph mode = ...`).
+- The mode is applied via `compilation_config={"cudagraph_mode": ...}`, and
+  each run prints `realized cudagraph_mode = ...` right after boot. **Check that
+  line**: if it does not match the requested mode, the modes collapsed to the
+  engine default (older vLLM without the `cudagraph_mode` field) and the matrix
+  is not meaningful.
 - `FULL_DECODE_ONLY` requires that prefill and decode go through
   different paths; some older vLLM versions require an extra flag —
   check `vllm/config/compilation.py` on your version.
@@ -133,7 +148,7 @@ Only after Step 0 PASSes. Step 0.7 does NOT depend on Step 0.5 passing
 
 ```bash
 python tests/cuda_graph/step0_7_idle_tax.py \
-    --model google/gemma-3-4b-it \
+    --model Qwen/Qwen2-1.5B-Instruct \
     --num-decode-tokens 128 \
     --batches 1 8 64
 ```
@@ -356,10 +371,11 @@ Before the first submission, confirm on the login/compute node:
 - [ ] `conda activate vllm_hook_env` works (matches `run_demo.sh`)
 - [ ] `python -c "import torch; print(torch.cuda.is_available())"` → True
 - [ ] `python -c "import vllm; print(vllm.__version__)"` ≥ `0.7.0`
-- [ ] `huggingface-cli whoami` is logged in (for the gated dev model);
-      or `HF_TOKEN` set in the env before `bsub`
-- [ ] Gemma-3-4B fits at `gpu_memory_utilization=0.85`, `max_model_len=512`
-      (~9 GiB GPU mem; the wrapper's 1-GPU allocation is sufficient)
+- [ ] Default model `Qwen/Qwen2-1.5B-Instruct` is **ungated** — no HF login
+      needed. Only `huggingface-cli login` / `HF_TOKEN` if you pass a gated
+      `--model` (e.g. `google/gemma-3-4b-it`).
+- [ ] The dev model fits at `gpu_memory_utilization=0.85`, `max_model_len=512`
+      (Qwen2-1.5B ≈ 3-4 GiB; the wrapper's 1-GPU allocation is ample)
 - [ ] You're on the `graph_enable` branch
 
 Time budget: all three gates run in **half a day to a day** on one

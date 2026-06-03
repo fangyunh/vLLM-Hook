@@ -19,7 +19,7 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate vllm_hook_env
 cd ~/vLLM-Hook
 
-MODEL="${MODEL:-google/gemma-3-4b-it}"
+MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
 NUM_TOKENS="${NUM_TOKENS:-64}"
 MODE="${MODE:-PIECEWISE}"
 ASYNC="${ASYNC:-0}"   # set ASYNC=1 to also exercise the AsyncLLM (serve-shape) path

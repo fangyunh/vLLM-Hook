@@ -18,7 +18,7 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate vllm_hook_env
 cd ~/vLLM-Hook
 
-MODEL="${MODEL:-google/gemma-3-4b-it}"
+MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
 POLICY="${POLICY:-last_token}"          # last_token (cheap default) | all_tokens (worst case)
 CHURN="${CHURN:-200}"
 MODE="${MODE:-PIECEWISE}"

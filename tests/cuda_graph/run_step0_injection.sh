@@ -16,10 +16,10 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate vllm_hook_env
 cd ~/vLLM-Hook
 
-# Gemma-3-4B is gated on HF; ensure auth is configured on this node.
-# (Run `huggingface-cli login` once on the server, or set HF_TOKEN.)
+# Default model is ungated (no HF auth needed). Override with MODEL=<repo> for a
+# gated model — run `huggingface-cli login` first if so.
 
-MODEL="${MODEL:-google/gemma-3-4b-it}"
+MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
 NUM_TOKENS="${NUM_TOKENS:-64}"
 MODE="${MODE:-PIECEWISE}"
 
