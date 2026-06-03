@@ -1,49 +1,42 @@
-[serve] model=Qwen/Qwen2-1.5B-Instruct  workers=baseline,qk,hidden_states  out=profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1577719.csv
+[serve] model=Qwen/Qwen2-1.5B-Instruct  workers=baseline,qk,hidden_states  out=profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1588748.csv
 [serve] launching: vllm serve Qwen/Qwen2-1.5B-Instruct --port 8770 --max-model-len 2048 --enforce-eager
 [serve] waiting for /health at http://127.0.0.1:8770/v1
 [bench] worker=baseline concurrency=1 duration=30.0s
-        completed=57 req/s=1.89 p99=1.696s
+        completed=24 req/s=0.80 p99=5.640s
 [bench] worker=baseline concurrency=2 duration=30.0s
-        completed=122 req/s=4.02 p99=0.530s
+        completed=76 req/s=2.51 p99=2.350s
 [bench] worker=baseline concurrency=4 duration=30.0s
-        completed=228 req/s=7.52 p99=0.539s
+        completed=185 req/s=6.04 p99=0.747s
 [bench] worker=baseline concurrency=8 duration=30.0s
-        completed=452 req/s=14.87 p99=0.556s
+        completed=351 req/s=11.46 p99=1.069s
 [serve] launching: vllm serve Qwen/Qwen2-1.5B-Instruct --port 8770 --max-model-len 2048 --enforce-eager
 [serve] waiting for /health at http://127.0.0.1:8770/v1
 [bench] worker=qk concurrency=1 duration=30.0s
-        completed=28 req/s=0.90 p99=1.992s
+        completed=19 req/s=0.62 p99=6.043s
 [bench] worker=qk concurrency=2 duration=30.0s
-        completed=51 req/s=1.65 p99=1.532s
+        completed=38 req/s=1.21 p99=2.007s
 [bench] worker=qk concurrency=4 duration=30.0s
-        completed=75 req/s=2.38 p99=2.538s
+        completed=53 req/s=1.67 p99=3.191s
 [bench] worker=qk concurrency=8 duration=30.0s
-        completed=91 req/s=2.83 p99=4.557s
+        completed=68 req/s=2.07 p99=6.409s
 [serve] launching: vllm serve Qwen/Qwen2-1.5B-Instruct --port 8770 --max-model-len 2048 --enforce-eager
 [serve] waiting for /health at http://127.0.0.1:8770/v1
-[bench] worker=hidden_states concurrency=1 duration=30.0s
-        completed=35 req/s=1.16 p99=1.725s
-[bench] worker=hidden_states concurrency=2 duration=30.0s
-        completed=62 req/s=2.04 p99=1.121s
-[bench] worker=hidden_states concurrency=4 duration=30.0s
-        completed=104 req/s=3.34 p99=1.536s
-[bench] worker=hidden_states concurrency=8 duration=30.0s
-        completed=121 req/s=3.90 p99=2.910s
-[bench] CSV → profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1577719.csv
+[serve] HEALTH TIMEOUT (worker=hidden_states) — see /tmp/vllm-serve-hidden_states.log
+[bench] CSV → profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1588748.csv
 
-[serve] CSV → profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1577719.csv
+[serve] CSV → profiling/results/serve-Qwen_Qwen2-1.5B-Instruct-1588748.csv
 
 ------------------------------------------------------------
-Sender: LSF System <lsfadmin@cccxc525>
-Subject: Job 1577719: <vllm_hook_prof_serve> in cluster <CCCFP15Cluster> Done
+Sender: LSF System <lsfadmin@cccxc505>
+Subject: Job 1588748: <vllm_hook_prof_serve> in cluster <CCCFP15Cluster> Exited
 
-Job <vllm_hook_prof_serve> was submitted from host <ccc-login3> by user <yunhuafang> in cluster <CCCFP15Cluster> at Tue Jun  2 14:54:39 2026
-Job was executed on host(s) <8*cccxc525>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Tue Jun  2 15:10:03 2026
+Job <vllm_hook_prof_serve> was submitted from host <ccc-login3> by user <yunhuafang> in cluster <CCCFP15Cluster> at Wed Jun  3 00:38:16 2026
+Job was executed on host(s) <8*cccxc505>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Wed Jun  3 00:39:10 2026
 </u/yunhuafang> was used as the home directory.
 </u/yunhuafang/vLLM-Hook> was used as the working directory.
-Started at Tue Jun  2 15:10:03 2026
-Terminated at Tue Jun  2 15:18:20 2026
-Results reported at Tue Jun  2 15:18:20 2026
+Started at Wed Jun  3 00:39:10 2026
+Terminated at Wed Jun  3 02:54:45 2026
+Results reported at Wed Jun  3 02:54:45 2026
 
 Your job looked like:
 
@@ -103,20 +96,21 @@ WORKERS_CSV="$(echo "$WORKERS" | tr ' ' ',')"
 (... more ...)
 ------------------------------------------------------------
 
-Successfully completed.
+TERM_ADMIN: job killed by root or an administrator.
+Exited with signal termination: 14.
 
 Resource usage summary:
 
-    CPU time :                                   756.00 sec.
+    CPU time :                                   870.00 sec.
     Max Memory :                                 3 GB
-    Average Memory :                             2.38 GB
+    Average Memory :                             1.93 GB
     Total Requested Memory :                     48.00 GB
     Delta Memory :                               45.00 GB
     Max Swap :                                   -
-    Max Processes :                              7
+    Max Processes :                              8
     Max Threads :                                836
-    Run time :                                   497 sec.
-    Turnaround time :                            1421 sec.
+    Run time :                                   8135 sec.
+    Turnaround time :                            8189 sec.
 
 The output (if any) is above this job summary.
 
@@ -124,5 +118,5 @@ The output (if any) is above this job summary.
 
 PS:
 
-Read file <profiling/runners/logs/serve.1577719.err> for stderr output of this job.
+Read file <profiling/runners/logs/serve.1588748.err> for stderr output of this job.
 
