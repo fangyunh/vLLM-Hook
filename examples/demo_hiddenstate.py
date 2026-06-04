@@ -15,13 +15,19 @@ if __name__ == "__main__":
 
     cache_dir = "./cache/"
     hook_dir  = "/dev/shm/vllm_hook" # None
-    model = "Qwen/Qwen2.5-3B-Instruct"
+    # Model + config are overridable so the profiler can trace this demo on the
+    # 8B model and in either capture mode (last_token / all_tokens) by pointing
+    # VLLM_HOOK_CONFIG_FILE at the matching model_configs/hidden_states/*.json.
+    model = os.environ.get("VLLM_HOOK_DEMO_MODEL", "Qwen/Qwen2.5-3B-Instruct")
+    config_file = os.environ.get(
+        "VLLM_HOOK_CONFIG_FILE",
+        f"model_configs/hidden_states/{model.split('/')[-1]}.json")
 
     llm = HookLLM(
         model=model,
         worker_name="probe_hidden_states",
         analyzer_name="hidden_states",
-        config_file=f"model_configs/hidden_states/{model.split('/')[-1]}.json",
+        config_file=config_file,
         download_dir=cache_dir,
         hook_dir=hook_dir,
         gpu_memory_utilization=0.7,

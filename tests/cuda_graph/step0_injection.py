@@ -396,11 +396,18 @@ def run_test(
 
     # Verdict — order matters; check most-common failure modes first.
     if delta == 0:
-        print("[step0] FAIL — counter never fired.")
-        print("        Diagnosis: class-level wrap was bypassed by Dynamo.")
-        print("        Outcome:   GOAL-GATE FIRES — no pure-plugin path on")
-        print("                   this torch/vLLM version.")
-        print("        Next:      try a newer torch, or pivot to eager-island.")
+        print("[step0] FAIL — counter never fired (EXPECTED on vLLM v1).")
+        print("        Diagnosis: this DRIVER-side install runs after LLM()")
+        print("                   returns, but vLLM v1 compiles + captures the")
+        print("                   model INSIDE LLM() (during warmup). So the")
+        print("                   captured graph holds the ORIGINAL forward and")
+        print("                   our late wrap is never called.")
+        print("        Outcome:   driver-install is structurally too late on v1.")
+        print("                   This is NOT a goal-gate failure — it is exactly")
+        print("                   why the install must happen in the WORKER at")
+        print("                   load_model (before compile).")
+        print("        Next:      run step0_8_plugin_install.py — the decisive")
+        print("                   gate (worker_cls install at load_model).")
         result = 1
     elif delta == expected_prefill_only and n_gen > 1:
         print("[step0] FAIL — counter fired prefill-only.")

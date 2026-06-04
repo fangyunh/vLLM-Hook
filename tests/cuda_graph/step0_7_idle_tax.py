@@ -66,27 +66,29 @@ def run(model: str, n_decode: int, batches: List[int], with_wrap: bool) -> dict:
     """Boot vLLM (optionally with Step 0's counter wrap) and time decode."""
     from step0_injection import boot_llm, realized_mode
 
-    llm = boot_llm(model, "PIECEWISE")
+    # Install the counter op via the WORKER (step0_8's InjectingWorker), at
+    # load_model — BEFORE compile/capture. Driver-side install (the old
+    # approach) is too late on vLLM v1: the model is compiled/captured inside
+    # LLM() before we regain control, so a late wrap never enters the graph and
+    # the "wrapped" timings would equal baseline (op absent). The worker_cls
+    # path is the only one that puts the op in the captured graph.
+    extra = {}
+    if with_wrap:
+        from step0_8_plugin_install import WORKER_CLS
+        extra["worker_cls"] = WORKER_CLS
+
+    llm = boot_llm(model, "PIECEWISE", **extra)
     print(f"[step0.7] realized cudagraph_mode = {realized_mode(llm)}", flush=True)
 
     num_layers = 0
     if with_wrap:
-        # Inject the Step 0 wrap on every matched decoder-layer class.
-        from step0_injection import (
-            install_class_wrap, register_counter_op, _get_counter, find_model
-        )
-        register_counter_op()
-        inner = find_model(llm)
-        install_class_wrap(inner)
-
-        import re
-        patterns = [
-            re.compile(r"^model\.layers\.\d+$"),
-            re.compile(r"^transformer\.h\.\d+$"),
-            re.compile(r"^model\.decoder\.layers\.\d+$"),
-        ]
-        num_layers = sum(1 for n, _ in inner.named_modules()
-                         if any(p.match(n) for p in patterns))
+        from step0_8_plugin_install import _collective_rpc
+        try:
+            num_layers = sum(_collective_rpc(llm, "num_matched_layers"))
+            _collective_rpc(llm, "reset_counter")  # clear capture-time fires
+        except Exception as e:  # noqa: BLE001
+            print(f"[step0.7] worker rpc (num_matched_layers/reset) failed: {e}",
+                  flush=True)
 
     out = {}
     for bs in batches:
@@ -98,9 +100,16 @@ def run(model: str, n_decode: int, batches: List[int], with_wrap: bool) -> dict:
               f"{s_per_tok * 1e6:8.1f} us/token "
               f"({1.0 / s_per_tok:8.1f} tok/s)")
 
+    fired = 0
+    if with_wrap:
+        from step0_8_plugin_install import _collective_rpc
+        try:
+            fired = sum(_collective_rpc(llm, "read_counter"))
+        except Exception:
+            pass
+
     # Device-global VRAM in use after the run (model + KV cache + any wrap
-    # buffers). mem_get_info() reflects the whole device, so it is valid even
-    # when the worker runs in a separate process.
+    # buffers). mem_get_info() reflects the whole device.
     # NOTE: baseline and wrapped boot sequentially in ONE process here, so this
     # is a SANITY readout, not an apples-to-apples buffer cost. The counter wrap
     # also allocates ~nothing. For the authoritative memory gate — separate
@@ -110,7 +119,8 @@ def run(model: str, n_decode: int, batches: List[int], with_wrap: bool) -> dict:
     _free, _total = torch.cuda.mem_get_info()
     used_gib = (_total - _free) / 2**30
 
-    return {"per_bs": out, "num_layers": num_layers, "used_gib": used_gib}
+    return {"per_bs": out, "num_layers": num_layers, "used_gib": used_gib,
+            "fired": fired}
 
 
 def main() -> int:
@@ -130,24 +140,21 @@ def main() -> int:
     print("\n[step0.7] === WRAPPED (counter op on every layer, idle) ===")
     wrap = run(args.model, args.num_decode_tokens, args.batches, with_wrap=True)
 
-    # Guard: confirm the wrap actually executed. If the counter is still 0,
-    # the op never ran (class-level wrap bypassed, or installed too late), so
-    # the "wrapped" timings above measure an ABSENT op, not an idle one — the
-    # idle-tax numbers would be meaningless and could read as a false PASS.
-    # Settle injection first: step0_injection.py (driver install) or
-    # step0_8_plugin_install.py (worker-process install).
-    from step0_injection import _get_counter
-    torch.cuda.synchronize()
-    fired = int(_get_counter().item())
+    # Guard: confirm the wrap actually executed (read from the worker via RPC).
+    # If it is 0, the op never ran, so the "wrapped" timings measure an ABSENT
+    # op, not an idle one — the idle-tax numbers would be meaningless (a false
+    # PASS). With worker-install this should be large (fires every layer every
+    # step); a 0 here means injection did not land — settle it with
+    # step0_8_plugin_install.py.
+    fired = wrap.get("fired", 0)
     if fired == 0:
         print("\n[step0.7] FAIL — counter is 0 after the wrapped run.")
-        print("          The op never executed, so the 'wrapped' timings do NOT")
-        print("          include it; the idle-tax numbers are meaningless. Run")
-        print("          step0_injection.py / step0_8_plugin_install.py first to")
-        print("          confirm injection lands in the captured graph.")
+        print("          The op never executed (injection did not land in the")
+        print("          captured graph), so the idle-tax numbers are meaningless.")
+        print("          Confirm injection with step0_8_plugin_install.py first.")
         return 1
     print(f"[step0.7] wrap fired {fired} times during the wrapped run "
-          f"(op confirmed present).")
+          f"(op confirmed present in the graph).")
 
     b_used = base.get("used_gib")
     w_used = wrap.get("used_gib")

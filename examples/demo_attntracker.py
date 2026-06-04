@@ -44,26 +44,33 @@ def apply_chat_template_and_get_ranges(tokenizer, model_name: str, instruction: 
 if __name__ == "__main__":
 
     cache_dir = "./cache/"
-    hook_dir  = "/dev/shm/vllm_hook" # None # 
-    model = 'ibm-granite/granite-3.1-8b-instruct'  # 'Qwen/Qwen2-1.5B-Instruct' # 'mistralai/Mistral-7B-Instruct-v0.3' # 
-    
+    hook_dir  = "/dev/shm/vllm_hook" # None #
+    # Model + config are overridable so the profiler can trace this demo in either
+    # capture mode (last_token / all_tokens) by pointing VLLM_HOOK_CONFIG_FILE at
+    # the matching model_configs/attention_tracker/*.json.
+    model = os.environ.get("VLLM_HOOK_DEMO_MODEL", 'ibm-granite/granite-3.1-8b-instruct')
+
     dtype_map = {
         'mistralai/Mistral-7B-Instruct-v0.3': torch.float16,
         'ibm-granite/granite-3.1-8b-instruct': torch.float16,
         'Qwen/Qwen2-1.5B-Instruct': torch.float
     }
-    
+
+    config_file = os.environ.get(
+        "VLLM_HOOK_CONFIG_FILE",
+        f'model_configs/attention_tracker/{model.split("/")[-1]}.json')
+
     llm = HookLLM(
         model=model,
         worker_name="probe_hook_qk",
         analyzer_name="attn_tracker",
-        config_file=f'model_configs/attention_tracker/{model.split("/")[-1]}.json',
+        config_file=config_file,
         download_dir=cache_dir,
         hook_dir=hook_dir,
         gpu_memory_utilization=0.7,
         max_model_len=2048,
         trust_remote_code=True,
-        dtype=dtype_map[model],
+        dtype=dtype_map.get(model, torch.float16),
         enforce_eager=True,
         enable_prefix_caching=True,
         enable_hook=True, 

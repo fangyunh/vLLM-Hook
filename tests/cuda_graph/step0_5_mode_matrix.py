@@ -1,8 +1,13 @@
-"""Step 0.5 — Mode matrix: which CUDAGraphModes survive class-level wrap?
+"""Step 0.5 — Mode matrix: which CUDAGraphModes survive the worker-install wrap?
 
-Re-runs Step 0's counter-op injection under each targeted CUDAGraphMode
-and tabulates the result. Settles claim C5 per-mode and locks in which
-modes are shippable before any mode-specific code is written.
+Re-runs the worker-install injection (step0_8_plugin_install.py) under each
+targeted CUDAGraphMode and tabulates the result. Settles claim C5 per-mode and
+locks in which modes are shippable before any mode-specific code is written.
+
+It drives step0_8 (NOT step0_injection): on vLLM v1, compile/capture happen
+inside LLM() before the driver regains control, so the driver-install probe
+(step0_injection) is always too late and reports 0 — only the worker-install
+path (install at load_model, before compile) can land the op in the graph.
 
 A PIECEWISE pass is mandatory (the plan ships at minimum on this mode).
 FULL_DECODE_ONLY is the throughput mode; if it passes, the plan ships
@@ -10,7 +15,7 @@ both. FULL_AND_PIECEWISE is checked but not required.
 
 Usage:
     python tests/cuda_graph/step0_5_mode_matrix.py \\
-        --model google/gemma-3-4b-it
+        --model Qwen/Qwen2-1.5B-Instruct
 """
 from __future__ import annotations
 
@@ -21,7 +26,7 @@ from pathlib import Path
 
 
 HERE = Path(__file__).parent
-STEP0 = HERE / "step0_injection.py"
+STEP0 = HERE / "step0_8_plugin_install.py"
 
 
 def run_one(model: str, mode: str, num_tokens: int) -> tuple[int, str]:

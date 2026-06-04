@@ -27,15 +27,19 @@ All run on a **single GPU host** with vLLM ≥ 0.7 installed. They
 do not modify any project source; they import vLLM and the plugin only
 when invoked.
 
-**Two injection tests, on purpose.** `step0_injection.py` installs the wrap
-from the *driver* (after `LLM()` returns) — the simplest way to answer "can a
-class-level wrap be captured at all," but single-process only and not the
-production path. `step0_8_plugin_install.py` installs inside the *worker* at
-`load_model` via a `worker_cls` subclass — the same process and timing the
-plugin's monkey-patch of `Worker.load_model` uses, so it survives the
-driver→worker boundary and is representative of `vllm serve` / multi-GPU.
-Run step0 first (cheaper, isolates the mechanism); step0_8 confirms the real
-install path.
+**Two injection tests — and on vLLM v1, `step0_8` is the decisive one.**
+`step0_injection.py` installs the wrap from the *driver* (after `LLM()`
+returns). On **vLLM v1 this is structurally too late**: `torch.compile` +
+CUDA-graph capture run *inside* `LLM()` during warmup, before the driver
+regains control — so the captured graph holds the original forward and the
+late wrap never fires (the probe reports **0**, by design). It is kept as an
+**informational** probe that documents exactly this.
+`step0_8_plugin_install.py` installs inside the *worker* at `load_model` (via a
+`worker_cls` whose `load_model` registers the op + wraps the layer class)
+**before** compile/capture — the same timing the plan's monkey-patch of
+`Worker.load_model` uses. **This is the gate that can PASS on v1**, and the one
+the suite treats as decisive; `step0_5` and `step0_7` drive the same
+worker-install mechanism.
 
 ---
 
