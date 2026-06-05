@@ -1,0 +1,149 @@
+[step0.9] model=Qwen/Qwen2-1.5B-Instruct policy=last_token churn=200 mode=PIECEWISE  min_kv_retention=0.90 max_drift_pct=2.0
+
+======================================================================
+[step0.9] launching baseline subprocess
+======================================================================
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:06<00:00,  6.70s/it]
+
+
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   6%|▌         | 3/51 [00:00<00:02, 18.55it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  12%|█▏        | 6/51 [00:00<00:01, 23.36it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  20%|█▉        | 10/51 [00:00<00:01, 26.95it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  25%|██▌       | 13/51 [00:00<00:01, 26.10it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  33%|███▎      | 17/51 [00:00<00:01, 27.15it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  41%|████      | 21/51 [00:00<00:01, 28.33it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  47%|████▋     | 24/51 [00:00<00:00, 28.08it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  55%|█████▍    | 28/51 [00:01<00:00, 28.77it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  63%|██████▎   | 32/51 [00:01<00:00, 29.35it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  71%|███████   | 36/51 [00:01<00:00, 29.15it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  78%|███████▊  | 40/51 [00:01<00:00, 29.80it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  86%|████████▋ | 44/51 [00:01<00:00, 26.86it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  92%|█████████▏| 47/51 [00:01<00:00, 25.42it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:01<00:00, 23.97it/s]
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:01<00:00, 26.41it/s]
+[rank0]:[W605 11:43:05.640824608 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+
+======================================================================
+[step0.9] launching buffers subprocess
+======================================================================
+Rendering prompts: 100%|██████████| 16/16 [00:00<00:00, 5381.19it/s]
+
+Processed prompts:   0%|          | 0/16 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]
+Processed prompts: 100%|██████████| 16/16 [00:00<00:00, 304.98it/s, est. speed input: 2746.31 toks/s, output: 2440.80 toks/s]
+Processed prompts: 100%|██████████| 16/16 [00:00<00:00, 304.15it/s, est. speed input: 2746.31 toks/s, output: 2440.80 toks/s]
+
+Rendering prompts:   0%|          | 0/16 [00:00<?, ?it/s]
+Rendering prompts: 100%|██████████| 16/16 [00:00<00:00, 5009.99it/s]
+
+Processed prompts:   0%|          | 0/16 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]
+Processed prompts: 100%|██████████| 16/16 [00:00<00:00, 305.93it/s, est. speed input: 2754.65 toks/s, output: 2448.20 toks/s]
+Processed prompts: 100%|██████████| 16/16 [00:00<00:00, 305.21it/s, est. speed input: 2754.65 toks/s, output: 2448.20 toks/s]
+
+Rendering prompts:   0%|          | 0/16 [00:00<?, ?it/s]
+Rendering prompts: 100%|██████████| 16/16 [00:00<00:00, 5158.25it/s]
+
+Processed prompts:   0%|          | 0/16 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]
+Processed prompts: 100%|██████████| 16/16 [00:00<00:00, 307.30it/s, est. speed input: 2766.94 toks/s, output: 2459.12 toks/s]
+Processed prompts: 100%|██████████| 16/16 [00:00<00:00, 306.60it/s, est. speed input: 2766.94 toks/s, output: 2459.12 toks/s]
+[rank0]:[W605 11:45:36.721749194 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+
+======================================================================
+[step0.9] MEMORY BUDGET RESULTS
+======================================================================
+  policy                  = last_token
+  matched layers          = 28, rows/layer = 257, hidden = 1536, dtype = torch.bfloat16
+  static buffers measured = 21.1 MiB  (predicted 21.1 MiB)
+  buffers as % of GPU VRAM= 0.03%  (device total 81152.8 MiB)
+  KV blocks baseline      = 148168
+  KV blocks with buffers  = 148170
+  KV-block retention      = 1.000  (budget >= 0.90)
+  churn drift             = 0.00%  (budget <= 2.00%, over 200 reqs)
+======================================================================
+[step0.9] PASS — static-buffer footprint within budget, KV-cache
+          retention healthy, and footprint flat under churn.
+          (Validates the static design; per-request capture egress /
+           row-allocator correctness is a separate Step-2 item.)
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@cccxc577>
+Subject: Job 1651153: <vllm_hook_step0_9> in cluster <CCCFP15Cluster> Done
+
+Job <vllm_hook_step0_9> was submitted from host <ccc-login4> by user <yunhuafang> in cluster <CCCFP15Cluster> at Fri Jun  5 11:37:51 2026
+Job was executed on host(s) <2*cccxc577>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Fri Jun  5 11:38:43 2026
+                            <2*cccxc558>
+</u/yunhuafang> was used as the home directory.
+</u/yunhuafang/vLLM-Hook> was used as the working directory.
+Started at Fri Jun  5 11:38:43 2026
+Terminated at Fri Jun  5 11:45:38 2026
+Results reported at Fri Jun  5 11:45:38 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_step0_9_mem_budget.sh — memory-budget gate.
+# Measures the static-buffer VRAM footprint, its KV-cache impact
+# (num_gpu_blocks baseline vs with-buffers), and footprint boundedness under
+# request churn. Complements step0_7 (which measures the LATENCY idle tax).
+#
+# Submit:  bsub < tests/cuda_graph/run_step0_9_mem_budget.sh
+# Logs:    tests/cuda_graph/logs/step0_9.<JOBID>.{out,err}
+#BSUB -J vllm_hook_step0_9
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/step0_9.%J.out
+#BSUB -e tests/cuda_graph/logs/step0_9.%J.err
+
+set -euo pipefail
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+MODEL="${MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+POLICY="${POLICY:-last_token}"          # last_token (cheap default) | all_tokens (worst case)
+CHURN="${CHURN:-200}"
+MODE="${MODE:-PIECEWISE}"
+MIN_KV_RETENTION="${MIN_KV_RETENTION:-0.90}"
+MAX_DRIFT_PCT="${MAX_DRIFT_PCT:-2.0}"
+
+mkdir -p tests/cuda_graph/logs
+
+echo "[step0.9] model=$MODEL policy=$POLICY churn=$CHURN mode=$MODE " \
+     "min_kv_retention=$MIN_KV_RETENTION max_drift_pct=$MAX_DRIFT_PCT"
+
+python tests/cuda_graph/step0_9_mem_budget.py \
+    --model "$MODEL" \
+    --policy "$POLICY" \
+    --churn-requests "$CHURN" \
+    --cudagraph-mode "$MODE" \
+    --min-kv-retention "$MIN_KV_RETENTION" \
+    --max-drift-pct "$MAX_DRIFT_PCT"
+
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   159.72 sec.
+    Max Memory :                                 2 GB
+    Average Memory :                             1.10 GB
+    Total Requested Memory :                     64.00 GB
+    Delta Memory :                               62.00 GB
+    Max Swap :                                   -
+    Max Processes :                              7
+    Max Threads :                                556
+    Run time :                                   415 sec.
+    Turnaround time :                            467 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/step0_9.1651153.err> for stderr output of this job.
+
