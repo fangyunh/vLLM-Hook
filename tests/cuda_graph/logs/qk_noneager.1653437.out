@@ -1,0 +1,161 @@
+[run_qk_noneager] model=Qwen/Qwen2-1.5B-Instruct  cudagraph_mode=PIECEWISE
+[run_qk_noneager] (TORCHDYNAMO_DISABLE is forced to 0 inside the python script)
+======================================================================
+[qk-noneager] model           = Qwen/Qwen2-1.5B-Instruct
+[qk-noneager] enforce_eager   = False  (CUDA graph ON)
+[qk-noneager] cudagraph_mode  = PIECEWISE
+[qk-noneager] TORCHDYNAMO_DISABLE = 0
+[qk-noneager] VLLM_HOOK_ALLOW_CUDAGRAPH = 1
+======================================================================
+INFO 06-05 16:21:55 [utils.py:240] non-default args: {'trust_remote_code': True, 'download_dir': './cache/', 'dtype': torch.float32, 'max_model_len': 2048, 'enable_prefix_caching': True, 'gpu_memory_utilization': 0.7, 'disable_log_stats': True, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.PIECEWISE: 1>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}, 'worker_extension_cls': 'vllm_hook_plugins.workers.probe_hookqk_worker.ProbeHookQKWorker', 'model': 'Qwen/Qwen2-1.5B-Instruct'}
+WARNING 06-05 16:21:55 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-05 16:21:55 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-05 16:21:55 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-05 16:21:55 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-05 16:21:55 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-05 16:21:55 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+INFO 06-05 16:21:56 [model.py:568] Resolved architecture: Qwen2ForCausalLM
+INFO 06-05 16:21:56 [model.py:2029] Upcasting torch.bfloat16 to torch.float32.
+INFO 06-05 16:21:56 [model.py:1697] Using max model len 2048
+INFO 06-05 16:21:56 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=8192.
+INFO 06-05 16:21:56 [vllm.py:886] Asynchronous scheduling is enabled.
+INFO 06-05 16:21:56 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(EngineCore pid=815429) INFO 06-05 16:22:29 [core.py:109] Initializing a V1 LLM engine (v0.21.0) with config: model='Qwen/Qwen2-1.5B-Instruct', speculative_config=None, tokenizer='Qwen/Qwen2-1.5B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.float32, max_seq_len=2048, download_dir='./cache/', load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen2-1.5B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'ir_enable_torch_wrap': True, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.PIECEWISE: 1>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 512, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=False, moe_backend='auto')
+(EngineCore pid=815429) INFO 06-05 16:22:30 [worker_base.py:274] Injected <class 'vllm_hook_plugins.workers.probe_hookqk_worker.ProbeHookQKWorker'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['_background_save_loop', '_save_safetensors', 'clear_captured_states', 'flush_disk', 'get_captured_states', 'install_hooks']
+(EngineCore pid=815429) INFO 06-05 16:22:31 [parallel_state.py:1410] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://9.47.192.238:47007 backend=nccl
+(EngineCore pid=815429) INFO 06-05 16:22:31 [parallel_state.py:1723] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=815429) INFO 06-05 16:22:34 [topk_topp_sampler.py:45] Using FlashInfer for top-p & top-k sampling.
+(EngineCore pid=815429) INFO 06-05 16:22:35 [gpu_model_runner.py:4857] Starting to load model Qwen/Qwen2-1.5B-Instruct...
+(EngineCore pid=815429) INFO 06-05 16:22:35 [cuda.py:372] Using TRITON_ATTN attention backend out of potential backends: ['TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=815429) INFO 06-05 16:22:36 [weight_utils.py:663] No model.safetensors.index.json found in remote.
+(EngineCore pid=815429) INFO 06-05 16:22:36 [weight_utils.py:938] Filesystem type for checkpoints: GPFS. Checkpoint size: 2.88 GiB. Available RAM: 1683.83 GiB.
+(EngineCore pid=815429) INFO 06-05 16:22:36 [weight_utils.py:961] Auto-prefetch is disabled because the filesystem (GPFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=815429) INFO 06-05 16:22:52 [default_loader.py:397] Loading weights took 15.51 seconds
+(EngineCore pid=815429) INFO 06-05 16:22:52 [gpu_model_runner.py:4959] Model loading took 5.84 GiB memory and 16.671992 seconds
+(EngineCore pid=815429) INFO 06-05 16:23:03 [backends.py:1089] Using cache directory: /u/yunhuafang/.cache/vllm/torch_compile_cache/754a5ba784/rank_0_0/backbone for vLLM's torch.compile
+(EngineCore pid=815429) INFO 06-05 16:23:03 [backends.py:1148] Dynamo bytecode transform time: 9.82 s
+(EngineCore pid=815429) INFO 06-05 16:23:08 [backends.py:378] Cache the graph of compile range (1, 8192) for later use
+(EngineCore pid=815429) INFO 06-05 16:23:12 [backends.py:393] Compiling a graph for compile range (1, 8192) takes 8.49 s
+(EngineCore pid=815429) INFO 06-05 16:23:15 [decorators.py:708] saved AOT compiled function to /u/yunhuafang/.cache/vllm/torch_compile_cache/torch_aot_compile/3e18fbd32efaf387d951d49bf94209d7037a692ca37d292082c75cd6bc4ac36d/rank_0_0/model
+(EngineCore pid=815429) INFO 06-05 16:23:15 [monitor.py:53] torch.compile took 22.33 s in total
+(EngineCore pid=815429) INFO 06-05 16:23:16 [monitor.py:81] Initial profiling/warmup run took 1.44 s
+(EngineCore pid=815429) INFO 06-05 16:23:25 [gpu_model_runner.py:6063] Profiling CUDA graph memory: PIECEWISE=51 (largest=512)
+(EngineCore pid=815429) INFO 06-05 16:23:27 [gpu_model_runner.py:6142] Estimated CUDA graph memory: 0.39 GiB total
+(EngineCore pid=815429) INFO 06-05 16:23:28 [gpu_worker.py:462] Available KV cache memory: 48.12 GiB
+(EngineCore pid=815429) INFO 06-05 16:23:28 [gpu_worker.py:477] CUDA graph memory profiling is enabled (default since v0.21.0). The current --gpu-memory-utilization=0.7000 is equivalent to --gpu-memory-utilization=0.6951 without CUDA graph memory profiling. To maintain the same effective KV cache size as before, increase --gpu-memory-utilization to 0.7049. To disable, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.
+(EngineCore pid=815429) INFO 06-05 16:23:28 [kv_cache_utils.py:1710] GPU KV cache size: 901,104 tokens
+(EngineCore pid=815429) INFO 06-05 16:23:28 [kv_cache_utils.py:1711] Maximum concurrency for 2,048 tokens per request: 439.99x
+(EngineCore pid=815429) INFO 06-05 16:23:28 [kernel_warmup.py:44] Skipping FlashInfer autotune because it is disabled.
+(EngineCore pid=815429) INFO 06-05 16:23:34 [gpu_model_runner.py:6243] Graph capturing finished in 6 secs, took 0.31 GiB
+(EngineCore pid=815429) INFO 06-05 16:23:34 [gpu_worker.py:621] CUDA graph pool memory: 0.31 GiB (actual), 0.39 GiB (estimated), difference: 0.08 GiB (24.2%).
+(EngineCore pid=815429) INFO 06-05 16:23:34 [jit_monitor.py:54] Kernel JIT monitor activated — Triton JIT compilations during inference will be logged as warnings.
+(EngineCore pid=815429) INFO 06-05 16:23:34 [core.py:299] init engine (profile, create kv cache, warmup model) took 41.38 s (compilation: 22.33 s)
+(EngineCore pid=815429) INFO 06-05 16:23:36 [vllm.py:886] Asynchronous scheduling is enabled.
+(EngineCore pid=815429) INFO 06-05 16:23:36 [kernel.py:212] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+
+[qk-noneager] engine booted under CUDA-graph mode. Running QK capture...
+
+==================================================
+Instruction: 'Analyze and output the sentence attitude:'
+Data: 'The weather is nice today, with a soft breeze and sunshine.'
+(EngineCore pid=815429) Installed 28 hooks on layers: ['model.layers.0.self_attn.attn', 'model.layers.1.self_attn.attn', 'model.layers.2.self_attn.attn', 'model.layers.3.self_attn.attn', 'model.layers.4.self_attn.attn', 'model.layers.5.self_attn.attn', 'model.layers.6.self_attn.attn', 'model.layers.7.self_attn.attn', 'model.layers.8.self_attn.attn', 'model.layers.9.self_attn.attn', 'model.layers.10.self_attn.attn', 'model.layers.11.self_attn.attn', 'model.layers.12.self_attn.attn', 'model.layers.13.self_attn.attn', 'model.layers.14.self_attn.attn', 'model.layers.15.self_attn.attn', 'model.layers.16.self_attn.attn', 'model.layers.17.self_attn.attn', 'model.layers.18.self_attn.attn', 'model.layers.19.self_attn.attn', 'model.layers.20.self_attn.attn', 'model.layers.21.self_attn.attn', 'model.layers.22.self_attn.attn', 'model.layers.23.self_attn.attn', 'model.layers.24.self_attn.attn', 'model.layers.25.self_attn.attn', 'model.layers.26.self_attn.attn', 'model.layers.27.self_attn.attn']
+(EngineCore pid=815429) WARNING 06-05 16:23:36 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=815429) WARNING 06-05 16:23:37 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=815429) WARNING 06-05 16:23:41 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+hook llm generation runtime: 4.986s
+(EngineCore pid=815429) INFO 06-05 16:23:46 [core.py:1242] Shutdown initiated (timeout=0)
+(EngineCore pid=815429) INFO 06-05 16:23:46 [core.py:1265] Shutdown complete
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@cccxc588>
+Subject: Job 1653437: <vllm_hook_qk_noneager> in cluster <CCCFP15Cluster> Exited
+
+Job <vllm_hook_qk_noneager> was submitted from host <ccc-login4> by user <yunhuafang> in cluster <CCCFP15Cluster> at Fri Jun  5 16:21:49 2026
+Job was executed on host(s) <4*cccxc588>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Fri Jun  5 16:21:17 2026
+</u/yunhuafang> was used as the home directory.
+</u/yunhuafang/vLLM-Hook> was used as the working directory.
+Started at Fri Jun  5 16:21:17 2026
+Terminated at Fri Jun  5 16:23:50 2026
+Results reported at Fri Jun  5 16:23:50 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_qk_noneager.sh — run the QK probe demo under NON-eager (CUDA-graph) mode
+# as a BATCH (non-interactive) LSF job. Output goes to log files, not your
+# terminal.
+#
+# Submit:  mkdir -p tests/cuda_graph/logs
+#          bsub < tests/cuda_graph/run_qk_noneager.sh
+# Watch:   bjobs                                          # status
+#          bpeek <JOBID>                                  # peek live output
+#          tail -f tests/cuda_graph/logs/qk_noneager.*.out
+#
+#BSUB -J vllm_hook_qk_noneager
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/qk_noneager.%J.out
+#BSUB -e tests/cuda_graph/logs/qk_noneager.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p tests/cuda_graph/logs
+
+# disk-st-async storage variant (fastest), matching run_demo.sh.
+export VLLM_HOOK_USE_SAFETENSORS=1
+export VLLM_HOOK_ASYNC_SAVE=1
+
+# REQUIRED for this test: the plugin's engine-config patch (_hook_plugin.py)
+# otherwise hardcodes enforce_eager=True, which silently disables CUDA graphs
+# no matter what cudagraph_mode we pass. This opt-out keeps the caller's setting.
+export VLLM_HOOK_ALLOW_CUDAGRAPH=1
+
+# CUDA-graph mode. Switch by commenting/uncommenting one of these lines.
+# PIECEWISE       = mandatory/shippable mode; attention stays an eager seam.
+# FULL_DECODE_ONLY = higher-throughput decode path; decode folds into one graph.
+export VLLM_HOOK_CUDAGRAPH_MODE=PIECEWISE
+# export VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY
+
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+
+# Make vLLM chatty about compilation/capture so the log shows the graphs build.
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
+
+echo "[run_qk_noneager] model=$VLLM_HOOK_DEMO_MODEL  cudagraph_mode=$VLLM_HOOK_CUDAGRAPH_MODE"
+echo "[run_qk_noneager] (TORCHDYNAMO_DISABLE is forced to 0 inside the python script)"
+
+# -u = unbuffered stdout so bpeek / tail -f show progress without buffering lag.
+python -u tests/cuda_graph/qk_noneager_demo.py
+
+(... more ...)
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   114.32 sec.
+    Max Memory :                                 2 GB
+    Average Memory :                             1.37 GB
+    Total Requested Memory :                     32.00 GB
+    Delta Memory :                               30.00 GB
+    Max Swap :                                   -
+    Max Processes :                              7
+    Max Threads :                                154
+    Run time :                                   153 sec.
+    Turnaround time :                            121 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/qk_noneager.1653437.err> for stderr output of this job.
+
