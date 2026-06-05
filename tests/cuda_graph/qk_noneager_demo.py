@@ -78,11 +78,20 @@ if __name__ == "__main__":
         "Qwen/Qwen2-1.5B-Instruct": torch.float,
     }
 
+    # Without this, _hook_plugin.py force-sets enforce_eager=True and the engine
+    # silently boots eager — the test would "pass" while testing nothing.
+    if os.environ.get("VLLM_HOOK_ALLOW_CUDAGRAPH") != "1":
+        raise SystemExit(
+            "[qk-noneager] VLLM_HOOK_ALLOW_CUDAGRAPH=1 is NOT set. The plugin "
+            "would force enforce_eager=True and disable CUDA graphs, making this "
+            "test meaningless. Set it (the run script does) and re-run.")
+
     print("=" * 70)
     print(f"[qk-noneager] model           = {model}")
     print(f"[qk-noneager] enforce_eager   = False  (CUDA graph ON)")
     print(f"[qk-noneager] cudagraph_mode  = {cudagraph_mode}")
     print(f"[qk-noneager] TORCHDYNAMO_DISABLE = {os.environ.get('TORCHDYNAMO_DISABLE')}")
+    print(f"[qk-noneager] VLLM_HOOK_ALLOW_CUDAGRAPH = {os.environ.get('VLLM_HOOK_ALLOW_CUDAGRAPH')}")
     print("=" * 70)
 
     # compilation_config is only meaningful when graphs are on; NONE means

@@ -90,7 +90,12 @@ def _patched_create_engine_config(self, *args, **kwargs):
             self.worker_extension_cls = _WORKER_EXT_STEER
         else:
             self.worker_extension_cls = _WORKER_EXT_HS
-    self.enforce_eager = True
+    # The plugin forces eager by default (hooks fire reliably outside any CUDA
+    # graph). Set VLLM_HOOK_ALLOW_CUDAGRAPH=1 to keep whatever enforce_eager /
+    # cudagraph_mode the caller passed — used to test CUDA-graph compatibility.
+    import os
+    if os.environ.get("VLLM_HOOK_ALLOW_CUDAGRAPH", "0") != "1":
+        self.enforce_eager = True
 
     assert _original_create_engine_config is not None
     return _original_create_engine_config(self, *args, **kwargs)

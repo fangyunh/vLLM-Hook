@@ -27,6 +27,11 @@ mkdir -p tests/cuda_graph/logs
 export VLLM_HOOK_USE_SAFETENSORS=1
 export VLLM_HOOK_ASYNC_SAVE=1
 
+# REQUIRED for this test: the plugin's engine-config patch (_hook_plugin.py)
+# otherwise hardcodes enforce_eager=True, which silently disables CUDA graphs
+# no matter what cudagraph_mode we pass. This opt-out keeps the caller's setting.
+export VLLM_HOOK_ALLOW_CUDAGRAPH=1
+
 # CUDA-graph mode. Switch by commenting/uncommenting one of these lines.
 # PIECEWISE       = mandatory/shippable mode; attention stays an eager seam.
 # FULL_DECODE_ONLY = higher-throughput decode path; decode folds into one graph.
