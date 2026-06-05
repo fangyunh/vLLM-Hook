@@ -75,6 +75,10 @@ os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
 # A static int64 counter buffer. data_ptr() is fixed for the process
 # lifetime, so it can be safely referenced from a captured CUDA graph.
 _COUNTER: torch.Tensor | None = None
+# Dedicated library so the op lives at torch.ops.vllm_hook_counter.* (matching
+# the call site) instead of vLLM's default "vllm" namespace. Kept alive for the
+# op's lifetime.
+_COUNTER_LIB = None
 
 
 def _get_counter() -> torch.Tensor:
@@ -132,13 +136,21 @@ def register_counter_op() -> None:
     PyTorch's dispatcher AND the inductor side, with the mutates_args
     semantics that auto_functionalize needs to keep the node alive.
     """
+    global _COUNTER_LIB
+    from torch.library import Library
     direct_register_custom_op = _import_direct_register_custom_op()
 
+    # Register under the vllm_hook_counter namespace (target_lib), so the op
+    # resolves at torch.ops.vllm_hook_counter.counter_increment — matching the
+    # call site in install_class_wrap. Without target_lib it would land in
+    # torch.ops.vllm.* and the call would raise AttributeError during tracing.
+    _COUNTER_LIB = Library("vllm_hook_counter", "FRAGMENT")
     direct_register_custom_op(
         op_name="counter_increment",
         op_func=_increment_impl,
         mutates_args=["counter"],
         fake_impl=_increment_fake,
+        target_lib=_COUNTER_LIB,
         dispatch_key="CUDA",
     )
 

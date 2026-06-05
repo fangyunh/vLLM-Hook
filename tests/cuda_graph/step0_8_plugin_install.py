@@ -80,6 +80,12 @@ os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
 
 _COUNTER: torch.Tensor | None = None
 _OP_REGISTERED = False
+# The op is called as torch.ops.vllm_hook_counter.counter_increment, so it must
+# be registered under a library named "vllm_hook_counter" — NOT vLLM's default
+# "vllm" namespace (which is what direct_register_custom_op uses unless given a
+# target_lib). Mismatch => AttributeError when Dynamo traces the call. The
+# Library object must stay alive for the op's lifetime, so we hold it globally.
+_COUNTER_LIB = None
 
 
 def _get_counter() -> torch.Tensor:
@@ -121,16 +127,21 @@ def _import_direct_register_custom_op():
 
 def register_counter_op() -> None:
     """Register vllm_hook_counter.counter_increment. Idempotent."""
-    global _OP_REGISTERED
+    global _OP_REGISTERED, _COUNTER_LIB
     if _OP_REGISTERED:
         return
+    from torch.library import Library
     direct_register_custom_op = _import_direct_register_custom_op()
+    # Dedicated library so the op lives at torch.ops.vllm_hook_counter.* (matches
+    # the call site), not torch.ops.vllm.*. Held in a global to stay alive.
+    _COUNTER_LIB = Library("vllm_hook_counter", "FRAGMENT")
     try:
         direct_register_custom_op(
             op_name="counter_increment",
             op_func=_increment_impl,
             mutates_args=["counter"],
             fake_impl=_increment_fake,
+            target_lib=_COUNTER_LIB,
             dispatch_key="CUDA",
         )
     except Exception as e:
