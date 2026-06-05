@@ -17,15 +17,17 @@ Failure pivots:
 
 Usage:
     python tests/cuda_graph/step0_7_idle_tax.py \\
-        --model google/gemma-3-4b-it \\
+        --model Qwen/Qwen2-1.5B-Instruct \\
         --num-decode-tokens 128 \\
         --batches 1 8 64
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import statistics
+import subprocess
 import sys
 import time
 from typing import List
@@ -127,47 +129,73 @@ def run(model: str, n_decode: int, batches: List[int], with_wrap: bool) -> dict:
             "fired": fired}
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="Qwen/Qwen2-1.5B-Instruct")
-    parser.add_argument("--num-decode-tokens", type=int, default=128)
-    parser.add_argument("--batches", type=int, nargs="+", default=[1, 8, 64])
-    args = parser.parse_args()
+def run_mode(mode: str, model: str, n_decode: int, batches: List[int]) -> int:
+    """One engine in this process (baseline or wrapped); print a RESULT line."""
+    label = ("WRAPPED (counter op on every layer, idle)" if mode == "wrapped"
+             else "BASELINE (unhooked)")
+    print(f"[step0.7] === {label} ===")
+    res = run(model, n_decode, batches, with_wrap=(mode == "wrapped"))
+    payload = {
+        "mode": mode,
+        "per_bs": {str(k): v for k, v in res["per_bs"].items()},  # JSON keys = str
+        "num_layers": res["num_layers"],
+        "used_gib": res["used_gib"],
+        "fired": res["fired"],
+    }
+    print("RESULT " + json.dumps(payload))
+    return 0
 
-    if not torch.cuda.is_available():
-        print("[step0.7] CUDA not available.")
-        return 2
 
-    print("[step0.7] === BASELINE (unhooked) ===")
-    base = run(args.model, args.num_decode_tokens, args.batches, with_wrap=False)
+def _spawn(mode: str, args) -> dict | None:
+    """Run one mode in a FRESH subprocess so each engine gets full GPU memory
+    and a clean teardown (avoids the two-engines-in-one-process OOM)."""
+    cmd = [
+        sys.executable, os.path.abspath(__file__), "--mode", mode,
+        "--model", args.model,
+        "--num-decode-tokens", str(args.num_decode_tokens),
+        "--batches", *[str(b) for b in args.batches],
+    ]
+    print(f"\n{'=' * 70}\n[step0.7] launching {mode} subprocess\n{'=' * 70}",
+          flush=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    res = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT "):
+            try:
+                res = json.loads(line[len("RESULT "):])
+            except Exception:
+                pass
+    print("\n".join((proc.stdout + proc.stderr).splitlines()[-25:]))
+    if res is None:
+        print(f"[step0.7] {mode}: no RESULT line (boot failed?). rc={proc.returncode}")
+    return res
 
-    print("\n[step0.7] === WRAPPED (counter op on every layer, idle) ===")
-    wrap = run(args.model, args.num_decode_tokens, args.batches, with_wrap=True)
+
+def run_compare(args) -> int:
+    base = _spawn("baseline", args)
+    wrap = _spawn("wrapped", args)
+    if base is None or wrap is None:
+        print("\n[step0.7] FAIL — a subprocess did not produce results (see above).")
+        return 1
 
     # Guard: confirm the wrap actually executed (read from the worker via RPC).
-    # If it is 0, the op never ran, so the "wrapped" timings measure an ABSENT
-    # op, not an idle one — the idle-tax numbers would be meaningless (a false
-    # PASS). With worker-install this should be large (fires every layer every
-    # step); a 0 here means injection did not land — settle it with
-    # step0_8_plugin_install.py.
+    # 0 => the op never ran, so the "wrapped" timings measure an ABSENT op and
+    # the idle-tax would be a false PASS. Settle injection with step0_8 first.
     fired = wrap.get("fired", 0)
     if fired == 0:
-        print("\n[step0.7] FAIL — counter is 0 after the wrapped run.")
-        print("          The op never executed (injection did not land in the")
-        print("          captured graph), so the idle-tax numbers are meaningless.")
+        print("\n[step0.7] FAIL — counter is 0 in the wrapped run; injection did")
+        print("          not land, so the idle-tax numbers are meaningless.")
         print("          Confirm injection with step0_8_plugin_install.py first.")
         return 1
-    print(f"[step0.7] wrap fired {fired} times during the wrapped run "
-          f"(op confirmed present in the graph).")
+    print(f"\n[step0.7] wrap fired {fired} times (op confirmed present in the graph).")
 
-    b_used = base.get("used_gib")
-    w_used = wrap.get("used_gib")
+    # VRAM is now genuinely isolated: each engine ran in its own process, so the
+    # device-global readouts don't overlap. (The counter wrap allocates ~nothing;
+    # step0_9 is the authoritative memory gate with real-shaped buffers.)
+    b_used, w_used = base.get("used_gib"), wrap.get("used_gib")
     if b_used is not None and w_used is not None:
-        print(f"[step0.7] VRAM (device-global, post-run): baseline {b_used:.2f} GiB "
-              f" wrapped {w_used:.2f} GiB  delta {w_used - b_used:+.2f} GiB")
-        print("          (sanity readout — sequential single-process boots + a "
-              "zero-byte counter wrap;")
-        print("           use step0_9_mem_budget.py for the authoritative memory gate.)")
+        print(f"[step0.7] VRAM (per-process): baseline {b_used:.2f} GiB  "
+              f"wrapped {w_used:.2f} GiB  delta {w_used - b_used:+.2f} GiB")
 
     num_layers = wrap["num_layers"]
     print("\n" + "=" * 70)
@@ -178,8 +206,8 @@ def main() -> int:
           f"{'delta':>9s}  {'per-layer':>10s}  {'%reg':>6s}  {'verdict':>10s}")
     rc = 0
     for bs in args.batches:
-        b = base["per_bs"][bs]
-        w = wrap["per_bs"][bs]
+        b = base["per_bs"][str(bs)]   # keys serialized as strings
+        w = wrap["per_bs"][str(bs)]
         delta = w - b
         per_layer_us = (delta / max(1, num_layers)) * 1e6
         pct = 100.0 * delta / b
@@ -199,8 +227,28 @@ def main() -> int:
         print("          Pivot: introduce VLLM_HOOK_ACTIVE_LAYERS to narrow")
         print("                 the activatable layer set at deploy time, OR")
         print("                 accept the regression and document the floor.")
-
     return rc
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", default="compare",
+                        choices=["compare", "baseline", "wrapped"],
+                        help="compare (default) spawns baseline + wrapped in "
+                             "separate processes; the other two are the per-engine "
+                             "workers it spawns.")
+    parser.add_argument("--model", default="Qwen/Qwen2-1.5B-Instruct")
+    parser.add_argument("--num-decode-tokens", type=int, default=128)
+    parser.add_argument("--batches", type=int, nargs="+", default=[1, 8, 64])
+    args = parser.parse_args()
+
+    if not torch.cuda.is_available():
+        print("[step0.7] CUDA not available.")
+        return 2
+
+    if args.mode == "compare":
+        return run_compare(args)
+    return run_mode(args.mode, args.model, args.num_decode_tokens, args.batches)
 
 
 if __name__ == "__main__":
