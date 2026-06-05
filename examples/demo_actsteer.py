@@ -12,8 +12,10 @@ from vllm import SamplingParams
 if __name__ == "__main__":
 
     cache_dir = "./cache/"
-    model = 'microsoft/Phi-3-mini-4k-instruct'
-    
+    # Profiler-friendly: model + steer config are overridable via env so the same
+    # demo can be traced for different models (see examples/lsf/run_actsteer_full.bsub).
+    model = os.environ.get("VLLM_HOOK_DEMO_MODEL", 'microsoft/Phi-3-mini-4k-instruct')
+
     dtype_map = {
         'microsoft/Phi-3-mini-4k-instruct': 'auto',
         'mistralai/Mistral-7B-Instruct-v0.3': torch.float16,
@@ -24,15 +26,17 @@ if __name__ == "__main__":
     llm = HookLLM(
         model=model,
         worker_name="steer_hook_act",
-        config_file=f'model_configs/activation_steer/{model.split("/")[-1]}.json',
+        config_file=os.environ.get(
+            "VLLM_HOOK_CONFIG_FILE",
+            f'model_configs/activation_steer/{model.split("/")[-1]}.json'),
         download_dir=cache_dir,
         gpu_memory_utilization=0.7,
         max_model_len=2048,
         trust_remote_code=True,
-        dtype=dtype_map[model],
+        dtype=dtype_map.get(model, torch.float16),
         enforce_eager=True,
         enable_prefix_caching=True,
-        enable_hook=True, 
+        enable_hook=True,
         tensor_parallel_size=1  # the number of gpus
     )
     
