@@ -12,7 +12,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from vllm_hook_plugins.utils.TokenHighlighter.utils import (
     ForwardAttrCapture,
-    _last_transformer_block,
     build_highlighter_record,
     capture_ready,
     capture_ready_for_teacher,
@@ -20,6 +19,7 @@ from vllm_hook_plugins.utils.TokenHighlighter.utils import (
     export_forward_attr_weights,
     flag_driver_tokens,
     iter_prompt_batches,
+    lm_head_weight,
     load_highlighter_artifact,
     merge_real_and_teacher_captures,
     plan_teacher_prefill_extend,
@@ -37,6 +37,8 @@ from vllm_hook_plugins.utils.TokenHighlighter.utils import (
     teacher_forced_token_ids,
     vllm_teacher_suffix_capture,
 )
+
+from vllm_hook_plugins.utils.TokenHighlighter.grad_influence import affirmation_loss_grad
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig
@@ -501,14 +503,26 @@ class HighlighterWorker:
         idle step when ``_capture_finish_pending`` was set (suffix path).
         """
         self._ensure_target_tensor()
+        # Precompute the affirmation-loss gradient g = dL/dh^N (post final-norm) at the
+        # generation positions here, while the unembedding W_U is resident on-device. This
+        # tiny [n_gen, d_model] tensor is all the analyzer needs from W_U, so we ship it in
+        # the artifact instead of the ~hundreds-of-MB W_U matrix (avoids re-saving on every
+        # capture and re-loading on every analyze, improving wall-clock time and efficiency).
+        w_u = lm_head_weight(self._model)
+        target_ids = list(self.target_ids)
         sequences = []
         for prompt_ids in self._pending:
             capture = self._capture_for_prompt(prompt_ids)
+            cpu_capture = {k: v.detach().cpu() for k, v in capture.items()}
+            if target_ids:
+                g_loss = affirmation_loss_grad(capture["h_L"], len(prompt_ids), 
+                    target_ids, w_u, device=capture["h_L"].device, model=self._model)
+                cpu_capture["g_loss"] = g_loss.detach().cpu()
             sequences.append({
                 "token_ids": list(prompt_ids),
                 "prompt_len": len(prompt_ids),
-                "target_ids": list(self.target_ids),
-                "capture": {k: v.detach().cpu() for k, v in capture.items()},
+                "target_ids": target_ids,
+                "capture": cpu_capture,
             })
         self._pending.clear()
         runtime_rope_probe = self._cap.meta.get("rope_runtime_probe")
@@ -527,19 +541,11 @@ class HighlighterWorker:
     def _finish_autograd(self, request) -> None:
         """Score prompts with HF autograd before the vLLM forward; write ``highlighter.pt``.
 
-        Separate HF model (``_grad_model``) — vLLM path is inference-only. The loss is
-        teacher-forced CE on the target tokens.
-
-        Two reference points (selected by ``VLLM_HIGHLIGHTER_AUTOGRAD_LASTBLOCK``):
-        - ``0`` (default): grad wrt prompt **input embeddings** (full-model influence).
-        - ``1``: grad wrt the **input to the last decoder block** (``dL/dh^(L-1)``), the
-          exact quantity the ``forward_attr`` closed form approximates. Use this as the
-          apples-to-apples reference when validating the last-block approximation.
+        Separate HF model (``_grad_model``) — vLLM path is inference-only. Only prompt
+        embeddings get ``requires_grad``; loss is teacher-forced CE on target tokens.
         """
         self._ensure_target_tensor()
         self._ensure_grad_model()
-        last_block_ref = os.environ.get("VLLM_HIGHLIGHTER_AUTOGRAD_LASTBLOCK", "0") == "1"
-        last_block = _last_transformer_block(self._grad_model) if last_block_ref else None
         target = self._target_tensor.to(self._grad_device)
         sequences = []
         with torch.inference_mode(False), torch.enable_grad():
@@ -556,42 +562,15 @@ class HighlighterWorker:
                 mask = torch.ones(
                     (1, inputs_embeds.size(1)), dtype=torch.long, device=self._grad_device
                 )
-                # Capture and retain grad on the last block's residual-stream input.
-                block_input: dict[str, torch.Tensor] = {}
-                handle = None
-                if last_block is not None:
-                    def _grab_block_input(_m, args, kwargs):
-                        h = kwargs.get("hidden_states")
-                        if h is None:
-                            h = next(
-                                (a for a in args
-                                 if isinstance(a, torch.Tensor) and a.dim() == 3),
-                                None,
-                            )
-                        if h is not None:
-                            h.requires_grad_(True)
-                            h.retain_grad()
-                            block_input["h"] = h
-                    handle = last_block.register_forward_pre_hook(
-                        _grab_block_input, with_kwargs=True
-                    )
-                try:
-                    logits = self._grad_model(
-                        inputs_embeds=inputs_embeds, attention_mask=mask, use_cache=False
-                    ).logits
-                finally:
-                    if handle is not None:
-                        handle.remove()
+                logits = self._grad_model(
+                    inputs_embeds=inputs_embeds, attention_mask=mask, use_cache=False
+                ).logits
                 start, end = plen - 1, plen - 1 + target.size(1)
                 loss = -F.log_softmax(logits[:, start:end, :], dim=-1).gather(
                     -1, target.unsqueeze(-1)
                 ).squeeze(-1).sum()
                 loss.backward()
-                if last_block is not None:
-                    grad_src = block_input["h"].grad[:, :plen, :]
-                else:
-                    grad_src = prompt_e.grad
-                scores = grad_src.norm(p=2, dim=-1).squeeze(0).detach().cpu().tolist()
+                scores = prompt_e.grad.norm(p=2, dim=-1).squeeze(0).detach().cpu().tolist()
                 sequences.append(
                     build_highlighter_record(
                         prompt_ids,

@@ -92,7 +92,7 @@ Artifacts per run: `{hook_dir}/{run_id}/tp_rank_0/` → `highlighter_activations
 1. **Install hooks** (once per engine via `collective_rpc("install_hooks")`) on the last decoder block: **Q, K, V** (post-RoPE, captured at the inner `.attn` core input), the block input `h_input`, and the block output `h_L`. A runtime RoPE probe also compares pre-projection vs post-`.attn` Q/K/V to record which streams are rotated (if any at all).
 2. **Teacher prefill** on `prompt + target[:-1]` (`extended` or `suffix` capture mode) so activations at both prompt and generation positions exist in the trace.
 3. **Persist traces:**
-  - **forward_attr:** `highlighter_activations.pt` (per-sequence `capture` tensors) + `weight_bundle` (`W_U`, `W_O`, `W_Q`, `W_V`, `W_K`, `final_norm`, `input_norm`, `rope_spec`, head counts) from the **live vLLM weights during capture**.
+  - **forward_attr:** `highlighter_activations.pt` (per-sequence `capture` tensors + a precomputed `g_loss`) + `weight_bundle` (`W_O`, `W_Q`, `W_V`, `W_K`, `final_norm`, `input_norm`, `rope_spec`, head counts) from the **live vLLM weights during capture**. The large unembedding `W_U` is **not** stored: it is only needed to form the affirmation-loss gradient at the few generation positions, so the worker precomputes that tiny `g_loss = dL/dh^N` while `W_U` is resident on-device (shrinks the artifact from hundreds of MB to a few MB and makes analyze near-instant). Legacy bundles may still carry `W_U`; the analyzer handles both.
   - **autograd:** `highlighter.pt` written in-worker (HF backward on prompt embeddings **before** the main vLLM forward); no Q/K/V analyze path required.
 4. **Scheduler** continues: restore prompt boundary after extended teacher prefill, then **prefill + decode** for the user request. KV at prompt positions reflects **unmitigated** embeddings for this pass (no soft removal yet).
 
@@ -115,7 +115,26 @@ Approximate `‖∂L_aff/∂x_i‖` by back-propagating through the **last decod
 
 **Fidelity vs full one-block autograd.** Given `g_j`, the attention-sub-block backprop above is *exact* (value + key paths, input/final-norm VJPs, GQA, `R_iᵀ`). The one systematic approximation is the **last-block MLP/FFN**: the gradient entering the attention output should be `(I + J_MLP_j)·g_j` but we use `g_j`. Because the MLP is position-wise it adds **no cross-position path** — it only rescales the per-generation-position upstream gradient. The boundary token (`prompt_len−1`, also the first generation position) gets its exact residual-skip identity term `+g_0` restored. Out-of-scope caveats (would change recomputed α): custom attention scaling, logit soft-capping, sliding-window masks (e.g. Gemma2).
 
-See `utils/TokenHighlighter/grad_influence.py` for a formal derivation. Validate vs `autograd`: `examples/validate_scorer_agreement.py`, `examples/verify_last_attn_grad.py`.
+See `utils/TokenHighlighter/grad_influence.py` for a formal derivation. Validate vs `autograd`: `examples/compare_token_highlighter_scorers.py` (see results below).
+
+#### Validation: `forward_attr` vs `autograd`
+
+`examples/compare_token_highlighter_scorers.py` (a standalone test harness, **not** part of the worker/pipeline) scores every prompt with `forward_attr` via the normal vLLM path and compares against an autograd reference it computes itself with a separate Hugging Face model. The reference is the gradient at the **input to the last decoder block** — `dL/dh^(L-1)`, the exact quantity `forward_attr` approximates: the script runs a full teacher-forced forward + backward but reads the gradient at the tensor entering the last block (via a `retain_grad` pre-hook) rather than at the embeddings. It reuses the exact `token_ids` vLLM captured so scores align position-for-position.
+
+Qwen2-1.5B-Instruct (fp16), 4 prompts, affirmation target, last-block reference:
+
+
+| Metric (mean over prompts) | Value |
+| -------------------------- | ----- |
+| Spearman ρ                 | 0.93  |
+| Kendall τ                  | 0.82  |
+| Pearson r                  | 0.99  |
+| Driver Jaccard             | 0.83  |
+
+
+`forward_attr` reproduces the last-block autograd ranking closely (ρ≈0.93, near-perfect r≈0.99), so the closed form is a faithful stand-in for a real backward pass at that point. Numbers are model/GPU/prompt-dependent; regenerate with the script.
+
+**Efficiency (in-pipeline).** Unlike the `autograd` scorer — which needs a **separate full model** and a **backward pass** — `forward_attr` reuses the deployment model's existing prefill forward and runs only closed-form matrix ops. Because the worker precomputes the tiny loss gradient `g_loss` at capture, the analyzer needs no `W_U`: the saved `highlighter_activations.pt` is ~10 MB instead of hundreds of MB (the old bundle embedded the full `[vocab, d_model]` unembedding), and analyze is near-instant with no second model load. (The standalone last-block autograd in the test script is a deliberately minimal GPU forward+backward and is **not** representative of the deployed `autograd` scorer's cost.)
 
 #### Capture modes (`VLLM_HIGHLIGHTER_CAPTURE`)
 
@@ -234,11 +253,11 @@ out_mit = llm.generate(
 ### Demos
 
 
-| Path                                           | Notes                                                                  |
-| ---------------------------------------------- | ---------------------------------------------------------------------- |
-| `examples/demo_token_highlighter.py`           | Script loop; `HighlighterDemoLLM` sets env + `extra_args`              |
-| `notebooks/demo_token_highlighter.ipynb`       | Local; smaller models (tested locally with NVIDIA RTX 5070, 8 GB VRAM) |
-| `notebooks/demo_token_highlighter_colab.ipynb` | 7B / paper-style decoding (tested with NVIDIA RTX 3060, 12 GB VRAM)    |
+| Path                                           | Notes                                                                                     |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `examples/demo_token_highlighter.py`           | Script loop; `HighlighterDemoLLM` sets env + `extra_args`                                 |
+| `notebooks/demo_token_highlighter.ipynb`       | Local; smaller models (tested locally with NVIDIA RTX 5070, 8 GB VRAM)                    |
+| `notebooks/demo_token_highlighter_colab.ipynb` | 7B / paper-style decoding (tested with NVIDIA RTX 3060, 12 GB VRAM with AWQ quantization) |
 
 
 **VRAM:** `max_num_batched_tokens` ≈ 512, `gpu_memory_utilization` ≈ 0.8 with 8GB; call `llm_engine.engine_core.shutdown()` between large model swaps.
@@ -288,7 +307,7 @@ Typical checkpoints: LLaMA, Mistral, Qwen, Vicuna, Phi, GPT-2, OPT-shaped, Gemma
 ## Roadmap and future directions
 
 - Colab / paper-scale demo hardening (7B, paper `α`, `β`, temperature)
-- Multi-prompt deployability report (`validate_scorer_agreement.py` + driver overlap)
+- Multi-prompt deployability report (`examples/compare_token_highlighter_scorers.py` + driver overlap)
 - Score at `_finish_capture` in-worker (optional: skip separate analyze pass for `forward_attr`)
 - Broader `locate_final_norm` / block discovery for new vLLM model classes
 - TP-aware artifact merge for `weight_bundle`

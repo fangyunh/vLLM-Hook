@@ -300,7 +300,7 @@ def _resolve_forward_attr_tensors(
 ) -> tuple[
     int,
     int,
-    torch.Tensor,
+    torch.Tensor | None,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor | None,
@@ -317,8 +317,12 @@ def _resolve_forward_attr_tensors(
     if weights is not None:
         n_heads = int(weights["num_attention_heads"])
         n_kv_heads = int(weights["num_key_value_heads"])
-        dtype = weights["W_U"].dtype
-        w_u = weights["W_U"].to(device=device, dtype=dtype)
+        # W_U is optional: modern bundles ship a precomputed loss gradient (``g_loss``)
+        # via ``loss_grad_fn`` instead of the large unembedding matrix. Derive dtype from
+        # an always-present weight (W_O) so bundles without W_U still resolve.
+        dtype = weights["W_O"].dtype
+        w_u_cpu = weights.get("W_U")
+        w_u = w_u_cpu.to(device=device, dtype=dtype) if w_u_cpu is not None else None
         w_o = weights["W_O"].to(device=device, dtype=dtype)
         w_v = weights["W_V"].to(device=device, dtype=dtype)
         w_q_cpu = weights.get("W_Q")
@@ -437,6 +441,12 @@ def compute_grad_influence_vectors(
     if loss_grad_fn is None:
         if not target_ids:
             raise ValueError("target_ids required for default affirmation_loss_grad")
+        if W_U is None:
+            raise ValueError(
+                "W_U (unembedding) is required to recompute the loss gradient when no "
+                "loss_grad_fn / precomputed g is supplied. Provide loss_grad_fn or a "
+                "bundle/sequence with g_loss, or export with include_unembedding=True."
+            )
         g = affirmation_loss_grad(
             h_L,
             prompt_len,

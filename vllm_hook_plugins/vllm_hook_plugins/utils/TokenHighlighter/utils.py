@@ -365,17 +365,23 @@ def export_forward_attr_weights(
     model: torch.nn.Module,
     *,
     runtime_rope_probe: dict[str, Any] | None = None,
+    include_unembedding: bool = False,
 ) -> dict[str, Any]:
     """Snapshot tensors needed for ``compute_grad_influences`` within analyzer without 
     reloading the model with `from_pretrained` during analysis.
 
     Saved alongside ``highlighter_activations.pt`` so the analyzer can run pure math on
     CPU/GPU using captures + this bundle (vLLM worker weights, including fused QKV layouts).
+
+    The unembedding ``W_U`` (``[vocab, d_model]``) is large (hundreds of MB) and is only
+    used to form the affirmation-loss gradient ``g`` at the few generation positions. The
+    worker precomputes that tiny ``g`` per sequence (see ``_finish_capture``), so ``W_U`` is
+    omitted by default. Set ``include_unembedding=True`` for legacy/standalone bundles whose
+    analyzer recomputes ``g`` from ``W_U`` + ``target_ids``.
     """
     last_attn = locate_last_attention(model)
     w_o, w_v, w_k = get_attn_key_value_weights(last_attn)
     w_q = get_attn_query_weight(last_attn)
-    w_u = lm_head_weight(model)
     cfg = getattr(model, "config", None)
     if cfg is None:
         raise RuntimeError("export_forward_attr_weights: model has no config")
@@ -385,12 +391,13 @@ def export_forward_attr_weights(
     bundle: dict[str, Any] = {
         "num_attention_heads": n_heads,
         "num_key_value_heads": n_kv,
-        "W_U": w_u.detach().cpu(),
         "W_O": w_o.detach().cpu(),
         "W_Q": w_q.detach().cpu(),
         "W_V": w_v.detach().cpu(),
         "W_K": w_k.detach().cpu(),
     }
+    if include_unembedding:
+        bundle["W_U"] = lm_head_weight(model).detach().cpu()
 
     bundle["input_norm"] = export_norm_spec(locate_input_norm(model), "attn")
     bundle["final_norm"] = export_norm_spec(locate_final_norm(model), "final")

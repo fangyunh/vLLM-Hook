@@ -108,14 +108,25 @@ class HighlighterAnalyzer:
                 capture = {k: v for k, v in seq["capture"].items()}
             else:
                 capture = {k: v.to(model.device) for k, v in seq["capture"].items()}
+            # Modern bundles omit the large unembedding W_U and instead ship a tiny
+            # precomputed loss gradient g (dL/dh^N at generation positions). Feed it back
+            # through loss_grad_fn so scoring needs no W_U.
+            seq_loss_grad_fn = loss_grad_fn
+            g_loss = capture.pop("g_loss", None)
+            if g_loss is not None and seq_loss_grad_fn is None:
+                seq_loss_grad_fn = (
+                    lambda h_L, prompt_len, W_U, dev, _g=g_loss: _g.to(
+                        device=h_L.device, dtype=h_L.dtype
+                    )
+                )
             scores = compute_grad_influences(
                 capture,
                 plen,
                 last_attn,
                 model,
                 weights=weight_bundle,
-                loss_grad_fn=loss_grad_fn,
-                target_ids=target_ids if loss_grad_fn is None else None,
+                loss_grad_fn=seq_loss_grad_fn,
+                target_ids=target_ids if seq_loss_grad_fn is None else None,
                 device=device,
             )
             sequences_out.append(
