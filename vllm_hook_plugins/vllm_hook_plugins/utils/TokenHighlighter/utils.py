@@ -1,7 +1,14 @@
-"""Stateless helpers for TokenHighlighter worker / analyzer plumbing."""
+"""Stateless helpers for TokenHighlighter worker / analyzer plumbing.
+
+Grouped like ``workers/_common.py``: model graph lookup, driver selection, trace I/O,
+extended/suffix teacher prefill, and last-layer Q/K/V capture (probe_hookqk-style).
+"""
 
 from __future__ import annotations
 
+import glob
+import logging
+import time
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -11,10 +18,16 @@ import torch
 import torch.utils.hooks
 from vllm.forward_context import get_forward_context
 
-_CAPTURE_KEYS = ("Q", "K", "V", "h_L")
+from vllm_hook_plugins.workers._common import get_query_metadata
+
+_REQUIRED_CAPTURE_KEYS = ("Q", "K", "V", "h_L")
+_OPTIONAL_CAPTURE_KEYS = ("h_input",)
+_CAPTURE_KEYS = _REQUIRED_CAPTURE_KEYS + _OPTIONAL_CAPTURE_KEYS
 
 
-# --- Model graph ---
+# ---------------------------------------------------------------------------
+# Model graph
+# ---------------------------------------------------------------------------
 
 
 def _last_transformer_block(model: torch.nn.Module) -> torch.nn.Module:
@@ -43,106 +56,215 @@ def locate_last_attention(model: torch.nn.Module) -> torch.nn.Module:
     return _attention_on_block(_last_transformer_block(model))
 
 
-def get_output_embeddings(model: torch.nn.Module) -> torch.nn.Module:
+# Dot-paths for pre-lm_head norm on common HF / vLLM decoder-only causal LMs.
+_FINAL_NORM_PATHS = (
+    "model.norm",                     # LLaMA, Mistral, Qwen
+    "norm",
+    "transformer.ln_f",               # GPT-2
+    "model.decoder.final_layer_norm", # OPT
+    "decoder.final_layer_norm",
+    "model.gpt_neox.final_layer_norm",# GPT-NeoX
+    "gpt_neox.final_layer_norm",
+    "model.final_layernorm",
+    "final_layernorm",
+)
+
+# Attribute names for the attention input norm on a single transformer block
+_INPUT_NORM_ATTRS = (
+    "input_layernorm",      # LLaMA, Qwen, Mistral, Gemma
+    "ln_1",                 # GPT-2, GPT-NeoX
+    "self_attn_layer_norm", # OPT
+    "attention_norm",       # Custom Triton wrappers
+)
+
+def _get_submodule(model: torch.nn.Module, path: str) -> torch.nn.Module | None:
+    obj: Any = model
+    for part in path.split("."):
+        obj = getattr(obj, part, None)
+        if obj is None:
+            return None
+    return obj if isinstance(obj, torch.nn.Module) else None
+
+
+def locate_final_norm(model: torch.nn.Module) -> torch.nn.Module | None:
+    """Find the last hidden-state norm before ``lm_head`` (architecture-agnostic lookup)."""
+    seen: set[int] = set()
+    for path in _FINAL_NORM_PATHS:
+        mod = _get_submodule(model, path)
+        if mod is None or id(mod) in seen:
+            continue
+        if getattr(mod, "weight", None) is None and getattr(mod, "bias", None) is None:
+            continue
+        seen.add(id(mod))
+        return mod
+    return None
+
+def locate_input_norm(
+    model: torch.nn.Module
+) -> torch.nn.Module | None:
+    """Find the attention input norm for the final transformer block.
+    
+    Traverses the model to the last block and extracts the input norm layer 
+    used to normalize the residual stream before the attention QKV projections.
+    """
+    try:
+        block = _last_transformer_block(model)
+    except RuntimeError:
+        return None
+        
+    for attr in _INPUT_NORM_ATTRS:
+        if (norm := getattr(block, attr, None)) is not None:
+            # Verify it's a module with learnable parameters
+            if getattr(norm, "weight", None) is not None or getattr(norm, "bias", None) is not None:
+                return norm
+    return None
+
+# Try to capture common norm families: rmsnorm, layernorm, gemma_rms
+# WARNING: Scoring procedure and approximation may not be accurate for custom or otherwise specialized norms 
+def infer_norm_kind(norm: torch.nn.Module) -> str:
+    """``rmsnorm`` | ``layernorm`` | ``gemma_rms`` for analytic forward / Jacobian."""
+    name = type(norm).__name__.lower()
+    if "gemma" in name:
+        return "gemma_rms"
+    if getattr(norm, "bias", None) is not None:
+        return "layernorm"
+    if "layernorm" in name.replace("_", ""):
+        return "layernorm"
+    return "rmsnorm"
+
+
+def export_norm_spec(norm: torch.nn.Module | None, norm_placement) -> dict[str, Any] | None:
+    """CPU snapshot of norm weights for ``highlighter_activations.pt``
+    either before final attention layer ("attn") or before lm_head ("final")."""
+    if norm is None:
+        return None
+    weight = getattr(norm, "weight", None)
+    bias = getattr(norm, "bias", None)
+    if weight is None and bias is None:
+        return None
+    return {
+        "norm_placement": norm_placement,
+        "norm_kind": infer_norm_kind(norm),
+        "weight": weight.detach().cpu() if weight is not None else None,
+        "bias": bias.detach().cpu() if bias is not None else None,
+        "eps": float(getattr(norm, "variance_epsilon", getattr(norm, "eps", 1e-6))),
+        "has_bias": bias is not None,
+    }
+
+def export_final_norm_spec(norm: torch.nn.Module | None) -> dict[str, Any] | None:
+    """Wrapper to export the bottleneck LM-head norm."""
+    return export_norm_spec(norm, norm_placement="final")
+
+
+def export_input_norm_spec(norm: torch.nn.Module | None) -> dict[str, Any] | None:
+    """Wrapper to export the attention input norm."""
+    return export_norm_spec(norm, norm_placement="attn")
+
+
+def lm_head_weight(model: torch.nn.Module) -> torch.Tensor:
+    """Return unembedding / ``lm_head`` weights for affirmation loss gradients."""
     getter = getattr(model, "get_output_embeddings", None)
     if callable(getter):
         out = getter()
         if isinstance(out, torch.nn.Module) and hasattr(out, "weight"):
-            return out
+            return cast(torch.Tensor, out.weight)
     lm_head = getattr(model, "lm_head", None)
     if (
         isinstance(lm_head, torch.nn.Module)
         and type(lm_head).__name__ != "PPMissingLayer"
         and hasattr(lm_head, "weight")
     ):
-        return lm_head
+        return cast(torch.Tensor, lm_head.weight)
     raise RuntimeError(f"Could not resolve output embeddings for {type(model).__name__}.")
 
-
-def lm_head_weight(model: torch.nn.Module) -> torch.Tensor:
-    return cast(torch.Tensor, get_output_embeddings(model).weight)
-
-
-def uses_fused_qkv_proj(last_attn: torch.nn.Module) -> bool:
-    """vLLM serving models use fused ``qkv_proj``; HF-style blocks use separate projections."""
-    return hasattr(last_attn, "qkv_proj")
 
 
 def get_attn_key_value_weights(
     last_attn: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return (W_O, W_V, W_K) aligned with fused vs split attention layout."""
+    """Return ``(W_O, W_V, W_K)`` for forward-attribution key/value paths.
+
+    Handles fused ``qkv_proj`` (vLLM) vs separate projections (HF-style layouts).
+    """
     attn = cast(Any, last_attn)
     w_o = cast(torch.Tensor, attn.o_proj.weight)
-    if uses_fused_qkv_proj(last_attn):
+    # Fused QKV proj: common with vLLM models
+    if hasattr(last_attn, "qkv_proj"):
         qkv_w = cast(torch.Tensor, attn.qkv_proj.weight)
         q_size, kv_size = int(attn.q_size), int(attn.kv_size)
-        w_k = qkv_w[q_size : q_size + kv_size]
-        w_v = qkv_w[q_size + kv_size : q_size + 2 * kv_size]
-        return w_o, w_v, w_k
-    return (
-        w_o,
-        cast(torch.Tensor, attn.v_proj.weight),
-        cast(torch.Tensor, attn.k_proj.weight),
-    )
+        return w_o, qkv_w[q_size + kv_size : q_size + 2 * kv_size], qkv_w[q_size : q_size + kv_size]
+    
+    # Separate QKV projections: common with HF models
+    return w_o, cast(torch.Tensor, attn.v_proj.weight), cast(torch.Tensor, attn.k_proj.weight)
 
 
-# --- Autograd scorer weight resolution ---
-
-
-def _snapshot_from_cache(model_id: str, download_dir: str) -> str | None:
-    snapshots_dir = os.path.join(
-        os.path.abspath(download_dir), f"models--{model_id.replace('/', '--')}", "snapshots"
-    )
-    if not os.path.isdir(snapshots_dir):
-        return None
-    entries = sorted(os.listdir(snapshots_dir))
-    return os.path.join(snapshots_dir, entries[-1]) if entries else None
-
-
-def _has_local_weights(path: str) -> bool:
-    if not os.path.isdir(path):
-        return False
-    names = set(os.listdir(path))
-    return bool(
-        names & {"model.safetensors", "pytorch_model.bin", "model.safetensors.index.json"}
-    )
+def get_attn_query_weight(last_attn: torch.nn.Module) -> torch.Tensor:
+    """Return ``W_Q`` for the last attention module."""
+    attn = cast(Any, last_attn)
+    if hasattr(last_attn, "qkv_proj"):
+        qkv_w = cast(torch.Tensor, attn.qkv_proj.weight)
+        q_size = int(attn.q_size)
+        return qkv_w[:q_size]
+    return cast(torch.Tensor, attn.q_proj.weight)
 
 
 def resolve_grad_model_source(model_id: str, model_runner: Any, hook_dir: str | None) -> str:
+    """Resolve a local HF weight snapshot for the autograd scorer.
+
+    Checks ``model_id`` as a path, then vLLM ``download_dir`` and hook-adjacent cache.
+    """
+
+    def _snapshot(download_dir: str) -> str | None:
+        root = os.path.join(
+            os.path.abspath(download_dir), f"models--{model_id.replace('/', '--')}", "snapshots"
+        )
+        if not os.path.isdir(root):
+            return None
+        entries = sorted(os.listdir(root))
+        return os.path.join(root, entries[-1]) if entries else None
+
+    def _has_weights(path: str) -> bool:
+        if not os.path.isdir(path):
+            return False
+        return bool(
+            set(os.listdir(path))
+            & {"model.safetensors", "pytorch_model.bin", "model.safetensors.index.json"}
+        )
+
     if os.path.isdir(model_id):
-        if _has_local_weights(model_id):
+        if _has_weights(model_id):
             return model_id
-        snap = _snapshot_from_cache(model_id, model_id)
-        if snap and _has_local_weights(snap):
+        snap = _snapshot(model_id)
+        if snap and _has_weights(snap):
             return snap
 
-    download_dirs: list[str] = []
+    dirs: list[str] = []
     vllm_config = getattr(model_runner, "vllm_config", None)
     load_cfg = getattr(vllm_config, "load_config", None) if vllm_config else None
     if load_cfg is not None and getattr(load_cfg, "download_dir", None):
-        download_dirs.append(load_cfg.download_dir)
+        dirs.append(load_cfg.download_dir)
     if hook_dir:
-        download_dirs.append(os.path.join(os.path.dirname(os.path.abspath(hook_dir)), "cache"))
+        dirs.append(os.path.join(os.path.dirname(os.path.abspath(hook_dir)), "cache"))
 
     seen: set[str] = set()
-    for download_dir in download_dirs:
-        resolved_dir = os.path.abspath(download_dir)
-        if resolved_dir in seen:
+    for d in dirs:
+        d = os.path.abspath(d)
+        if d in seen:
             continue
-        seen.add(resolved_dir)
-        snapshot = _snapshot_from_cache(model_id, resolved_dir)
-        if snapshot and _has_local_weights(snapshot):
-            return snapshot
+        seen.add(d)
+        snap = _snapshot(d)
+        if snap and _has_weights(snap):
+            return snap
 
     raise RuntimeError(
         f"Could not resolve a local weight snapshot for '{model_id}'. "
-        "Download the model into your vLLM cache (download_dir) or set "
-        "VLLM_HIGHLIGHTER_MODEL to the snapshot directory."
+        "Download the model into your vLLM cache or set VLLM_HIGHLIGHTER_MODEL."
     )
 
 
-# --- Driver selection / soft removal ---
+# ---------------------------------------------------------------------------
+# Driver selection / soft removal
+# ---------------------------------------------------------------------------
 
 
 def flag_driver_tokens(
@@ -150,93 +272,216 @@ def flag_driver_tokens(
     *,
     threshold_k: float,
     mode: str | None = None,
+    alpha: float | None = None,
 ) -> list[int]:
+    """Return prompt token indices selected as drivers (mean+std or top-α).
+
+    ``mean_std`` (default): score > mean + k·std. ``top_percentage``: top α fraction.
+    ``mode`` / ``alpha`` fall back to ``VLLM_HIGHLIGHTER_MODE`` / ``VLLM_HIGHLIGHTER_ALPHA``.
+    Used for mitigate embedding scaling and trace metadata.
+    """
     if not scores:
         return []
     mode = mode or os.environ.get("VLLM_HIGHLIGHTER_MODE", "mean_std")
     s = torch.tensor(scores, dtype=torch.float32)
     if mode == "top_percentage":
-        alpha = float(os.environ.get("VLLM_HIGHLIGHTER_ALPHA", "0.25"))
+        if alpha is None:
+            alpha = float(os.environ.get("VLLM_HIGHLIGHTER_ALPHA", "0.25"))
         k = max(1, int(len(scores) * alpha))
         return sorted(torch.argsort(s, descending=True)[:k].tolist())
     threshold = s.mean() + threshold_k * s.std(unbiased=False)
     return [i for i, v in enumerate(scores) if float(v) > float(threshold)]
 
 
-def apply_soft_removal(
-    prompt_embeds: torch.Tensor,
-    score_list: list[float],
-    *,
-    soft_beta: float,
-    threshold_k: float,
-    mode: str | None = None,
-) -> torch.Tensor:
-    drivers = set(flag_driver_tokens(score_list, threshold_k=threshold_k, mode=mode))
-    rows = prompt_embeds.detach().squeeze(0).clone()
-    return torch.stack(
-        [rows[i] * soft_beta if i in drivers else rows[i] for i in range(rows.size(0))],
-        dim=0,
-    )
-
-
-# --- Scheduler request / trace I/O ---
+# ---------------------------------------------------------------------------
+# Scheduler / trace I/O
+# ---------------------------------------------------------------------------
 
 
 def iter_prompt_batches(request: Any) -> list[list[int]]:
+    """Collect ``prompt_token_ids`` from scheduler output (new + cached metadata)."""
     batches: list[list[int]] = []
     for attr in ("seq_group_metadata_list", "scheduled_new_reqs"):
-        for obj in getattr(request, attr, []):
+        for obj in getattr(request, attr, []) or []:
             if prompt_ids := getattr(obj, "prompt_token_ids", None):
                 batches.append(list(prompt_ids))
     return batches
 
 
-def request_has_prefill_prompts(request: Any) -> bool:
-    return bool(iter_prompt_batches(request))
-
-
 def prompt_prefill_done(model_runner: Any, prompt_ids: list[int]) -> bool:
-    """True when every in-flight request matching ``prompt_ids`` finished prefill."""
+    """True when a matching in-flight request has ``num_computed_tokens >= len(prompt)``.
+
+    Walks ``input_batch`` and compares the request prefix of ``prompt_token_ids`` to
+    ``prompt_ids``. Used to know when capture can finish and suffix teacher can run.
+    """
+    plen = len(prompt_ids)
     requests = getattr(model_runner, "requests", None)
     input_batch = getattr(model_runner, "input_batch", None)
-    if requests is None or input_batch is None:
-        return True
-
-    prompt_len = len(prompt_ids)
-    matched = False
+    if requests is None or input_batch is None or input_batch.num_reqs == 0:
+        return False
     for req_id in list(input_batch.req_ids)[: input_batch.num_reqs]:
         req = requests.get(req_id)
-        if req is None:
+        if req is None or req.prompt_token_ids is None:
             continue
-        ptoks = req.prompt_token_ids
-        if ptoks is None:
+        if len(req.prompt_token_ids) < plen or list(req.prompt_token_ids[:plen]) != prompt_ids:
             continue
-        if len(ptoks) < prompt_len or list(ptoks[:prompt_len]) != prompt_ids:
-            continue
-        matched = True
-        if int(req.num_computed_tokens) < prompt_len:
+        if int(req.num_computed_tokens) < plen:
             return False
-    return matched
+        return True
+    return False
 
 
-def save_highlighter_sequences(
-    hook_dir: str | None,
-    run_id_file: str | None,
-    sequences: list[dict],
-) -> None:
-    if not (hook_dir and sequences and run_id_file and os.path.exists(run_id_file)):
-        return
+def _highlighter_run_dir(hook_dir: str | None, run_id_file: str | None) -> str | None:
+    if not (hook_dir and run_id_file and os.path.exists(run_id_file)):
+        return None
     with open(run_id_file, "r") as f:
         ids = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
     if not ids:
-        return
-    run_id = ids[-1]
-    run_dir = os.path.join(hook_dir, run_id, "tp_rank_0")
+        return None
+    run_dir = os.path.join(hook_dir, ids[-1], "tp_rank_0")
     os.makedirs(run_dir, exist_ok=True)
-    torch.save(
-        {"run_id": run_id, "sequences": sequences},
-        os.path.join(run_dir, "highlighter.pt"),
+    return run_dir
+
+
+def _save_highlighter_file(
+    hook_dir: str | None,
+    run_id_file: str | None,
+    sequences: list[dict],
+    *,
+    filename: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    run_dir = _highlighter_run_dir(hook_dir, run_id_file)
+    if not run_dir or not sequences:
+        return
+    run_id = os.path.basename(os.path.dirname(run_dir))
+    payload: dict[str, Any] = {"run_id": run_id, "sequences": sequences}
+    if extra:
+        payload.update(extra)
+    torch.save(payload, os.path.join(run_dir, filename))
+
+
+def export_forward_attr_weights(
+    model: torch.nn.Module,
+    *,
+    runtime_rope_probe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Snapshot tensors needed for ``compute_grad_influences`` within analyzer without 
+    reloading the model with `from_pretrained` during analysis.
+
+    Saved alongside ``highlighter_activations.pt`` so the analyzer can run pure math on
+    CPU/GPU using captures + this bundle (vLLM worker weights, including fused QKV layouts).
+    """
+    last_attn = locate_last_attention(model)
+    w_o, w_v, w_k = get_attn_key_value_weights(last_attn)
+    w_q = get_attn_query_weight(last_attn)
+    w_u = lm_head_weight(model)
+    cfg = getattr(model, "config", None)
+    if cfg is None:
+        raise RuntimeError("export_forward_attr_weights: model has no config")
+    n_heads = int(cfg.num_attention_heads)
+    n_kv = int(getattr(cfg, "num_key_value_heads", n_heads))
+
+    bundle: dict[str, Any] = {
+        "num_attention_heads": n_heads,
+        "num_key_value_heads": n_kv,
+        "W_U": w_u.detach().cpu(),
+        "W_O": w_o.detach().cpu(),
+        "W_Q": w_q.detach().cpu(),
+        "W_V": w_v.detach().cpu(),
+        "W_K": w_k.detach().cpu(),
+    }
+
+    bundle["input_norm"] = export_norm_spec(locate_input_norm(model), "attn")
+    bundle["final_norm"] = export_norm_spec(locate_final_norm(model), "final")
+    # RoPE metadata for inverse VJP in analyzer:
+    # only apply inverse rotation when this attention path actually uses RoPE.
+    rope_spec: dict[str, Any] = {
+        "has_rope": False,
+        "rotate_q": None,
+        "rotate_k": None,
+        "rotate_v": None,
+    }
+    rope_theta = getattr(cfg, "rope_theta", None)
+    if rope_theta is not None:
+        rope_spec["has_rope"] = True
+        rope_spec["rope_theta"] = float(rope_theta)
+    partial_rotary = getattr(cfg, "partial_rotary_factor", None)
+    if partial_rotary is not None:
+        rope_spec["partial_rotary_factor"] = float(partial_rotary)
+    rope_scaling = getattr(cfg, "rope_scaling", None)
+    if rope_scaling is not None:
+        rope_spec["has_rope"] = True
+        rope_spec["rope_scaling"] = (
+            dict(rope_scaling) if isinstance(rope_scaling, dict) else rope_scaling
+        )
+    for mod in (last_attn, model, getattr(model, "model", None)):
+        if mod is None:
+            continue
+        rotary = getattr(mod, "rotary_emb", None)
+        inv = getattr(rotary, "inv_freq", None) if rotary is not None else None
+        if inv is not None:
+            rope_spec["has_rope"] = True
+            rope_spec["inv_freq"] = inv.detach().cpu()
+            break
+    if runtime_rope_probe:
+        for key in ("has_rope", "rotate_q", "rotate_k", "rotate_v", "probe_rel_tol"):
+            if key in runtime_rope_probe:
+                rope_spec[key] = runtime_rope_probe[key]
+    bundle["rope_spec"] = rope_spec
+    return bundle
+
+
+def save_highlighter_sequences(
+    hook_dir: str | None, run_id_file: str | None, sequences: list[dict]
+) -> None:
+    """Write ``highlighter.pt`` (scores + soft indices) under the latest run id."""
+    _save_highlighter_file(hook_dir, run_id_file, sequences, filename="highlighter.pt")
+    logging.info(f"Saved {len(sequences)} sequences to {hook_dir}/{run_id_file}/highlighter.pt")
+
+
+def save_highlighter_activations(
+    hook_dir: str | None,
+    run_id_file: str | None,
+    sequences: list[dict],
+    *,
+    weight_bundle: dict[str, Any] | None = None,
+) -> None:
+    """Write ``highlighter_activations.pt`` (captures + optional weight bundle) under the run id."""
+    extra = {"weight_bundle": weight_bundle} if weight_bundle else None
+    _save_highlighter_file(
+        hook_dir,
+        run_id_file,
+        sequences,
+        filename="highlighter_activations.pt",
+        extra=extra,
     )
+
+
+def load_highlighter_artifact(
+    hook_dir: str,
+    run_id: str,
+    filename: str,
+    *,
+    wait_seconds: float = 0.0,
+    poll_interval: float = 0.05,
+    quiet: bool = False,
+) -> dict | None:
+    """Load newest ``filename`` under ``hook_dir/{run_id}/**`` with optional short wait.
+
+    Some vLLM capture flows finish writing the artifact just after ``generate`` returns.
+    ``wait_seconds`` allows a bounded poll before declaring the file missing.
+    """
+    deadline = time.time() + max(0.0, wait_seconds)
+    while True:
+        paths = glob.glob(os.path.join(hook_dir, run_id, "**", filename), recursive=True)
+        if paths:
+            return torch.load(max(paths, key=os.path.getmtime), map_location="cpu")
+        if time.time() >= deadline:
+            if not quiet:
+                logging.warning(f"No {filename} found under {hook_dir}/{run_id}/**")
+            return None
+        time.sleep(max(0.01, poll_interval))
 
 
 def build_highlighter_record(
@@ -248,6 +493,7 @@ def build_highlighter_record(
     threshold_k: float,
     mode: str | None = None,
 ) -> dict:
+    """Build one sequence entry for ``highlighter.pt`` (analyzer output artifact)."""
     mode = mode or os.environ.get("VLLM_HIGHLIGHTER_MODE", "mean_std")
     record = {
         "token_ids": list(prompt_ids),
@@ -265,74 +511,266 @@ def build_highlighter_record(
     return record
 
 
-# --- Forward-attr capture ---
+# ---------------------------------------------------------------------------
+# Forward-attr capture state
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class ForwardAttrCapture:
-    """Mutable buffers filled by hooks during a real ``execute_model`` prefill."""
+    """Per-worker hook buffers for one capture phase (see ``HighlighterWorker._cap``)."""
 
-    active: bool = False
-    live: dict[str, torch.Tensor] = field(default_factory=dict)
-    meta: dict[str, Any] = field(default_factory=dict)
+    active: bool = False  # gates hooks during prefill forwards only
+    live: dict[str, torch.Tensor] = field(default_factory=dict)  # Q, K, V, h_L, h_input
+    meta: dict[str, Any] = field(default_factory=dict)  # query_start_loc, input_ids
 
 
-def forward_attr_capture_is_ready(cap: ForwardAttrCapture) -> bool:
-    """True when hooks populated all last-layer tensors for the current forward."""
-    return all(
-        key in cap.live and cap.live[key].numel() > 0 for key in _CAPTURE_KEYS
+def capture_ready(live: dict[str, torch.Tensor]) -> bool:
+    """True when required last-layer tensors were stored by hooks."""
+    return all(key in live and live[key].numel() > 0 for key in _REQUIRED_CAPTURE_KEYS)
+
+
+def teacher_forced_token_ids(prompt_ids: list[int], target_ids: list[int]) -> list[int]:
+    """Input token list for causal teacher forcing: ``prompt + target[:-1]``."""
+    return list(prompt_ids) + list(target_ids[:-1])
+
+
+def capture_ready_for_teacher(
+    prompt_ids: list[int], target_ids: list[int], live: dict[str, torch.Tensor]
+) -> bool:
+    """True when extended prefill captured at least ``len(prompt) + len(target) - 1`` rows."""
+    if not capture_ready(live):
+        return False
+    return int(live["h_L"].size(0)) >= len(teacher_forced_token_ids(prompt_ids, target_ids))
+
+
+def _slice_capture(
+    live: dict[str, torch.Tensor],
+    meta: dict[str, Any],
+    token_ids: list[int],
+    *,
+    missing_msg: str,
+    match_msg: str,
+) -> dict[str, torch.Tensor]:
+    """Slice flat-batch Q/K/V/h_L/(optional h_input) by ``query_start_loc`` (probe-style).
+
+    vLLM lays the batch out as one concatenated sequence; ``meta`` maps a request's
+    token ids to ``[start:end)`` indices. Without meta, assumes a single-request batch.
+    """
+    if not capture_ready(live):
+        raise RuntimeError(missing_msg)
+    n = len(token_ids)
+    if not meta:
+        # Single-request path: hooks filled rows 0..n-1 in order.
+        if live["h_L"].size(0) < n:
+            raise RuntimeError(
+                f"forward_attr: capture length {live['h_L'].size(0)} < expected {n}."
+            )
+        out = {
+            k: live[k][:n].detach()
+            for k in _REQUIRED_CAPTURE_KEYS
+        }
+        if "h_input" in live:
+            out["h_input"] = live["h_input"][:n].detach()
+        return out
+
+    qsl, flat_ids = meta["query_start_loc"], meta["input_ids"]
+    for r in range(int(qsl.numel()) - 1):
+        start = int(qsl[r].item())
+        seg = flat_ids[start : int(qsl[r + 1].item())].tolist()
+        # Match this batch row to the expected token prefix.
+        if len(seg) >= n and seg[:n] == token_ids:
+            out = {
+                k: live[k][start : start + n].detach()
+                for k in _REQUIRED_CAPTURE_KEYS
+            }
+            if "h_input" in live:
+                out["h_input"] = live["h_input"][start : start + n].detach()
+            return out
+    raise RuntimeError(match_msg)
+
+
+def slice_teacher_prefill_capture(
+    prompt_ids: list[int],
+    target_ids: list[int],
+    live: dict[str, torch.Tensor],
+    meta: dict[str, Any],
+) -> dict[str, torch.Tensor]:
+    """Slice activations for ``prompt + target[:-1]`` after extended prefill."""
+    full_ids = teacher_forced_token_ids(prompt_ids, target_ids)
+    return _slice_capture(
+        live,
+        meta,
+        full_ids,
+        missing_msg="forward_attr: extended prefill did not capture activations.",
+        match_msg=(
+            f"forward_attr: could not match extended capture (teacher len={len(full_ids)})."
+        ),
     )
 
 
 def slice_real_prefill_capture(
-    prompt_ids: list[int],
-    live: dict[str, torch.Tensor],
-    meta: dict[str, Any],
+    prompt_ids: list[int], live: dict[str, torch.Tensor], meta: dict[str, Any]
 ) -> dict[str, torch.Tensor]:
-    """Extract per-prompt Q/K/V/h_L from a batched vLLM prefill capture.
+    """Slice activations for the prompt segment from a normal prefill forward."""
+    n = len(prompt_ids)
+    return _slice_capture(
+        live,
+        meta,
+        prompt_ids,
+        missing_msg="forward_attr: hooks did not capture during prefill.",
+        match_msg=f"forward_attr: could not match prefill capture (prompt len={n}).",
+    )
 
-    During ``super().execute_model()``, hooks store the *entire* flattened batch in
-    ``live`` (all requests, all scheduled query tokens). ``meta`` holds:
 
-    - ``query_start_loc``: length ``num_reqs + 1``; request ``r`` occupies token indices
-      ``[query_start_loc[r], query_start_loc[r+1])`` in the flat layout.
-    - ``input_ids``: the token id at each flat index (for matching).
+# ---------------------------------------------------------------------------
+# Extended teacher prefill (one scheduler step)
+# ---------------------------------------------------------------------------
 
-    This function finds the batch row whose first ``len(prompt_ids)`` tokens equal
-    ``prompt_ids``, then slices each of ``Q``, ``K``, ``V``, ``h_L`` to that row's
-    prompt positions only (not decode tokens that may share the same row).
+
+@dataclass
+class TeacherPrefillExtendPlan:
+    """Per-request state for extended prefill (scheduler bump + post-forward restore)."""
+
+    req_id: str
+    prompt_len: int
+    suffix_ids: list[int]  # target[:-1]
+    saved_prompt_row: Any = None  # prompt slice of token_ids_cpu before staging
+
+
+def _prompt_matches(req_prompt: list[int] | None, prompt_ids: list[int]) -> bool:
+    plen = len(prompt_ids)
+    return req_prompt is not None and list(req_prompt[:plen]) == prompt_ids
+
+
+def prefill_chunked_for_prompt(
+    scheduler_output: Any, model_runner: Any, prompt_ids: list[int]
+) -> bool:
+    """True when the first prefill step schedules fewer tokens than ``len(prompt_ids)``."""
+    if scheduler_output is None:
+        return False
+    plen = len(prompt_ids)
+
+    def _chunked(computed: int, scheduled: int) -> bool:
+        return computed == 0 and 0 < scheduled < plen
+
+    # Check for newly scheduled requests within this step that match the prompt
+    for nrd in getattr(scheduler_output, "scheduled_new_reqs", []) or []:
+        if _prompt_matches(nrd.prompt_token_ids, prompt_ids):
+            scheduled = int(scheduler_output.num_scheduled_tokens.get(nrd.req_id, 0))
+            if _chunked(int(nrd.num_computed_tokens), scheduled):
+                return True
+    # Check for in-flight requests that match the prompt
+    for req_id, scheduled in scheduler_output.num_scheduled_tokens.items():
+        req = model_runner.requests.get(req_id)
+        if _prompt_matches(getattr(req, "prompt_token_ids", None), prompt_ids):
+            if _chunked(int(req.num_computed_tokens), int(scheduled)):
+                return True
+    return False
+
+
+def plan_teacher_prefill_extend(
+    scheduler_output: Any,
+    model_runner: Any,
+    pending_prompts: list[list[int]],
+    target_ids: list[int],
+    already_extended: set[str],
+) -> list[TeacherPrefillExtendPlan]:
+    """Bump ``num_scheduled_tokens`` so one forward runs ``prompt + target[:-1]``.
+
+    Only applies on the first prefill step when the full prompt fits in that step
+    (``computed == 0`` and ``scheduled >= plen``). Chunked prompts skip bump here.
     """
-    if not forward_attr_capture_is_ready(
-        ForwardAttrCapture(live=live, meta=meta)
-    ):
-        raise RuntimeError(
-            "forward_attr: no prefill capture available; hooks did not run during execute_model."
+    suffix_ids = list(target_ids[:-1])
+    if not suffix_ids:
+        return []
+    extra = len(suffix_ids)
+    plans: list[TeacherPrefillExtendPlan] = []
+    seen: set[str] = set()
+
+    def _bump(req_id: str, prompt_ids: list[int], computed: int, scheduled: int) -> None:
+        if req_id in already_extended or req_id in seen or scheduled <= 0:
+            return
+        plen = len(prompt_ids)
+        # First chunk must cover entire prompt; otherwise use suffix capture path.
+        if computed != 0 or scheduled < plen:
+            return
+        scheduler_output.num_scheduled_tokens[req_id] = scheduled + extra
+        scheduler_output.total_num_scheduled_tokens = int(
+            getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0
+        ) + extra
+        seen.add(req_id)
+        plans.append(TeacherPrefillExtendPlan(req_id, plen, suffix_ids))
+
+    for prompt_ids in pending_prompts:
+        for nrd in getattr(scheduler_output, "scheduled_new_reqs", []) or []:
+            if _prompt_matches(nrd.prompt_token_ids, prompt_ids):
+                _bump(
+                    nrd.req_id,
+                    prompt_ids,
+                    int(nrd.num_computed_tokens),
+                    int(scheduler_output.num_scheduled_tokens.get(nrd.req_id, 0)),
+                )
+        for req_id, scheduled in scheduler_output.num_scheduled_tokens.items():
+            req = model_runner.requests.get(req_id)
+            if _prompt_matches(getattr(req, "prompt_token_ids", None), prompt_ids):
+                _bump(req_id, prompt_ids, int(req.num_computed_tokens), int(scheduled))
+    return plans
+
+
+def stage_teacher_prefill_tokens(
+    model_runner: Any, plans: list[TeacherPrefillExtendPlan]
+) -> None:
+    """Write ``target[:-1]`` into ``input_batch`` after ``_update_states``.
+
+    vLLM fills prompt slots from ``prompt_token_ids``; this overwrites the tail of
+    the row so the upcoming forward sees teacher-forced token ids.
+    """
+    batch = model_runner.input_batch
+    for plan in plans:
+        idx = batch.req_id_to_index[plan.req_id]
+        plan.saved_prompt_row = batch.token_ids_cpu[idx, : plan.prompt_len].copy()
+        batch.token_ids_cpu[idx, plan.prompt_len : plan.prompt_len + len(plan.suffix_ids)] = (
+            plan.suffix_ids
         )
 
-    if not meta:
-        # Single-request prefill with no batch metadata (e.g. attn_metadata unavailable).
-        h_len = live["h_L"].size(0)
-        if h_len < len(prompt_ids):
-            raise RuntimeError(
-                f"forward_attr: capture length {h_len} < prompt length {len(prompt_ids)}."
-            )
-        return {key: live[key][: len(prompt_ids)].detach() for key in _CAPTURE_KEYS}
 
-    query_start_loc = meta["query_start_loc"]
-    flat_ids = meta["input_ids"]
+def restore_teacher_prefill_state(
+    model_runner: Any, plans: list[TeacherPrefillExtendPlan]
+) -> None:
+    """Reset ``num_computed_tokens`` ("cursor") to ``prompt_len`` so decode ignores teacher tokens.
 
-    for req_idx in range(int(query_start_loc.numel()) - 1):
-        start = int(query_start_loc[req_idx].item())
-        seg = flat_ids[start : int(query_start_loc[req_idx + 1].item())].tolist()
-        if len(seg) >= len(prompt_ids) and seg[: len(prompt_ids)] == prompt_ids:
-            end_idx = start + len(prompt_ids)
-            captured = {key: live[key][start:end_idx].detach() for key in _CAPTURE_KEYS}
-            if len(captured) != len(_CAPTURE_KEYS):
-                raise RuntimeError("forward_attr prefill capture is missing Q, K, V, or h_L.")
-            return captured
+    KV for teacher positions may remain in the paged cache, but the scheduler cursor
+    and token row are rewound so generation continues from the prompt boundary only.
+    """
+    batch = model_runner.input_batch
+    for plan in plans:
+        plen, m = plan.prompt_len, len(plan.suffix_ids)
+        if (req := model_runner.requests.get(plan.req_id)) is not None:
+            req.num_computed_tokens = plen
+        idx = batch.req_id_to_index.get(plan.req_id)
+        if idx is None:
+            continue
+        # Mirror cursor reset on batch tensors the runner reads on the next step.
+        batch.num_computed_tokens_cpu[idx] = plen
+        batch.num_computed_tokens_cpu_tensor[idx] = plen
+        model_runner.num_computed_tokens[idx] = plen
+        if plan.saved_prompt_row is not None:
+            batch.token_ids_cpu[idx, :plen] = plan.saved_prompt_row
+            batch.token_ids_cpu[idx, plen : plen + m] = 0
 
+
+def find_request_index_for_prompt(model_runner: Any, prompt_ids: list[int]) -> int:
+    """``input_batch`` row index with completed prefill matching ``prompt_ids``."""
+    batch, plen = model_runner.input_batch, len(prompt_ids)
+    for req_index in range(batch.num_reqs):
+        req = model_runner.requests.get(batch.req_ids[req_index])
+        if req is None or not _prompt_matches(req.prompt_token_ids, prompt_ids):
+            continue
+        if int(batch.num_computed_tokens_cpu[req_index]) >= plen:
+            return req_index
     raise RuntimeError(
-        f"forward_attr: could not match prefill capture to prompt_ids (len={len(prompt_ids)})."
+        f"forward_attr: no in-flight request with completed prefill (prompt len={plen})."
     )
 
 
@@ -341,198 +779,567 @@ def merge_real_and_teacher_captures(
     real_capture: dict[str, torch.Tensor],
     teacher_capture: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
+    """Prompt rows from scheduler prefill; suffix rows from teacher pass (suffix mode).
+
+    ``teacher_capture`` is usually padded via ``expand_suffix_capture``; prompt
+    positions are overwritten with activations from the real prefill hooks.
+    """
+    if not capture_ready(real_capture):
+        raise RuntimeError("forward_attr: real prefill capture required for prompt merge.")
     merged = {key: teacher_capture[key].clone() for key in _CAPTURE_KEYS}
     for key in merged:
-        n = min(prompt_len, real_capture[key].size(0), merged[key].size(0))
-        merged[key][:n] = real_capture[key][:n]
+        end = min(prompt_len, real_capture[key].size(0), merged[key].size(0))
+        merged[key][:end] = real_capture[key][:end]  # prompt slice from scheduler path
     return merged
 
 
-def teacher_forced_input_ids(
+# ---------------------------------------------------------------------------
+# Suffix teacher pass (chunked prefill fallback)
+# ---------------------------------------------------------------------------
+
+
+def expand_suffix_capture(
+    prompt_len: int,
+    suffix_capture: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Pad suffix-only hook tensors to full teacher-forced length ``prompt_len + |target|-1``.
+
+    The suffix forward runs ``target[:-1]`` only, so hooks see ``m`` rows. Forward attribution
+    expects ``prompt_len + m`` positions (prompt slots + teacher slots). Prefix zeros stand in
+    for prompt positions; ``merge_real_and_teacher_captures`` overwrites ``[:prompt_len]`` with
+    real prefill activations.
+    """
+    if not capture_ready(suffix_capture):
+        raise RuntimeError("forward_attr: suffix capture missing Q/K/V/h_L.")
+    out: dict[str, torch.Tensor] = {}
+    for key in _CAPTURE_KEYS:
+        t = suffix_capture[key]
+        # [0:prompt_len) placeholder; [prompt_len:] filled from suffix-only forward.
+        full = torch.zeros(
+            (prompt_len + t.size(0),) + tuple(t.shape[1:]), dtype=t.dtype, device=t.device
+        )
+        full[prompt_len:] = t
+        out[key] = full
+    return out
+
+
+def _run_runner_forward(
+    model_runner: Any,
+    model: torch.nn.Module,
+    *,
+    tokens_per_req: dict[str, int],
+) -> None:
+    """Run one vLLM model forward outside the normal scheduler step.
+
+    vLLM V1 does not expose ``model.forward(kv_caches=...)``; this is the minimal
+    ``GPUModelRunner.execute_model`` path: ``_prepare_inputs`` → attention metadata →
+    ``set_forward_context`` → ``model(...)``. Used by ``vllm_teacher_suffix_capture`` after
+    prompt KV is already in the paged cache.
+    """
+    import numpy as np
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import set_forward_context
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.ubatch_utils import maybe_create_ubatch_slices
+
+    batch = model_runner.input_batch
+    # Per-request token counts for this ad-hoc forward (one hot request for suffix pass).
+    sched_np = np.array(
+        [int(tokens_per_req.get(batch.req_ids[i], 0)) for i in range(batch.num_reqs)],
+        dtype=np.int32,
+    )
+    n_tok = int(sched_np.sum())
+    sched = SchedulerOutput.make_empty()
+    sched.total_num_scheduled_tokens = n_tok
+    sched.num_scheduled_tokens = {batch.req_ids[i]: int(sched_np[i]) for i in range(batch.num_reqs)}
+
+    with model_runner.synchronize_input_prep():
+        model_runner._prepare_inputs(sched, sched_np)
+        max_q = int(sched_np.max()) if n_tok else 0
+        _, batch_desc, should_ubatch, num_across_dp, _ = (
+            model_runner._determine_batch_execution_and_padding(
+                num_tokens=n_tok,
+                num_reqs=batch.num_reqs,
+                num_scheduled_tokens_np=sched_np,
+                max_num_scheduled_tokens=max_q,
+                use_cascade_attn=False,
+                force_eager=True,
+            )
+        )
+        n_pad = batch_desc.num_tokens
+        n_reqs_pad = batch_desc.num_reqs or batch.num_reqs
+        ubatch_slices, ubatch_slices_pad = maybe_create_ubatch_slices(
+            should_ubatch, sched_np, n_pad, n_reqs_pad, model_runner.parallel_config.num_ubatches
+        )
+        # Get slot mappings into KV cache for the padded batch.
+        slots_gid, slots_layer = model_runner._get_slot_mappings(
+            num_tokens_padded=n_tok,
+            num_reqs_padded=batch.num_reqs,
+            num_tokens_unpadded=n_tok,
+            ubatch_slices=ubatch_slices_pad,
+        )
+        attn_md, _ = model_runner._build_attention_metadata(
+            num_tokens=n_tok,
+            num_reqs=batch.num_reqs,
+            max_query_len=max_q,
+            ubatch_slices=ubatch_slices,
+            num_scheduled_tokens=sched.num_scheduled_tokens,
+            slot_mappings=slots_gid,
+        )
+        ids, embeds, pos, inter, model_kw, _ = model_runner._preprocess(sched, n_pad, None)
+
+    # Attention kernels read slot_mapping / metadata from forward context.
+    with set_forward_context(
+        attn_md,
+        model_runner.vllm_config,
+        num_tokens=n_pad,
+        num_tokens_across_dp=num_across_dp,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+        batch_descriptor=batch_desc,
+        ubatch_slices=ubatch_slices_pad,
+        slot_mapping=slots_layer,
+    ):
+        with torch.no_grad():
+            # Run the model forward.
+            model(
+                input_ids=ids,
+                positions=pos,
+                intermediate_tensors=inter,
+                inputs_embeds=embeds,
+                **model_kw,
+            )
+
+
+def vllm_teacher_suffix_capture(
+    model_runner: Any,
+    model: torch.nn.Module,
     prompt_ids: list[int],
-    target_tensor: torch.Tensor,
-    device: torch.device,
-) -> torch.Tensor:
-    prompt = torch.tensor(prompt_ids, dtype=torch.long, device=device)
-    target = target_tensor.to(device).squeeze(0)
-    return torch.cat([prompt, target[:-1]])
+    target_ids: list[int],
+) -> None:
+    """Forward ``target[:-1]`` on existing prompt KV, then restore prompt-only decode boundary.
+
+    Used when extended prefill is unavailable (chunked prompt). Cursor stays at
+    ``prompt_len`` so queries attend to prompt KV only and the target sequence
+    is not mistaken for part of the prompt; hooks run inside the worker's
+    temporary ``register_forward_attr_hooks`` call.
+    """
+    suffix = list(target_ids[:-1])
+    if not suffix:
+        raise RuntimeError("forward_attr: need at least two target tokens.")
+    if getattr(model_runner, "execute_model_state", None) is not None:
+        raise RuntimeError("forward_attr: suffix capture needs idle model_runner state.")
+
+    plen = len(prompt_ids)
+    req_idx = find_request_index_for_prompt(model_runner, prompt_ids)
+    batch = model_runner.input_batch
+    req_id = batch.req_ids[req_idx]
+    req = model_runner.requests[req_id]
+    saved_row = batch.token_ids_cpu[req_idx, :plen].copy()
+
+    # Stage teacher ids; cursor (num_computed_tokens) at prompt end (not after teacher tokens).
+    batch.token_ids_cpu[req_idx, plen : plen + len(suffix)] = suffix
+    batch.num_computed_tokens_cpu[req_idx] = plen
+    batch.num_computed_tokens_cpu_tensor[req_idx] = plen
+    req.num_computed_tokens = plen
+    try:
+        # Retrieve counts of suffix tokens for each request in the batch.
+        counts = {
+            batch.req_ids[i]: (len(suffix) if i == req_idx else 0)
+            for i in range(batch.num_reqs)
+        }
+        # Run ad-hoc forward pass (simulates execute_model() path).
+        _run_runner_forward(model_runner, model, tokens_per_req=counts)
+    finally:
+        # Restore cursor (num_computed_tokens) to prompt end and reset teacher tokens.
+        restore_teacher_prefill_state(
+            model_runner, [TeacherPrefillExtendPlan(req_id, plen, suffix, saved_row)]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Last-layer hooks (ProbeHookQKWorker-style)
+# ---------------------------------------------------------------------------
 
 
 def _decoder_layer_hidden(output: Any) -> torch.Tensor:
     if isinstance(output, tuple):
         h0 = cast(torch.Tensor, output[0])
-        return (
-            h0 + cast(torch.Tensor, output[1])
-            if len(output) == 2 and isinstance(output[1], torch.Tensor)
-            else h0
-        )
+        if len(output) == 2 and isinstance(output[1], torch.Tensor):
+            return h0 + cast(torch.Tensor, output[1])
+        return h0
     return cast(torch.Tensor, output)
 
 
-def record_batch_meta_from_runner(
-    model_runner: Any, meta_dest: dict[str, Any]
-) -> bool:
-    """Fill ``meta_dest`` from the model runner after a real forward (fallback path)."""
-    input_batch = getattr(model_runner, "input_batch", None)
-    num_reqs = int(getattr(input_batch, "num_reqs", 0) or 0)
-    if num_reqs <= 0:
-        return False
-
-    query_start_loc = None
-    qsl_buf = getattr(model_runner, "query_start_loc", None)
-    if qsl_buf is not None and hasattr(qsl_buf, "gpu"):
-        query_start_loc = qsl_buf.gpu[: num_reqs + 1].detach().clone()
-    elif input_batch is not None and hasattr(input_batch, "query_start_loc_np"):
-        qsl_np = input_batch.query_start_loc_np[: num_reqs + 1]
-        device = model_runner.input_ids.gpu.device
-        query_start_loc = torch.tensor(qsl_np, dtype=torch.int32, device=device)
-
-    if query_start_loc is None:
-        return False
-
-    num_tokens = int(query_start_loc[-1].item())
-    if num_tokens <= 0:
-        return False
-
-    meta_dest.clear()
-    meta_dest.update(
-        {
-            "query_start_loc": query_start_loc,
-            "input_ids": model_runner.input_ids.gpu[:num_tokens].detach().clone(),
-        }
-    )
-    return True
+def _decoder_layer_input(inputs: Any) -> torch.Tensor:
+    """Return residual-stream input to the decoder block (pre-attention input norm source)."""
+    if isinstance(inputs, (tuple, list)) and inputs:
+        return cast(torch.Tensor, inputs[0])
+    return cast(torch.Tensor, inputs)
 
 
-def _record_batch_meta(model_runner: Any, meta_dest: dict[str, Any]) -> None:
-    ctx = get_forward_context()
-    attn_md = getattr(ctx, "attn_metadata", None)
-    if attn_md is not None and not (
+def _forward_context_att_metadata() -> Any | None:
+    """Return ``attn_metadata`` from the active forward context, or ``None`` if unset."""
+    try:
+        ctx = get_forward_context()
+    except AssertionError:
+        return None
+    return getattr(ctx, "attn_metadata", None)
+
+
+def _skip_forward_capture() -> bool:
+    """Skip CUDA-graph capture passes only.
+
+    Do not gate on ``attn_metadata`` being unset: hooks run inside ``model()`` but
+    ``record_batch_meta`` already tolerates missing metadata. Treating missing
+    metadata as "skip capture" leaves ``cap.live`` empty on short prompts while
+    prefill still completes (misleading ``max_num_batched_tokens`` errors).
+    """
+    return bool(
         torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-    ):
-        query_start_loc = getattr(attn_md, "query_start_loc", None)
-        if query_start_loc is None and isinstance(attn_md, dict):
-            for entry in attn_md.values():
-                if (query_start_loc := getattr(entry, "query_start_loc", None)) is not None:
-                    break
-        if query_start_loc is not None:
-            num_tokens = int(getattr(ctx, "num_tokens", 0) or 0) or int(
-                query_start_loc[-1].item()
-            )
-            meta_dest.clear()
-            meta_dest.update(
+    )
+
+
+def _attn_core_module(attn: torch.nn.Module) -> torch.nn.Module | None:
+    inner = getattr(attn, "attn", None)
+    return inner if isinstance(inner, torch.nn.Module) else None
+
+
+def infer_qkv_rotation_probe(
+    *,
+    q_pre: torch.Tensor | None,
+    k_pre: torch.Tensor | None,
+    v_pre: torch.Tensor | None,
+    q_post: torch.Tensor | None,
+    k_post: torch.Tensor | None,
+    v_post: torch.Tensor | None,
+    rel_tol: float = 5e-3,
+) -> dict[str, Any]:
+    """Infer which streams were rotated between projection output and attn-core input."""
+
+    def _flatten_rows(t: torch.Tensor | None) -> torch.Tensor | None:
+        if t is None or t.dim() == 0:
+            return None
+        return t.detach().reshape(-1, t.shape[-1]).float()
+
+    def _rotated(pre: torch.Tensor | None, post: torch.Tensor | None) -> bool | None:
+        pre_f = _flatten_rows(pre)
+        post_f = _flatten_rows(post)
+        if pre_f is None or post_f is None:
+            return None
+        n = min(pre_f.size(0), post_f.size(0))
+        # Position 0 is often identity even when RoPE is enabled.
+        if n <= 1:
+            return None
+        pre_f = pre_f[:n][1:]
+        post_f = post_f[:n][1:]
+        denom = pre_f.norm().clamp(min=1e-8)
+        rel = (post_f - pre_f).norm() / denom
+        return bool(rel > rel_tol)
+
+    rotate_q = _rotated(q_pre, q_post)
+    rotate_k = _rotated(k_pre, k_post)
+    rotate_v = _rotated(v_pre, v_post)
+    return {
+        "has_rope": any(x is True for x in (rotate_q, rotate_k, rotate_v)),
+        "rotate_q": rotate_q,
+        "rotate_k": rotate_k,
+        "rotate_v": rotate_v,
+        "probe_rel_tol": rel_tol,
+    }
+
+
+def register_runtime_rope_probe_hooks(
+    model: torch.nn.Module,
+    *,
+    meta: dict[str, Any],
+    enabled: Callable[[], bool],
+    rel_tol: float = 5e-3,
+    require_attn_metadata: bool = False,
+) -> list[torch.utils.hooks.RemovableHandle]:
+    """Install one-shot runtime probe hooks to infer Q/K/V rotation status.
+
+    Compares pre-projection outputs (qkv/q/k/v proj hooks) with post-attn-core inputs
+    from the same forward pass and stores result under ``meta['rope_runtime_probe']``.
+    """
+    last_attn = _attention_on_block(_last_transformer_block(model))
+    attn = cast(Any, last_attn)
+    state: dict[str, Any] = {
+        "done": False,
+        "Q_pre": None,
+        "K_pre": None,
+        "V_pre": None,
+        "Q_post": None,
+        "K_post": None,
+        "V_post": None,
+    }
+
+    def inactive() -> bool:
+        return not enabled() or _skip_forward_capture()
+
+    def maybe_finalize() -> None:
+        if state["done"]:
+            return
+        out = infer_qkv_rotation_probe(
+            q_pre=state["Q_pre"],
+            k_pre=state["K_pre"],
+            v_pre=state["V_pre"],
+            q_post=state["Q_post"],
+            k_post=state["K_post"],
+            v_post=state["V_post"],
+            rel_tol=rel_tol,
+        )
+        if all(out.get(k) is None for k in ("rotate_q", "rotate_k", "rotate_v")):
+            return
+        meta["rope_runtime_probe"] = out
+        state["done"] = True
+
+    hooks: list[torch.utils.hooks.RemovableHandle] = []
+    if (core := _attn_core_module(last_attn)) is not None:
+
+        def post_hook(_m, inputs: Any, _output: Any) -> None:
+            if state["done"] or inactive() or not inputs or len(inputs) < 3:
+                return
+            if require_attn_metadata and _forward_context_att_metadata() is None:
+                return
+            # Capture inputs to last attention module (after RoPe)
+            state["Q_post"] = cast(torch.Tensor, inputs[0]).detach().clone()
+            state["K_post"] = cast(torch.Tensor, inputs[1]).detach().clone()
+            state["V_post"] = cast(torch.Tensor, inputs[2]).detach().clone()
+            maybe_finalize()
+
+        hooks.append(core.register_forward_hook(post_hook))
+
+    # Fused QKV projection (qkv_proj) hook.
+    if hasattr(last_attn, "qkv_proj"):
+        q_size, kv_size = int(attn.q_size), int(attn.kv_size)
+
+        def pre_fused_hook(_m, _inputs, output: Any) -> None:
+            if state["done"] or inactive():
+                return
+            qkv = output[0] if isinstance(output, tuple) else output
+            if not torch.is_tensor(qkv):
+                return
+            q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+            # Hooks capture outputs of QKV projection (before RoPe)
+            state["Q_pre"] = q.detach().clone()
+            state["K_pre"] = k.detach().clone()
+            state["V_pre"] = v.detach().clone()
+            maybe_finalize()
+
+        # Register single QKV hook for fused projection (qkv_proj)
+        hooks.append(attn.qkv_proj.register_forward_hook(pre_fused_hook))
+        return hooks
+
+    # Separate Q/K/V projection hooks.
+    if all(hasattr(attn, n) for n in ("q_proj", "k_proj", "v_proj")):
+        tmp: dict[str, torch.Tensor] = {}
+
+        def pre_hook(name: str):
+            def _hook(_m, _inputs, output: Any) -> None:
+                if state["done"] or inactive():
+                    return
+                t = output[0] if isinstance(output, tuple) else output
+                if not torch.is_tensor(t):
+                    return
+                tmp[name] = t.detach().clone()
+                if len(tmp) == 3:
+                    state["Q_pre"] = tmp["Q"]
+                    state["K_pre"] = tmp["K"]
+                    state["V_pre"] = tmp["V"]
+                    maybe_finalize()
+
+            return _hook
+
+        # Register separate hooks for each projection module (q_proj, k_proj, v_proj)
+        hooks.append(attn.q_proj.register_forward_hook(pre_hook("Q")))
+        hooks.append(attn.k_proj.register_forward_hook(pre_hook("K")))
+        hooks.append(attn.v_proj.register_forward_hook(pre_hook("V")))
+    return hooks
+
+
+def record_batch_meta(model_runner: Any, meta: dict[str, Any]) -> None:
+    """Save flat ``input_ids`` and ``query_start_loc`` for per-request slicing.
+
+    Populated after each capture forward so ``_slice_capture`` can find the right
+    rows when multiple requests share one batch. Falls back to runner buffers if needed.
+    """
+    metadata = _forward_context_att_metadata()
+    if metadata is None:
+        return
+
+    qsl, _ = get_query_metadata(metadata)
+    if qsl is not None:
+        n = int(qsl[-1].item())
+        try:
+            ctx = get_forward_context()
+            n = int(getattr(ctx, "num_tokens", 0) or 0) or n
+        except AssertionError:
+            pass
+        if n > 0:
+            meta.clear()
+            meta.update(
                 {
-                    "query_start_loc": query_start_loc.detach().clone(),
-                    "input_ids": model_runner.input_ids.gpu[:num_tokens]
-                    .detach()
-                    .clone(),
+                    "query_start_loc": qsl.detach().clone(),
+                    "input_ids": model_runner.input_ids.gpu[:n].detach().clone(),
                 }
             )
+        return
+
+    batch = getattr(model_runner, "input_batch", None)
+    if batch is None or batch.num_reqs == 0:
+        return
+    if buf := getattr(model_runner, "query_start_loc", None):
+        if not hasattr(buf, "gpu"):
             return
+        qsl = buf.gpu[: batch.num_reqs + 1].detach().clone()
+    elif hasattr(batch, "query_start_loc_np"):
+        qsl = torch.tensor(
+            batch.query_start_loc_np[: batch.num_reqs + 1],
+            dtype=torch.int32,
+            device=model_runner.input_ids.gpu.device,
+        )
+    else:
+        return
+    n = int(qsl[-1].item())
+    if n <= 0:
+        return
+    meta.clear()
+    meta.update(
+        {
+            "query_start_loc": qsl,
+            "input_ids": model_runner.input_ids.gpu[:n].detach().clone(),
+        }
+    )
 
-    record_batch_meta_from_runner(model_runner, meta_dest)
 
-
-def _register_qkv_capture_hooks(
+def _register_qkv_hooks(
     last_attn: torch.nn.Module,
     dest: dict[str, torch.Tensor],
     *,
     enabled: Callable[[], bool],
-    after_qkv: Callable[[], None] | None = None,
+    on_qkv: Callable[[], None] | None = None,
+    require_post_rope: bool = True,
+    require_attn_metadata: bool = False,
 ) -> list[torch.utils.hooks.RemovableHandle]:
-    """Register hooks that write last-layer Q/K/V into ``dest``.
+    """Capture last-layer Q/K/V, preferring post-RoPE tensors from ``.attn`` inputs.
 
-    vLLM serving (fused): single forward hook on ``qkv_proj`` output, split on ``q_size``/``kv_size``.
-    HF-style (split): separate hooks on ``q_proj``, ``k_proj``, ``v_proj`` outputs.
+    Default behavior enforces post-RoPE capture (`require_post_rope=True`), which
+    matches the online worker path and avoids analyzer mismatch from pre-RoPE Q/K.
+    Set ``require_post_rope=False`` only as a compatibility fallback for models
+    without a hookable inner attention core.
     """
+
+    def store_qkv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
+        dest["Q"], dest["K"], dest["V"] = q.detach().clone(), k.detach().clone(), v.detach().clone()
+        if on_qkv:
+            on_qkv()
+
+    def inactive() -> bool:
+        return not enabled() or _skip_forward_capture()
+
+    if (core := _attn_core_module(last_attn)) is not None:
+
+        def attn_input_hook(_m, inputs: Any, _output: Any) -> None:
+            if inactive() or not inputs or len(inputs) < 3:
+                return
+            if require_attn_metadata and _forward_context_att_metadata() is None:
+                return
+            store_qkv(
+                cast(torch.Tensor, inputs[0]),
+                cast(torch.Tensor, inputs[1]),
+                cast(torch.Tensor, inputs[2]),
+            )
+
+        return [core.register_forward_hook(attn_input_hook)]
+
+    if require_post_rope:
+        raise RuntimeError(
+            "forward_attr: could not locate inner attention core (.attn) for post-RoPE "
+            "Q/K/V capture. Set VLLM_HIGHLIGHTER_ALLOW_PREROPE_FALLBACK=1 to allow "
+            "legacy pre-RoPE projection hooks (approximation may degrade)."
+        )
+
     attn = cast(Any, last_attn)
     hooks: list[torch.utils.hooks.RemovableHandle] = []
-
-    def _done() -> None:
-        if after_qkv is not None:
-            after_qkv()
-
-    if uses_fused_qkv_proj(last_attn):
+    if hasattr(last_attn, "qkv_proj"):
         q_size, kv_size = int(attn.q_size), int(attn.kv_size)
 
-        def qkv_hook(_module, _inputs, output: Any) -> None:
-            if not enabled():
+        def fused_hook(_m, _i, output: Any) -> None:
+            if inactive():
                 return
             qkv = cast(torch.Tensor, output[0] if isinstance(output, tuple) else output)
             q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
-            dest["Q"], dest["K"], dest["V"] = q.detach(), k.detach(), v.detach()
-            _done()
+            store_qkv(q, k, v)
 
-        hooks.append(attn.qkv_proj.register_forward_hook(qkv_hook))
+        hooks.append(attn.qkv_proj.register_forward_hook(fused_hook))
         return hooks
 
-    def split_hook(key: str):
+    captured: dict[str, torch.Tensor] = {}
+
+    def proj_hook(key: str):
         def hook(_m, _i, output: Any) -> None:
-            if not enabled():
+            if inactive():
                 return
-            dest[key] = cast(torch.Tensor, output).detach()
-            if key == "Q":
-                _done()
+            captured[key] = cast(torch.Tensor, output).detach().clone()
+            if key == "V" and len(captured) == 3:
+                store_qkv(captured["Q"], captured["K"], captured["V"])
 
         return hook
 
     for key, attr in (("Q", "q_proj"), ("K", "k_proj"), ("V", "v_proj")):
-        hooks.append(getattr(attn, attr).register_forward_hook(split_hook(key)))
+        hooks.append(getattr(attn, attr).register_forward_hook(proj_hook(key)))
     return hooks
 
 
-def _register_forward_attr_hooks(
+def register_forward_attr_hooks(
     model: torch.nn.Module,
     dest: dict[str, torch.Tensor],
     *,
     enabled: Callable[[], bool],
     model_runner: Any | None = None,
-    meta_dest: dict[str, Any] | None = None,
+    meta: dict[str, Any] | None = None,
+    require_attn_metadata: bool = False,
 ) -> list[torch.utils.hooks.RemovableHandle]:
-    """Register last-layer Q/K/V (+ h_L) hooks writing into ``dest``."""
+    """Install last-layer Q/K/V + ``h_L`` hooks for forward attribution.
+
+    Hooks are gated by ``enabled()`` (worker sets ``_cap.active`` during prefill).
+    ``on_qkv`` records batch layout for multi-request slicing after the forward.
+
+    The ``require_attn_metadata`` flag controls whether hooks are installed only
+    during a scheduler-driven attention forward with populated context metadata (True),
+    or whether they run as long as enabled() is set and CUDA-graph capture is not active (False).
+    """
+    # Locate last transformer block and last attention module
     last_layer = _last_transformer_block(model)
     last_attn = _attention_on_block(last_layer)
 
-    def after_qkv() -> None:
-        if model_runner is not None and meta_dest is not None and enabled():
-            _record_batch_meta(model_runner, meta_dest)
+    # Record batch metadata for multi-request slicing
+    def on_qkv() -> None:
+        if model_runner is not None and meta is not None and enabled():
+            record_batch_meta(model_runner, meta)
 
-    hooks = _register_qkv_capture_hooks(
-        last_attn, dest, enabled=enabled, after_qkv=after_qkv
+    # Allow pre-RoPE fallback for models without inner attention core
+    allow_prerope = os.environ.get("VLLM_HIGHLIGHTER_ALLOW_PREROPE_FALLBACK", "0") == "1"
+    # Register Q/K/V hooks for last-layer attention module in vLLM and HF-format serving
+    # models, and collect QKV activations immediately after projection
+    # and immediately before the attention module to determine whether RoPE was applied.
+    hooks = _register_qkv_hooks(
+        last_attn,
+        dest,
+        enabled=enabled,
+        on_qkv=on_qkv,
+        require_post_rope=not allow_prerope,
+        require_attn_metadata=require_attn_metadata,
     )
 
-    def layer_hook(_module, _inputs, output: Any) -> None:
-        if not enabled():
+    def layer_hook(_m, _i, output: Any) -> None:
+        if not enabled() or _skip_forward_capture():
             return
-        dest["h_L"] = _decoder_layer_hidden(output).detach()
-        after_qkv()
+        if require_attn_metadata and _forward_context_att_metadata() is None:
+            return
+        dest["h_input"] = _decoder_layer_input(_i).detach().clone()
+        dest["h_L"] = _decoder_layer_hidden(output).detach().clone()
+        on_qkv()
 
-    hooks.append(last_layer.register_forward_hook(layer_hook))
+    hooks.append(last_layer.register_forward_hook(layer_hook))  # residual stream at layer L
     return hooks
-
-
-def install_persistent_forward_attr_hooks(
-    model: torch.nn.Module,
-    cap: ForwardAttrCapture,
-    model_runner: Any,
-) -> list[torch.utils.hooks.RemovableHandle]:
-    """Register hooks that write last-layer Q/K/V (+ h_L) into `cap.live`.
-    The hook is persistent and remains installed until `cap.active` is False.
-    Only captures prompt activations from real prefill."""
-    return _register_forward_attr_hooks(
-        model,
-        cap.live,
-        enabled=lambda: cap.active,
-        model_runner=model_runner,
-        meta_dest=cap.meta,
-    )
-
-
-def register_ephemeral_forward_attr_hooks(
-    model: torch.nn.Module,
-    captured: dict[str, torch.Tensor],
-) -> list[torch.utils.hooks.RemovableHandle]:
-    """Register hooks that write last-layer Q/K/V (+ h_L) into `captured`
-    during teacher-forced forward pass to get activations at required positions for 
-    affirmation loss. The hook is removed after each pass."""
-    return _register_forward_attr_hooks(model, captured, enabled=lambda: True)
