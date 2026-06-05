@@ -331,8 +331,10 @@ def _resolve_forward_attr_tensors(
     if model is None or last_attn is None:
         raise ValueError("compute_grad_influence_vectors requires weights= or (model, last_attn)")
 
-    cfg = model.config
-    n_heads = int(cfg.num_attention_heads)
+    cfg: Any = getattr(model, "config", None)
+    if cfg is None or not hasattr(cfg, "num_attention_heads"):
+        raise ValueError("model.config.num_attention_heads is required for grad influence")
+    n_heads = int(getattr(cfg, "num_attention_heads"))
     n_kv_heads = int(getattr(cfg, "num_key_value_heads", n_heads))
     w_u = lm_head_weight(model)
     w_q = get_attn_query_weight(last_attn)
@@ -547,7 +549,11 @@ def compute_grad_influence_vectors(
             q_post_rows, rope_spec, prompt_len, enabled=_stream_rotated(rope_spec, "rotate_q")
         )
         q_pre0 = q_pre_rows[:, start, :]
-        total_grad[start] = total_grad[start] + (q_pre0 @ W_Q).sum(dim=0)
+        # Per-head project q_pre0[h] (d_head) through W_Q[h] (d_head, d_model) and
+        # sum over heads -> (d_model). A plain ``q_pre0 @ W_Q`` would broadcast-matmul
+        # the [n_heads, d_head] tensor against [n_heads, d_head, d_model] and yield
+        # [n_heads, d_model] instead of the intended per-head contraction.
+        total_grad[start] = total_grad[start] + torch.einsum("hd,hde->e", q_pre0, W_Q)
 
     # VJP 2: Attention Input Norm.
     # Transforms dL/d(h^N_i^(L-1)) -> dL/d(h_i^(L-1)) which guarantees the residual 

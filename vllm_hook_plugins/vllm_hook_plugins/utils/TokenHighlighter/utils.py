@@ -971,9 +971,23 @@ def _decoder_layer_hidden(output: Any) -> torch.Tensor:
 
 
 def _decoder_layer_input(inputs: Any) -> torch.Tensor:
-    """Return residual-stream input to the decoder block (pre-attention input norm source)."""
-    if isinstance(inputs, (tuple, list)) and inputs:
-        return cast(torch.Tensor, inputs[0])
+    """Return residual-stream input to the decoder block (pre input-norm source).
+
+    vLLM decoder layers are called as ``forward(positions, hidden_states, residual)``
+    with a fused add+norm, so the value actually normalized by the input layernorm is
+    ``hidden_states + residual`` (residual is ``None`` only on the first block). HF-style
+    layers are called as ``forward(hidden_states, ...)`` with the residual already folded
+    in, so a single 2-D tensor is present. Selecting ``inputs[0]`` blindly would grab the
+    1-D ``positions`` tensor under vLLM and corrupt the input-norm Jacobian.
+    """
+    if isinstance(inputs, (tuple, list)):
+        mats = [x for x in inputs if isinstance(x, torch.Tensor) and x.dim() >= 2]
+        if len(mats) >= 2:
+            return mats[0] + mats[1]  # vLLM fused residual: hidden_states + residual
+        if mats:
+            return mats[0]
+        if inputs:
+            return cast(torch.Tensor, inputs[0])
     return cast(torch.Tensor, inputs)
 
 

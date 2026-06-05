@@ -12,6 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from vllm_hook_plugins.utils.TokenHighlighter.utils import (
     ForwardAttrCapture,
+    _last_transformer_block,
     build_highlighter_record,
     capture_ready,
     capture_ready_for_teacher,
@@ -511,7 +512,11 @@ class HighlighterWorker:
             })
         self._pending.clear()
         runtime_rope_probe = self._cap.meta.get("rope_runtime_probe")
-        self._cap.live, self._cap.meta = {}, {}
+        # Clear in place: the forward hooks captured references to these dicts at
+        # install time. Rebinding to new dicts would orphan the hooks so they write
+        # to a stale buffer while the worker reads an empty one.
+        self._cap.live.clear()
+        self._cap.meta.clear()
         weight_bundle = export_forward_attr_weights(
             self._model, runtime_rope_probe=runtime_rope_probe
         )
@@ -522,11 +527,19 @@ class HighlighterWorker:
     def _finish_autograd(self, request) -> None:
         """Score prompts with HF autograd before the vLLM forward; write ``highlighter.pt``.
 
-        Separate HF model (``_grad_model``) — vLLM path is inference-only. Only prompt
-        embeddings get ``requires_grad``; loss is teacher-forced CE on target tokens.
+        Separate HF model (``_grad_model``) — vLLM path is inference-only. The loss is
+        teacher-forced CE on the target tokens.
+
+        Two reference points (selected by ``VLLM_HIGHLIGHTER_AUTOGRAD_LASTBLOCK``):
+        - ``0`` (default): grad wrt prompt **input embeddings** (full-model influence).
+        - ``1``: grad wrt the **input to the last decoder block** (``dL/dh^(L-1)``), the
+          exact quantity the ``forward_attr`` closed form approximates. Use this as the
+          apples-to-apples reference when validating the last-block approximation.
         """
         self._ensure_target_tensor()
         self._ensure_grad_model()
+        last_block_ref = os.environ.get("VLLM_HIGHLIGHTER_AUTOGRAD_LASTBLOCK", "0") == "1"
+        last_block = _last_transformer_block(self._grad_model) if last_block_ref else None
         target = self._target_tensor.to(self._grad_device)
         sequences = []
         with torch.inference_mode(False), torch.enable_grad():
@@ -543,15 +556,42 @@ class HighlighterWorker:
                 mask = torch.ones(
                     (1, inputs_embeds.size(1)), dtype=torch.long, device=self._grad_device
                 )
-                logits = self._grad_model(
-                    inputs_embeds=inputs_embeds, attention_mask=mask, use_cache=False
-                ).logits
+                # Capture and retain grad on the last block's residual-stream input.
+                block_input: dict[str, torch.Tensor] = {}
+                handle = None
+                if last_block is not None:
+                    def _grab_block_input(_m, args, kwargs):
+                        h = kwargs.get("hidden_states")
+                        if h is None:
+                            h = next(
+                                (a for a in args
+                                 if isinstance(a, torch.Tensor) and a.dim() == 3),
+                                None,
+                            )
+                        if h is not None:
+                            h.requires_grad_(True)
+                            h.retain_grad()
+                            block_input["h"] = h
+                    handle = last_block.register_forward_pre_hook(
+                        _grab_block_input, with_kwargs=True
+                    )
+                try:
+                    logits = self._grad_model(
+                        inputs_embeds=inputs_embeds, attention_mask=mask, use_cache=False
+                    ).logits
+                finally:
+                    if handle is not None:
+                        handle.remove()
                 start, end = plen - 1, plen - 1 + target.size(1)
                 loss = -F.log_softmax(logits[:, start:end, :], dim=-1).gather(
                     -1, target.unsqueeze(-1)
                 ).squeeze(-1).sum()
                 loss.backward()
-                scores = prompt_e.grad.norm(p=2, dim=-1).squeeze(0).detach().cpu().tolist()
+                if last_block is not None:
+                    grad_src = block_input["h"].grad[:, :plen, :]
+                else:
+                    grad_src = prompt_e.grad
+                scores = grad_src.norm(p=2, dim=-1).squeeze(0).detach().cpu().tolist()
                 sequences.append(
                     build_highlighter_record(
                         prompt_ids,
@@ -635,7 +675,10 @@ class HighlighterWorker:
             )
         )
         if capturing and new_prompts:
-            cap.live, cap.meta = {}, {}  # fresh buffers per capture request
+            # Clear in place (not rebind): hooks hold references to these dicts from
+            # install time; rebinding would orphan them and lose all captures.
+            cap.live.clear()
+            cap.meta.clear()
 
         if capturing and scheduler_output is not None:
             self._require_suffix_for_chunked_prefill(scheduler_output, pending)
