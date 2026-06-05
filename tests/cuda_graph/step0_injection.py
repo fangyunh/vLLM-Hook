@@ -59,6 +59,14 @@ os.environ.setdefault("VLLM_PLUGINS", "")
 # VLLM_ENABLE_V1_MULTIPROCESSING=1 and VLLM_WORKER_MULTIPROC_METHOD=spawn.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
+# Disable vLLM's on-disk compiled-graph cache. The cache key is model+config,
+# NOT our runtime wrap — so a prior unhooked run poisons the cache and vLLM
+# "Directly load[s] the compiled graph from the cache", skipping compilation
+# and silently dropping our op (delta=0). Forcing a recompile each run is the
+# only way to actually trace the wrap into the graph. (The production plan
+# instead mixes a wrap-signature into the cache dir; for tests, just disable.)
+os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
+
 
 # ---------------------------------------------------------------------------
 # 1. The counter custom op — opaque, side-effecting, must survive DCE.

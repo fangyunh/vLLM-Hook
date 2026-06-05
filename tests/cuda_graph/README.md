@@ -57,7 +57,7 @@ Recommended dev model: **`Qwen/Qwen2-1.5B-Instruct`** (small, fast, **ungated**,
 standard `model.layers.<i>` decoder). All scripts default to it. Override with
 `--model <repo>` (Python) or `MODEL=<repo>` (LSF wrappers).
 
-> **Three environment facts these scripts rely on (and handle for you):**
+> **Four environment facts these scripts rely on (and handle for you):**
 > 1. **The vllm-hook plugin forces `enforce_eager=True`** (`_hook_plugin.py`),
 >    which would disable CUDA graphs. The scripts set `VLLM_PLUGINS=""` so the
 >    plugin does **not** load — they register their own op / install their own
@@ -74,6 +74,14 @@ standard `model.layers.<i>` decoder). All scripts default to it. Override with
 >    `VLLM_ENABLE_V1_MULTIPROCESSING=0` (engine in-process). For multi-GPU /
 >    true cross-process validation, export `VLLM_ENABLE_V1_MULTIPROCESSING=1`
 >    **and** `VLLM_WORKER_MULTIPROC_METHOD=spawn` instead.
+> 4. **vLLM caches the compiled graph on disk** (`~/.cache/vllm/torch_compile_cache/`),
+>    keyed on model+config — **not** on our runtime wrap. So a prior unhooked
+>    run poisons the cache: vLLM logs *"Directly load the compiled graph … from
+>    the cache"*, skips compilation, and our op is silently dropped (`delta=0`,
+>    even when installed before compile). The scripts set
+>    `VLLM_DISABLE_COMPILE_CACHE=1` to force a fresh compile every run. (If you
+>    ever see that "Directly load … from the cache" line, the cache is being
+>    used — clear it with `rm -rf ~/.cache/vllm/torch_compile_cache`.)
 
 ---
 

@@ -40,6 +40,10 @@ os.environ.setdefault("VLLM_PLUGINS", "")
 # this driver-side test wrap the in-process model. (Multi-GPU: instead export
 # VLLM_ENABLE_V1_MULTIPROCESSING=1 + VLLM_WORKER_MULTIPROC_METHOD=spawn.)
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+# Force a fresh compile each run: vLLM's compiled-graph cache is keyed on
+# model+config (not our wrap), so a stale cache hit reuses an unhooked graph
+# and the op never fires. See step0_injection.py for the full explanation.
+os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
 
 
 def measure(llm, prompts: List[str], n_decode: int) -> float:

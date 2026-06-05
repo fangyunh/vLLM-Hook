@@ -66,6 +66,9 @@ os.environ.setdefault("VLLM_PLUGINS", "")
 # VLLM_WORKER_MULTIPROC_METHOD=spawn.) The num_gpu_blocks accounting is
 # unaffected — baseline vs buffers still boot as separate processes here.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+# Force a fresh compile each run (compiled-graph cache is keyed on model+config,
+# not our wrap; a stale hit would reuse an unhooked graph). See step0_injection.
+os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
 
 _LAYER_PATTERNS = [
     re.compile(r"^model\.layers\.\d+$"),

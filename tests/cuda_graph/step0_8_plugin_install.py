@@ -67,6 +67,11 @@ os.environ.setdefault("VLLM_PLUGINS", "")
 # the install path is exercised. For TRUE cross-process / multi-GPU validation,
 # export VLLM_ENABLE_V1_MULTIPROCESSING=1 and VLLM_WORKER_MULTIPROC_METHOD=spawn.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+# Force a fresh compile each run: vLLM's compiled-graph cache is keyed on
+# model+config (not our wrap), so a stale cache hit reuses an unhooked graph
+# ("Directly load the compiled graph ... from the cache") and the op never
+# fires (delta=0). Disabling the cache is what makes injection observable.
+os.environ.setdefault("VLLM_DISABLE_COMPILE_CACHE", "1")
 
 
 # ---------------------------------------------------------------------------
