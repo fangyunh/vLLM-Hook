@@ -277,19 +277,6 @@ def _atexit_dump() -> None:
         path = PROF.dump(role=_ROLE)
         if path is not None:
             print(f"[vllm-hook profiler] wrote {path}", file=sys.stderr, flush=True)
-        # Fallback CUDA memory snapshot, dumped from whichever process owns a CUDA
-        # context (the worker, not the driver). Distinct filename so it never
-        # clobbers the profiler's richer collective_rpc timeline snapshot
-        # (memory_snapshot.pickle). Segments-only (no history) — cheap and safe.
-        if _MEM_SAMP:
-            try:
-                import torch
-                if torch.cuda.is_available() and torch.cuda.is_initialized():
-                    os.makedirs(_DUMP_DIR, exist_ok=True)
-                    torch.cuda.memory._dump_snapshot(
-                        os.path.join(_DUMP_DIR, "memory_snapshot_exit.pickle"))
-            except Exception:
-                pass
     except Exception:
         try:
             print("[vllm-hook profiler] atexit dump FAILED:", file=sys.stderr)
@@ -370,15 +357,6 @@ class MemorySampler:
                     reserved = self._torch.cuda.memory_reserved(self.gpu_index)
                     PROF.gauge("mem.cuda_alloc_mb",    alloc    / 1024 ** 2)
                     PROF.gauge("mem.cuda_reserved_mb", reserved / 1024 ** 2)
-                    # Exact high-water counter (catches the transient spike a
-                    # 20 Hz sampler can miss) + allocator pressure. These give the
-                    # profiler the cuda peak / retries / ooms the V1 DRIVER can't
-                    # read (no CUDA context there); harvested via gauge.mem.*.
-                    PROF.gauge("mem.cuda_peak_alloc_mb",
-                               self._torch.cuda.max_memory_allocated(self.gpu_index) / 1024 ** 2)
-                    st = self._torch.cuda.memory_stats(self.gpu_index)
-                    PROF.gauge("mem.cuda_alloc_retries", float(st.get("num_alloc_retries", 0)))
-                    PROF.gauge("mem.cuda_ooms",          float(st.get("num_ooms", 0)))
                 except Exception:
                     pass
             self._stop.wait(self.interval)
