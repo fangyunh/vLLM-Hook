@@ -43,6 +43,17 @@ _WORKER_EXT_STEER = "vllm_hook_plugins.workers.steer_activation_worker.SteerHook
 _DEFAULT_HOOK_DIR = "/dev/shm/vllm_hook"
 
 
+def _graph_mode() -> bool:
+    """True when the CUDA-graph QK capture path is armed for this process.
+
+    Armed by ``_patched_create_engine_config`` when VLLM_HOOK_ALLOW_CUDAGRAPH==1.
+    In graph mode the worker installs capture at load_model, so the generate
+    patches must NOT also issue the lazy ``install_hooks`` collective_rpc.
+    """
+    from vllm_hook_plugins.graph.install import graph_mode_enabled
+    return graph_mode_enabled()
+
+
 def _decompress(data: bytes) -> Any:
     PROF.gauge("rpc.payload_bytes", len(data))
     with PROF.timed("rpc.decompress"):
@@ -79,10 +90,16 @@ def _trim_probes(probes: dict, key: str, expected_len: int) -> None:
 
 
 def _patched_create_engine_config(self, *args, **kwargs):
-    """Inject worker extension and force eager mode before VllmConfig is built."""
+    """Inject worker extension and (legacy) force eager mode before VllmConfig.
+
+    v0.3.0 gating: when ``VLLM_HOOK_ALLOW_CUDAGRAPH == "1"`` we do NOT force
+    eager — the caller's ``enforce_eager`` stands and the CUDA-graph QK capture
+    path is armed (graph/install.py). Otherwise we keep the v0.2.0 behaviour
+    EXACTLY: force eager so the legacy ``register_forward_hook`` path works.
+    """
+    import os
     if not self.worker_extension_cls:
         # Default to hidden states worker; users can override via env var.
-        import os
         worker_type = os.environ.get("VLLM_HOOK_WORKER", "hidden_states")
         if worker_type == "qk":
             self.worker_extension_cls = _WORKER_EXT_QK
@@ -90,7 +107,15 @@ def _patched_create_engine_config(self, *args, **kwargs):
             self.worker_extension_cls = _WORKER_EXT_STEER
         else:
             self.worker_extension_cls = _WORKER_EXT_HS
-    self.enforce_eager = True
+
+    if os.environ.get("VLLM_HOOK_ALLOW_CUDAGRAPH") == "1":
+        # Graph mode: leave enforce_eager as the caller set it, and arm the
+        # load_model install path for the worker subprocess(es).
+        from vllm_hook_plugins.graph.install import set_graph_mode
+        set_graph_mode(True)
+    else:
+        # Legacy v0.2.0: eager is mandatory for the forward-hook capture path.
+        self.enforce_eager = True
 
     assert _original_create_engine_config is not None
     return _original_create_engine_config(self, *args, **kwargs)
@@ -142,7 +167,14 @@ async def _patched_generate(
     needs_hooks = wants_hs or wants_qk or wants_steer
     save_to_disk = bool(extra.get("save_to_disk"))
 
-    if needs_hooks and not getattr(self, "_vllm_hook_installed", False):
+    # In graph mode the QK capture path is already installed in the worker at
+    # load_model (graph/install.py), so the lazy forward-hook install would only
+    # double-capture — skip it. The legacy eager path still installs lazily.
+    if (
+        needs_hooks
+        and not getattr(self, "_vllm_hook_installed", False)
+        and not _graph_mode()
+    ):
         PROF.incr("rpc.install_hooks")
         with PROF.timed("rpc.install_hooks"):
             await self.collective_rpc("install_hooks")
@@ -204,7 +236,13 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
         for sp in params_list
     )
 
-    if needs_hooks and not getattr(self, "_vllm_hook_installed", False):
+    # Graph mode installs the QK path in the worker at load_model; skip the lazy
+    # forward-hook install (it would double-capture). Eager path unchanged.
+    if (
+        needs_hooks
+        and not getattr(self, "_vllm_hook_installed", False)
+        and not _graph_mode()
+    ):
         PROF.incr("rpc.install_hooks")
         with PROF.timed("rpc.install_hooks"):
             self.collective_rpc("install_hooks")
@@ -366,6 +404,23 @@ def register() -> None:
 
     _original_create_engine_config = EngineArgs.create_engine_config
     EngineArgs.create_engine_config = _patched_create_engine_config
+
+    # Arm the v0.3.0 CUDA-graph QK install path: monkey-patch Worker.load_model
+    # so it installs the static-buffer hosts + execute_model wrapper after the
+    # model is built (graph/install.py). The patch is a strict no-op unless graph
+    # mode is enabled AND the worker is the QK worker, so the eager path and the
+    # HS / steer workers are untouched.
+    #
+    # Guarded: importing the graph stack must NEVER be able to disable the eager
+    # v0.2.0 plugin. If the graph module fails to import for any reason, log and
+    # continue — the eager path (forced when VLLM_HOOK_ALLOW_CUDAGRAPH != "1") is
+    # entirely independent of this patch.
+    try:
+        from vllm_hook_plugins.graph.install import patch_worker_load_model
+        patch_worker_load_model()
+    except Exception as e:  # noqa: BLE001
+        print(f"[vllm-hook] graph load_model patch unavailable ({e}); "
+              f"eager path unaffected.")
 
     _original_generate = AsyncLLM.generate
     AsyncLLM.generate = _patched_generate

@@ -278,6 +278,51 @@ class ProbeHookQKWorker:
         print(f"Installed {len(self._hooks)} hooks on layers: {matched}")
 
     # ------------------------------------------------------------------
+    # v0.3.0 CUDA-graph capture install (graph mode only)
+    # ------------------------------------------------------------------
+
+    def graph_install(self):
+        """Install the CUDA-graph QK capture path (static buffers + wrap).
+
+        Thin delegating entry called by the Worker.load_model monkey-patch
+        (graph/install.py:patch_worker_load_model) AFTER the model is built but
+        BEFORE warm-up/compile/capture. It is a strict no-op for the eager
+        v0.2.0 path: the load_model patch only reaches here when graph mode is
+        armed (VLLM_HOOK_ALLOW_CUDAGRAPH==1) AND this worker is the QK worker.
+
+        The heavy lifting (per-layer hosts, class-level Attention.forward wrap,
+        execute_model routing+egress wrapper) lives in graph/install.py. This
+        method only:
+          * ensures the egress buckets the eager path also uses exist as
+            instance dicts (so the graph egress can populate them and
+            get_captured_states / flush_disk / _save_safetensors consume them
+            UNCHANGED — REUSE CONTRACT), then
+          * delegates to graph.install.
+
+        Idempotent: graph.install's installers are themselves guarded, and the
+        bucket init below only seeds dicts that are missing.
+        """
+        # Egress buckets — same instance dicts the eager path (install_hooks)
+        # and the RPC retrieval methods (get_captured_states / flush_disk)
+        # operate on. The class-level defaults (_captured_states = {}) are
+        # SHARED across instances, so we reset to per-instance dicts here,
+        # exactly as install_hooks() does, before any capture can fire.
+        if not getattr(self, "_captured_states", None):
+            self._captured_states = {}  # RPC path
+        if not getattr(self, "_disk_states", None):
+            self._disk_states = {}      # disk path
+
+        # graph.install builds the hosts, populates self._conf / self.hookq_mode /
+        # self._should_capture, wires the wrap, and installs the execute_model
+        # wrapper. Import lazily so the eager path never imports the graph stack.
+        from vllm_hook_plugins.graph.install import (
+            install_execute_model_wrapper,
+            install_qk_hosts,
+        )
+        install_qk_hosts(self)
+        install_execute_model_wrapper(self.model_runner, self)
+
+    # ------------------------------------------------------------------
     # API serving: collective_rpc-callable artifact retrieval
     # ------------------------------------------------------------------
 
