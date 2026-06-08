@@ -184,20 +184,24 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
         return
     mr = worker.model_runner
 
+    # Diagnostics gated on REAL (small) batches — warmup uses a huge shape
+    # (e.g. 16384) with no metadata and would flood/consume the log budget.
+    _small = q_in.shape[0] <= 2048
+
     ctx = get_forward_context()
     metadata = getattr(ctx, "attn_metadata", None)
     if metadata is None:
-        if _DEBUG and _capture_dbg["n"] < 6:
+        if _DEBUG and _small and _capture_dbg["n"] < 10:
             _capture_dbg["n"] += 1
-            print(f"[graph/dbg] _capture_body layer={layer_idx} EXIT: "
-                  "attn_metadata is None", flush=True)
+            print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)}"
+                  " EXIT: attn_metadata is None", flush=True)
         return
     query_start_loc, seq_lens = get_query_metadata(metadata)
     if query_start_loc is None:
-        if _DEBUG and _capture_dbg["n"] < 6:
+        if _DEBUG and _small and _capture_dbg["n"] < 10:
             _capture_dbg["n"] += 1
-            print(f"[graph/dbg] _capture_body layer={layer_idx} EXIT: "
-                  "query_start_loc is None", flush=True)
+            print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)}"
+                  " EXIT: query_start_loc is None", flush=True)
         return
 
     try:
@@ -206,10 +210,10 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
         return
 
     bs = len(query_start_loc) - 1
-    if _DEBUG and _capture_dbg["n"] < 6:
+    if _DEBUG and _small and _capture_dbg["n"] < 10:
         _capture_dbg["n"] += 1
-        print(f"[graph/dbg] _capture_body layer={layer_idx} RUNS: bs={bs} "
-              f"req_ids={[str(r)[:8] for r in req_ids[:bs]]}", flush=True)
+        print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)} "
+              f"RUNS: bs={bs} req_ids={[str(r)[:8] for r in req_ids[:bs]]}", flush=True)
     last_indices = query_start_loc
     default_mode = getattr(worker, "hookq_mode", "all_tokens")
     default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")

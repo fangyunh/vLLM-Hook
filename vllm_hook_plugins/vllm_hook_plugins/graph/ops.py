@@ -125,13 +125,15 @@ def _qk_probe_impl(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
         capturing = torch.cuda.is_current_stream_capturing()
     except Exception:  # noqa: BLE001
         pass
-    # Diagnostic: log the first several NON-capturing (real-forward) fires. If
-    # these never appear during generation, the op only runs at graph-capture
-    # time and is skipped on replay (op absorbed into a cudagraphed segment).
-    if _DBG and not capturing and _DBG_NONCAP[0] < 10:
+    # Diagnostic: log NON-capturing fires for REAL (small) token batches only —
+    # warmup/profiling uses a huge shape (e.g. 16384) and would flood the log.
+    # If small-batch fires appear during generation, the impl runs on real
+    # forwards (NOT replay-skipped); if they never appear, generation forwards
+    # are cudagraph replays that skip the impl.
+    if _DBG and not capturing and q.shape[0] <= 2048 and _DBG_NONCAP[0] < 30:
         _DBG_NONCAP[0] += 1
         print(f"[graph/dbg] qk_probe impl REAL fire #{_DBG_NONCAP[0]} "
-              f"layer={int(layer_idx)} fn_set={fn is not None} "
+              f"layer={int(layer_idx)} capturing={capturing} "
               f"q={tuple(q.shape)}", flush=True)
     if fn is None:
         return
