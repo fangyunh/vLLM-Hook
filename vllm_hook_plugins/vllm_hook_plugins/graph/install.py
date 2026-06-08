@@ -237,12 +237,17 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
     except Exception:
         return
 
-    if query_start_loc is None or not req_ids:
-        if _DEBUG and _small and _capture_dbg["n"] < 10:
+    # Silently skip dummy/profiling forwards (no real requests) — vLLM runs many
+    # of these at warmup/capture (e.g. q=512, reqs=0) and they would flood the
+    # log and exhaust the debug budget before the real prompt forward appears.
+    if not req_ids:
+        return
+
+    if query_start_loc is None:
+        if _DEBUG and _capture_dbg["n"] < 12:
             _capture_dbg["n"] += 1
             print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)}"
-                  f" EXIT: qsl={query_start_loc is not None} reqs={len(req_ids) if req_ids else 0}",
-                  flush=True)
+                  f" reqs={len(req_ids)} EXIT: query_start_loc is None", flush=True)
         return
 
     # bs = actual request count. mr.query_start_loc may be a PADDED persistent
@@ -342,8 +347,8 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
         layer_states[module_name]["q"].append(q_tok)
         layer_states[module_name]["k_all"].append(k_tok)
 
-        if _DEBUG and _capture_dbg["n"] < 6:
-            _capture_dbg["n"] += 1
+        if _DEBUG and _capture_dbg.get("cap", 0) < 8:
+            _capture_dbg["cap"] = _capture_dbg.get("cap", 0) + 1
             print(f"[graph/dbg] qk_probe CAPTURED req={str(req_id)[:8]} "
                   f"layer={layer_idx} mode={req_mode} q={tuple(q_tok.shape)} "
                   f"k={tuple(k_tok.shape)} bucket={'disk' if extra.get('save_to_disk') else 'rpc'}",
