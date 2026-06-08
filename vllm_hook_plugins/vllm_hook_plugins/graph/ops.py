@@ -71,6 +71,67 @@ _FIRE_COUNT = [0]
 def get_fire_count() -> int:
     return _FIRE_COUNT[0]
 
+
+# ---------------------------------------------------------------------------
+# qk_probe: impl-runs-at-runtime capture (the PREFILL path).
+# ---------------------------------------------------------------------------
+# Why this exists alongside capture_qk: the device-buffer scatter (capture_qk)
+# needs the per-step routing index built BEFORE the forward, but vLLM v1 builds
+# the current step's input_batch INSIDE execute_model — so pre-forward routing
+# can't see the current step (confirmed on GPU: plans=0 every step). A custom
+# op's IMPL, however, runs at runtime DURING the forward (for non-cudagraph-
+# replayed passes, i.e. prefill under PIECEWISE), exactly where the eager
+# register_forward_hook used to run — with the live forward context and the
+# current input_batch. So qk_probe relocates the proven eager capture body into
+# an op that survives torch.compile. (Decode under cudagraph replay does not run
+# the impl; that path keeps the static-buffer machinery — a later milestone.)
+#
+# The op stays alive (not DCE'd) by mutating a per-layer `sink` counter, exactly
+# like step0_8's proven counter op. The heavy lifting is delegated to a callback
+# the install layer registers (set_capture_fn), so this module stays free of
+# worker/vLLM imports (avoids a circular import with install.py).
+
+_CAPTURE_FN = None  # set by install.set_capture_fn; signature (q, k, layer_idx)
+
+
+def set_capture_fn(fn) -> None:
+    """Register the runtime capture callback qk_probe's impl invokes.
+
+    ``fn(q, k, layer_idx)`` runs mid-forward (live forward context) and does the
+    eager per-request slicing/gating/prefix-K into the worker buckets.
+    """
+    global _CAPTURE_FN
+    _CAPTURE_FN = fn
+
+
+def _qk_probe_impl(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
+                   layer_idx: int) -> None:
+    """Runtime capture: keep the op alive (sink) then run the eager capture body.
+
+    Skips during vLLM's CUDA-graph CAPTURE pass (is_current_stream_capturing) —
+    same bail the eager hook had — so warmup/capture forwards don't pollute the
+    buckets; real prefill forwards (capturing==False) do the capture.
+    """
+    sink.add_(1)
+    _FIRE_COUNT[0] += 1
+    fn = _CAPTURE_FN
+    if fn is None:
+        return
+    try:
+        if torch.cuda.is_current_stream_capturing():
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    fn(q, k, int(layer_idx))
+
+
+def _qk_probe_fake(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
+                   layer_idx: int) -> None:
+    return None
+
+
+QK_PROBE_OP_NAME = "qk_probe"
+
 # Public op name + qualified path, so downstream files import constants rather
 # than hard-coding strings.
 LIB_NAMESPACE = "vllm_hook"
@@ -212,19 +273,40 @@ def register_graph_ops() -> None:
         if "already" not in str(e).lower() and "exist" not in str(e).lower():
             raise
 
+    # qk_probe: the impl-runs-at-runtime PREFILL capture op (see module notes).
+    try:
+        direct_register_custom_op(
+            op_name=QK_PROBE_OP_NAME,
+            op_func=_qk_probe_impl,
+            mutates_args=["sink"],
+            fake_impl=_qk_probe_fake,
+            target_lib=_LIB,
+            dispatch_key="CUDA",
+        )
+    except Exception as e:  # noqa: BLE001
+        if "already" not in str(e).lower() and "exist" not in str(e).lower():
+            raise
+
     # Only mark registered once the op handle actually resolves, so a partial
     # failure (registration raised an "already"-looking error but the op is not
     # actually present) does not leave callers to hit a confusing AttributeError
     # at capture time. If the handle is missing, surface the real error.
-    if not hasattr(torch.ops, LIB_NAMESPACE) or not hasattr(
-        getattr(torch.ops, LIB_NAMESPACE), CAPTURE_QK_OP_NAME
+    ns = getattr(torch.ops, LIB_NAMESPACE, None)
+    if ns is None or not hasattr(ns, CAPTURE_QK_OP_NAME) or not hasattr(
+        ns, QK_PROBE_OP_NAME
     ):
         raise RuntimeError(
-            f"register_graph_ops: torch.ops.{LIB_NAMESPACE}.{CAPTURE_QK_OP_NAME} "
+            f"register_graph_ops: ops under torch.ops.{LIB_NAMESPACE} "
             "did not resolve after registration"
         )
 
     _OPS_REGISTERED = True
+
+
+def qk_probe(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
+             layer_idx: int) -> None:
+    """Thin wrapper over ``torch.ops.vllm_hook.qk_probe`` (the prefill path)."""
+    return torch.ops.vllm_hook.qk_probe(q, k, sink, layer_idx)
 
 
 # ---------------------------------------------------------------------------

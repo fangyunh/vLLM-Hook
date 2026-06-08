@@ -120,6 +120,15 @@ class QKHookHost(nn.Module):
         self.capture_index: torch.Tensor | None = None
         self.any_active: torch.Tensor | None = None
 
+        # Keep-alive sink for the impl-runs prefill op (qk_probe). The op mutates
+        # this 1-element counter so it is not DCE'd (mirrors step0_8's counter);
+        # the real capture is a side effect of the op impl. Per-host (independent)
+        # so the 28 op nodes don't serialize on a shared mutated tensor.
+        self.register_buffer(
+            "sink", torch.zeros(1, dtype=torch.int64, device=device),
+            persistent=False,
+        )
+
     # ------------------------------------------------------------------
     # View binding (called by the registry, once, after construction).
     # ------------------------------------------------------------------
@@ -155,3 +164,14 @@ class QKHookHost(nn.Module):
         torch.ops.vllm_hook.capture_qk(
             q, k, self.q_buf, self.k_buf, self.capture_index, self.any_active
         )
+
+    def probe(self, q: torch.Tensor, k: torch.Tensor) -> None:
+        """Impl-runs-at-runtime capture (the PREFILL path; see graph/ops.py).
+
+        Calls the opaque ``vllm_hook::qk_probe`` op, which keeps itself alive by
+        mutating ``self.sink`` and — at runtime, mid-forward, where the live
+        forward context and current input_batch are available — runs the eager
+        per-request capture body (install._capture_body) into the worker buckets.
+        No static buffers / routing needed: the capture happens in the op impl.
+        """
+        torch.ops.vllm_hook.qk_probe(q, k, self.sink, self.layer_num)

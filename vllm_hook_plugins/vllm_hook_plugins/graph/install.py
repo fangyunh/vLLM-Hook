@@ -66,6 +66,7 @@ from vllm_hook_plugins.workers._common import (
     iter_matched_modules,
 )
 from vllm_hook_plugins.workers.probe_hookqk_worker import (
+    _read_cached_keys,
     match_attn,
 )
 
@@ -119,6 +120,12 @@ _HOST_ATTR = "_vllm_hook_qk_host"
 # to the worker's HostRegistry, so the wrap can stash the live forward context
 # for POST-forward egress (prefix-K) reads without re-deriving it.
 _REG_ATTR = "_vllm_hook_qk_registry"
+# op mode: a plain int layer-index attribute on each attn instance + a single
+# module-global keep-alive sink tensor. This mirrors step0_8's PROVEN shape
+# (closed-over global tensor + op call) and avoids reading a per-instance host
+# OBJECT inside the traced forward (which Dynamo might graph-break on).
+_LAYER_ATTR = "_vllm_hook_qk_layer"
+_GLOBAL_SINK = None  # int64 (1,) keep-alive for qk_probe; set in install (op mode)
 
 # Staging gate for the in-forward forward-context stash used by prefix-K
 # reconstruction. Default OFF so the first GPU run validates core QK capture
@@ -126,6 +133,21 @@ _REG_ATTR = "_vllm_hook_qk_registry"
 # the traced Attention.forward. Enable with VLLM_HOOK_QK_PREFIXK_STASH=1 once
 # core capture is confirmed. See _wrap_attn_class for the full rationale.
 _PREFIXK_STASH = os.environ.get("VLLM_HOOK_QK_PREFIXK_STASH") == "1"
+
+# Capture mechanism:
+#   "op"     (default) — impl-runs-at-runtime: the qk_probe op runs the eager
+#                        capture body mid-forward (works for PREFILL under
+#                        PIECEWISE, where the forward is NOT cudagraph-replayed).
+#                        No pre-forward routing — sidesteps the input_batch
+#                        staleness that made the buffer path capture nothing.
+#   "buffer"           — the §8 static-buffer + device-routing path (needed for
+#                        DECODE-under-cudagraph; kept for that later milestone).
+_CAPTURE_MODE = os.environ.get("VLLM_HOOK_QK_CAPTURE", "op")
+
+# Set at install for the impl-runs capture body (op mode).
+_ACTIVE_WORKER = None
+_LAYER_TO_NAME: Dict[int, str] = {}
+_capture_dbg = {"n": 0}  # one-shot capture confirmation counter (op mode)
 
 # Diagnostic logging for the execute_model wrapper hot path. Default ON during
 # bring-up so the first GPU runs are observable; set VLLM_HOOK_QK_DEBUG=0 to mute.
@@ -138,6 +160,131 @@ _dbg_call_n = [0]
 def _dbg(msg: str) -> None:
     if _DEBUG and _dbg_call_n[0] <= _DBG_MAX_CALLS:
         print(f"[graph/dbg] {msg}", flush=True)
+
+
+def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> None:
+    """The eager qkv_hook capture body, run INSIDE the qk_probe op (op mode).
+
+    This is invoked by graph/ops._qk_probe_impl at runtime, mid-forward, where
+    get_forward_context() and model_runner.input_batch are CURRENT (the same
+    point the eager register_forward_hook ran). It performs the identical
+    per-request slicing / hooks_on gating / hookq_mode / prefix-K as the eager
+    ``ProbeHookQKWorker.qkv_hook`` and writes into the SAME worker buckets, so
+    get_captured_states / flush_disk / the analyzer consume it unchanged.
+
+    ``q_in``/``k_in`` are the post-RoPE q/k passed to Attention.forward (whole
+    batch, (num_tokens, dim)); ``layer_idx`` is the host's layer_num. No static
+    buffers or pre-forward routing are involved — capture is the op's side effect.
+    """
+    worker = _ACTIVE_WORKER
+    if worker is None:
+        return
+    module_name = _LAYER_TO_NAME.get(int(layer_idx))
+    if module_name is None:
+        return
+    mr = worker.model_runner
+
+    ctx = get_forward_context()
+    metadata = getattr(ctx, "attn_metadata", None)
+    if metadata is None:
+        return
+    query_start_loc, seq_lens = get_query_metadata(metadata)
+    if query_start_loc is None:
+        return
+
+    try:
+        req_ids = mr.input_batch.req_ids
+    except Exception:
+        return
+
+    bs = len(query_start_loc) - 1
+    last_indices = query_start_loc
+    default_mode = getattr(worker, "hookq_mode", "all_tokens")
+    default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
+
+    for i in range(bs):
+        if i >= len(req_ids):
+            break
+        req_id = req_ids[i]
+        req_state = mr.requests.get(req_id)
+        if req_state is None or req_state.sampling_params is None:
+            continue
+        extra = req_state.sampling_params.extra_args
+        if not extra or extra.get("output_qk") is None:
+            continue
+
+        # output_qk layer filter (True=all | [layers] | {layer: heads}).
+        output_spec = extra.get("output_qk")
+        if isinstance(output_spec, dict):
+            if layer_idx not in {int(k) for k in output_spec.keys()}:
+                continue
+        elif isinstance(output_spec, list):
+            if layer_idx not in output_spec:
+                continue
+
+        # hooks_on prefill/decode gating — output_token_ids==[] detects prefill.
+        # CORRECT here (unlike the pre-forward path): we are mid-forward, so the
+        # request state reflects the CURRENT step.
+        hooks_on = extra.get("hooks_on", default_hooks_on)
+        if hooks_on != "both":
+            is_prefill = len(req_state.output_token_ids) == 0
+            if hooks_on == "prefill" and not is_prefill:
+                continue
+            if hooks_on == "decode" and is_prefill:
+                continue
+
+        req_mode = extra.get("hookq_mode", default_mode)
+        start = int(last_indices[i].item())
+        end = int(last_indices[i + 1].item())
+
+        if req_mode == "all_tokens":
+            q_tok = q_in[start:end, :].detach().clone()
+        else:
+            q_tok = q_in[end - 1, :].detach().clone()
+        k_tok = k_in[start:end, :].detach().clone()
+
+        # Prefix-K reconstruction (identical to eager qkv_hook). We are mid-
+        # forward, so _read_cached_keys' internal get_forward_context() is valid.
+        if seq_lens is not None:
+            try:
+                sv = seq_lens[i]
+                total_len = int(sv.item()) if hasattr(sv, "item") else int(sv)
+                query_len = end - start
+                num_cached = total_len - query_len
+                if num_cached > 0:
+                    PROF.incr("kv.prefix_recon")
+                    with PROF.timed("kv.prefix_recon"):
+                        meta_kv = metadata if not isinstance(metadata, dict) \
+                            else next(iter(metadata.values()))
+                        prefix_k = _read_cached_keys(
+                            module_name, meta_kv, i, num_cached, total_len)
+                    if prefix_k is not None:
+                        k_tok = torch.cat(
+                            [prefix_k.to(k_tok.device, dtype=k_tok.dtype), k_tok],
+                            dim=0)
+            except Exception:
+                PROF.incr("kv.prefix_recon.errors")
+
+        PROF.incr("hook.fire.qk")
+        bucket = worker._disk_states if extra.get("save_to_disk") \
+            else worker._captured_states
+        if req_id not in bucket:
+            bucket[req_id] = {}
+        layer_states = bucket[req_id]
+        if module_name not in layer_states:
+            layer_states[module_name] = {
+                "q": [], "k_all": [], "layer_num": layer_idx,
+                "hookq_mode": req_mode,
+            }
+        layer_states[module_name]["q"].append(q_tok)
+        layer_states[module_name]["k_all"].append(k_tok)
+
+        if _DEBUG and _capture_dbg["n"] < 6:
+            _capture_dbg["n"] += 1
+            print(f"[graph/dbg] qk_probe CAPTURED req={str(req_id)[:8]} "
+                  f"layer={layer_idx} mode={req_mode} q={tuple(q_tok.shape)} "
+                  f"k={tuple(k_tok.shape)} bucket={'disk' if extra.get('save_to_disk') else 'rpc'}",
+                  flush=True)
 
 
 def _wrap_attn_class(cls: type) -> None:
@@ -172,6 +319,18 @@ def _wrap_attn_class(cls: type) -> None:
 
     def make_wrapped(orig_fwd):
         def wrapped(self, *args, **kwargs):
+            # op mode (default): lean path matching step0_8 — read a plain int
+            # layer attribute (install-time constant; -1 => don't capture) and
+            # emit ONE qk_probe op against the closed-over global sink. No
+            # per-instance host object is touched inside the traced forward.
+            if _CAPTURE_MODE == "op":
+                layer_idx = getattr(self, _LAYER_ATTR, -1)
+                if layer_idx >= 0 and len(args) >= 2:
+                    torch.ops.vllm_hook.qk_probe(
+                        args[0], args[1], _GLOBAL_SINK, layer_idx)
+                return orig_fwd(self, *args, **kwargs)
+
+            # ---- buffer mode (decode milestone): static-buffer scatter. ----
             host = getattr(self, _HOST_ATTR, None)
             # do_capture is an INSTALL-TIME constant (True only on capture rank)
             # — this branch is on a python-level constant, never on per-request
@@ -269,8 +428,15 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
         print("[graph/install] no model on model_runner; skip QK host install")
         return None
 
-    # Register the capture op once per process, BEFORE any wrap can fire.
+    # Register the capture op(s) once per process, BEFORE any wrap can fire.
     register_graph_ops()
+
+    # op mode: wire the impl-runs capture body + the worker it writes into.
+    if _CAPTURE_MODE == "op":
+        from vllm_hook_plugins.graph.ops import set_capture_fn
+        global _ACTIVE_WORKER
+        _ACTIVE_WORKER = worker
+        set_capture_fn(_capture_body)
 
     # Capture-rank gating (mirrors probe_hookqk_worker.install_hooks): only TP
     # rank 0 captures — residual streams are replicated across TP ranks after
@@ -341,6 +507,30 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
         return None
     num_layers = max(layer_num for _, _, layer_num in matched) + 1
 
+    # ---- op mode (default): NO static buffers / registry. Tag each attn
+    # instance with its layer index, map layer->module name (for egress keys /
+    # prefix-K), create the global keep-alive sink, and class-wrap. Capture runs
+    # inside the qk_probe op mid-forward — sidesteps the input_batch staleness
+    # that made the pre-forward buffer routing capture nothing. ----
+    if _CAPTURE_MODE == "op":
+        global _GLOBAL_SINK
+        device_t = next(model.parameters()).device
+        n_wired = 0
+        if should_capture:
+            _GLOBAL_SINK = torch.zeros(1, dtype=torch.int64, device=device_t)
+            for name, module, layer_num in matched:
+                setattr(module, _LAYER_ATTR, layer_num)
+                _LAYER_TO_NAME[layer_num] = name
+                n_wired += 1
+        for _, module, _ in matched:
+            _wrap_attn_class(type(module))
+        worker._graph_registry = None
+        print(f"[graph/install] op-mode QK capture wired: {n_wired} layer(s); "
+              f"should_capture={should_capture}; q_dim={q_dim} k_dim={k_dim}; "
+              f"hooks_on={getattr(worker, '_default_hooks_on', 'prefill')}")
+        return None
+
+    # ---- buffer mode (decode-under-cudagraph milestone): static buffers. ----
     registry: Optional[HostRegistry] = None
     if should_capture:
         registry = HostRegistry(
@@ -375,6 +565,9 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
             # context (for POST-forward prefix-K) from inside the forward.
             setattr(module, _REG_ATTR, registry)
             registry.register_host(host)
+            # op mode: map layer_num -> module name so the capture body can key
+            # the egress buckets / prefix-K kv_cache lookup by module name.
+            _LAYER_TO_NAME[layer_num] = name
             n_hosts += 1
         _wrap_attn_class(type(module))
 
@@ -447,6 +640,7 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
     any_active_pinned = registry.any_active_pinned          # (num_layers,)
     cap = registry.cap
 
+    dbg_rows: list = []  # per-request decision trace (diagnostic only)
     plans: list = []
     for i in range(bs):
         if i >= len(req_ids):
@@ -454,9 +648,11 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         req_id = req_ids[i]
         req_state = model_runner.requests.get(req_id)
         if req_state is None or req_state.sampling_params is None:
+            dbg_rows.append(f"r{i}:no_state")
             continue
         extra = req_state.sampling_params.extra_args
         if not extra or extra.get("output_qk") is None:
+            dbg_rows.append(f"r{i}:no_output_qk")
             continue
 
         # output_qk: True (all layers) | [layer_ids] | {layer: [heads]} — only
@@ -472,9 +668,18 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         # hooks_on: "prefill" (default) | "decode" | "both". output_token_ids==[]
         # detects the first (prefill) pass robustly under prefix caching.
         hooks_on = extra.get("hooks_on", getattr(model_runner, "_default_hooks_on", "prefill"))
+        n_out = len(req_state.output_token_ids)
+        n_computed = getattr(req_state, "num_computed_tokens", None)
+        n_prompt = len(getattr(req_state, "prompt_token_ids", []) or [])
+        _qlen = int(qsl_cpu[i + 1]) - int(qsl_cpu[i])
+        dbg_rows.append(
+            f"r{i}:qlen={_qlen},out_toks={n_out},computed={n_computed},"
+            f"prompt={n_prompt},hooks_on={hooks_on}"
+        )
         if hooks_on != "both":
             is_prefill = len(req_state.output_token_ids) == 0
             if hooks_on == "prefill" and not is_prefill:
+                dbg_rows.append(f"r{i}:SKIP_prefill_gate(out_toks={n_out})")
                 continue
             if hooks_on == "decode" and is_prefill:
                 continue
@@ -484,6 +689,7 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         start = int(qsl_cpu[i])
         end = int(qsl_cpu[i + 1])
         if end <= start:
+            dbg_rows.append(f"r{i}:empty_range")
             continue
         # Clamp the routed range to buffer capacity. Row = flat position + 1, so
         # the highest routable position is cap-1 (row cap). Tokens beyond that
@@ -530,6 +736,9 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
             "req_state": req_state,
         })
 
+    if _DEBUG and _dbg_call_n[0] <= _DBG_MAX_CALLS:
+        print(f"[graph/dbg]   routing bs={bs} plans={len(plans)} :: "
+              + " | ".join(dbg_rows), flush=True)
     return plans
 
 
@@ -795,6 +1004,15 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     """
     if getattr(model_runner, "_vllm_hook_qk_wrapped", False):
         return
+
+    # op mode captures inside the qk_probe op (mid-forward); the pre-forward
+    # routing + post-forward egress wrapper is only needed for the buffer
+    # (decode-under-cudagraph) path. Skip it so op mode pays nothing per step.
+    if _CAPTURE_MODE == "op":
+        print("[graph/install] capture mode=op — execute_model wrapper skipped "
+              "(capture runs inside qk_probe)")
+        return
+
     model_runner._vllm_hook_qk_wrapped = True
 
     # Surface the worker fallback mode + default phase onto the runner so the
