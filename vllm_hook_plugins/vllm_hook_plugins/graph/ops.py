@@ -61,6 +61,16 @@ import torch
 _LIB = None
 _OPS_REGISTERED = False
 
+# Diagnostic: counts real executions of the capture op impl (prefill + graph-
+# capture passes; NOT cudagraph replays, where the python impl does not run).
+# Read via get_fire_count() from the execute_model wrapper to confirm the op is
+# actually in the executed graph. Cheap; no effect on correctness.
+_FIRE_COUNT = [0]
+
+
+def get_fire_count() -> int:
+    return _FIRE_COUNT[0]
+
 # Public op name + qualified path, so downstream files import constants rather
 # than hard-coding strings.
 LIB_NAMESPACE = "vllm_hook"
@@ -139,6 +149,7 @@ def _capture_qk_impl(
     per-layer buffers whose data_ptr is fixed across graph replays (C3).
     """
     del active  # unused: sentinel-row routing supersedes the multiplicative gate
+    _FIRE_COUNT[0] += 1  # diagnostic only
     # index_copy_ requires a 1-D LongTensor whose length == src.shape[0].
     n = q.shape[0]
     idx = index[:n].to(torch.long)

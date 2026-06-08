@@ -127,6 +127,18 @@ _REG_ATTR = "_vllm_hook_qk_registry"
 # core capture is confirmed. See _wrap_attn_class for the full rationale.
 _PREFIXK_STASH = os.environ.get("VLLM_HOOK_QK_PREFIXK_STASH") == "1"
 
+# Diagnostic logging for the execute_model wrapper hot path. Default ON during
+# bring-up so the first GPU runs are observable; set VLLM_HOOK_QK_DEBUG=0 to mute.
+# Prints are compact, flushed, and capped to the first few calls.
+_DEBUG = os.environ.get("VLLM_HOOK_QK_DEBUG", "1") == "1"
+_DBG_MAX_CALLS = int(os.environ.get("VLLM_HOOK_QK_DEBUG_MAX", "8"))
+_dbg_call_n = [0]
+
+
+def _dbg(msg: str) -> None:
+    if _DEBUG and _dbg_call_n[0] <= _DBG_MAX_CALLS:
+        print(f"[graph/dbg] {msg}", flush=True)
+
 
 def _wrap_attn_class(cls: type) -> None:
     """Class-wrap ``cls.forward`` to call ``host.capture(q, k)`` pre-forward.
@@ -795,6 +807,10 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     orig_execute_model = model_runner.execute_model
 
     def wrapped_execute_model(scheduler_output, *args, **kwargs):
+        _dbg_call_n[0] += 1
+        if _DEBUG and _dbg_call_n[0] == 1:
+            print("[graph/dbg] execute_model WRAPPER INVOKED (1st call) — the "
+                  "wrapper is on the live forward path", flush=True)
         registry: Optional[HostRegistry] = getattr(worker, "_graph_registry", None)
 
         # Non-capture rank or no hosts: nothing to route/drain — straight through.
@@ -815,7 +831,9 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         # Cheap host-side gate: if no request wants QK, skip the whole routing /
         # upload / egress block (and its costs) entirely. An unrelated capture
         # worker then pays nothing per step.
-        if not _any_qk_requested(model_runner):
+        any_qk = _any_qk_requested(model_runner)
+        if not any_qk:
+            _dbg(f"call#{_dbg_call_n[0]}: wrapper live, any_qk=False -> skip")
             return orig_execute_model(scheduler_output, *args, **kwargs)
 
         # ---- PRE-forward: build routing on the pinned mirror + upload. ----
@@ -839,9 +857,14 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
                 plans = _build_routing(model_runner, registry, qsl_cpu)
             registry.upload()
 
+        from vllm_hook_plugins.graph.ops import get_fire_count
+        fire_before = get_fire_count()
+
         # ---- forward (compiled graph replays; capture_qk scatters inline; the
         # attn wrap stashes the live forward context on the registry). ----
         result = orig_execute_model(scheduler_output, *args, **kwargs)
+
+        fire_after = get_fire_count()
 
         # ---- POST-forward: drain static buffers into the worker buckets. The
         # stashed forward context supplies metadata/seq_lens/kv_cache for prefix-K
@@ -849,6 +872,19 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         if plans:
             with PROF.timed("graph.egress"):
                 _egress(worker, registry, plans)
+
+        # Print on every prefill/QK step (plans>0) and for the first few calls,
+        # so we always see the decisive prefill rows without flooding on decode.
+        if _DEBUG and (plans or _dbg_call_n[0] <= _DBG_MAX_CALLS):
+            qsl_bs = (len(qsl_cpu) - 1) if qsl_cpu is not None else None
+            n_disk = sum(len(v) for v in getattr(worker, "_disk_states", {}).values())
+            n_rpc = sum(len(v) for v in getattr(worker, "_captured_states", {}).values())
+            print(
+                f"[graph/dbg] call#{_dbg_call_n[0]}: any_qk=True qsl_bs={qsl_bs} "
+                f"plans={len(plans)} op_fired={fire_after - fire_before} "
+                f"(total={fire_after}) disk_entries={n_disk} rpc_entries={n_rpc}",
+                flush=True,
+            )
 
         return result
 
