@@ -8,3 +8,7 @@ output*.txt
 
 # random test configs
 model_configs/**/*.RANDOM_TEST.json
+
+# local-only (not part of PR)
+.vscode/settings.json
+examples/compare_token_highlighter_scorers.py

@@ -1,8 +1,0 @@
-{
-  "editor.semanticHighlighting.enabled": true,
-  "workbench.colorTheme": "Default Dark Modern",
-  "explorer.decorations.colors": false,
-  "explorer.decorations.badges": true,
-  "problems.decorations.enabled": true,
-  "git.decorations.enabled": true
-}
