@@ -53,7 +53,12 @@ SCATTER SEMANTICS (capture_qk):
 """
 from __future__ import annotations
 
+import os
+
 import torch
+
+_DBG = os.environ.get("VLLM_HOOK_QK_DEBUG", "1") == "1"
+_DBG_NONCAP = [0]  # count of non-capturing (real-forward) impl fires logged
 
 # --- module globals (kept alive for the op lifetime) ------------------------
 # The dedicated "vllm_hook" library; see module docstring for why this must not
@@ -115,13 +120,23 @@ def _qk_probe_impl(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
     sink.add_(1)
     _FIRE_COUNT[0] += 1
     fn = _CAPTURE_FN
-    if fn is None:
-        return
+    capturing = False
     try:
-        if torch.cuda.is_current_stream_capturing():
-            return
+        capturing = torch.cuda.is_current_stream_capturing()
     except Exception:  # noqa: BLE001
         pass
+    # Diagnostic: log the first several NON-capturing (real-forward) fires. If
+    # these never appear during generation, the op only runs at graph-capture
+    # time and is skipped on replay (op absorbed into a cudagraphed segment).
+    if _DBG and not capturing and _DBG_NONCAP[0] < 10:
+        _DBG_NONCAP[0] += 1
+        print(f"[graph/dbg] qk_probe impl REAL fire #{_DBG_NONCAP[0]} "
+              f"layer={int(layer_idx)} fn_set={fn is not None} "
+              f"q={tuple(q.shape)}", flush=True)
+    if fn is None:
+        return
+    if capturing:
+        return
     fn(q, k, int(layer_idx))
 
 
