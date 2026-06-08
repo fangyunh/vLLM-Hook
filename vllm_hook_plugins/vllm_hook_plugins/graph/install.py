@@ -163,6 +163,31 @@ def _dbg(msg: str) -> None:
         print(f"[graph/dbg] {msg}", flush=True)
 
 
+def _cpu_1d(x):
+    """Coerce a query_start_loc/seq_lens carrier to a 1-D CPU tensor, or None.
+
+    vLLM v1 stores these as CpuGpuBuffer-like objects (``.cpu``/``.gpu``/``.np``
+    tensor attributes) on the model_runner, or sometimes as plain tensors. We
+    prefer the CPU mirror to avoid a device sync. Returns None if nothing usable.
+    """
+    if x is None:
+        return None
+    if isinstance(x, torch.Tensor):
+        return x.detach().to("cpu")
+    # CpuGpuBuffer: .cpu is a CPU tensor attribute (NOT the Tensor.cpu method).
+    for attr in ("cpu", "np", "gpu"):
+        v = getattr(x, attr, None)
+        if v is None or callable(v):
+            continue
+        if isinstance(v, torch.Tensor):
+            return v.detach().to("cpu")
+        try:
+            return torch.as_tensor(v)
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> None:
     """The eager qkv_hook capture body, run INSIDE the qk_probe op (op mode).
 
@@ -191,53 +216,48 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
 
     ctx = get_forward_context()
     metadata = getattr(ctx, "attn_metadata", None)
-    if metadata is None:
-        # One-shot exploration: when attn_metadata is None mid-forward (compile
-        # path), dump where query_start_loc / seq_lens might actually live so we
-        # can source them without the forward context.
-        if _DEBUG and _small and not _ctx_dumped[0]:
-            _ctx_dumped[0] = True
-            try:
-                ctx_attrs = [a for a in dir(ctx) if not a.startswith("_")]
-            except Exception:  # noqa: BLE001
-                ctx_attrs = "?"
-            ib = getattr(mr, "input_batch", None)
-            def _hits(obj):
-                try:
-                    return [a for a in dir(obj) if not a.startswith("__") and any(
-                        t in a.lower() for t in
-                        ("query", "start_loc", "seq_len", "num_token",
-                         "num_computed", "num_sched"))]
-                except Exception:  # noqa: BLE001
-                    return "?"
-            print(
-                f"[graph/dbg] CTX-DUMP ctx={type(ctx).__name__} "
-                f"ctx_attrs={ctx_attrs}", flush=True)
-            print(f"[graph/dbg] MR-HITS {_hits(mr)}", flush=True)
-            print(f"[graph/dbg] IB-HITS {_hits(ib)}", flush=True)
-        if _DEBUG and _small and _capture_dbg["n"] < 10:
-            _capture_dbg["n"] += 1
-            print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)}"
-                  " EXIT: attn_metadata is None", flush=True)
-        return
-    query_start_loc, seq_lens = get_query_metadata(metadata)
+
+    # Resolve query_start_loc / seq_lens. The eager path read these from
+    # ctx.attn_metadata, but under torch.compile/PIECEWISE that field is None
+    # (confirmed by the CTX dump). Fall back to the model_runner's persistent
+    # buffers (mr.query_start_loc / mr.seq_lens), which ARE current mid-forward
+    # (built in _prepare_inputs before the model runs). These are CpuGpuBuffer-
+    # like, so _cpu_1d unwraps them to CPU tensors.
+    query_start_loc = None
+    seq_lens = None
+    if metadata is not None:
+        query_start_loc, seq_lens = get_query_metadata(metadata)
     if query_start_loc is None:
-        if _DEBUG and _small and _capture_dbg["n"] < 10:
-            _capture_dbg["n"] += 1
-            print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)}"
-                  " EXIT: query_start_loc is None", flush=True)
-        return
+        query_start_loc = _cpu_1d(getattr(mr, "query_start_loc", None))
+    if seq_lens is None:
+        seq_lens = _cpu_1d(getattr(mr, "seq_lens", None))
 
     try:
         req_ids = mr.input_batch.req_ids
     except Exception:
         return
 
-    bs = len(query_start_loc) - 1
+    if query_start_loc is None or not req_ids:
+        if _DEBUG and _small and _capture_dbg["n"] < 10:
+            _capture_dbg["n"] += 1
+            print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)}"
+                  f" EXIT: qsl={query_start_loc is not None} reqs={len(req_ids) if req_ids else 0}",
+                  flush=True)
+        return
+
+    # bs = actual request count. mr.query_start_loc may be a PADDED persistent
+    # buffer (length max_reqs+1), so DO NOT use len(query_start_loc)-1; the valid
+    # cumulative offsets are query_start_loc[:bs+1], indexed by request.
+    bs = len(req_ids)
     if _DEBUG and _small and _capture_dbg["n"] < 10:
         _capture_dbg["n"] += 1
+        try:
+            _qsl_head = [int(query_start_loc[j]) for j in range(min(bs + 1, len(query_start_loc)))]
+        except Exception:  # noqa: BLE001
+            _qsl_head = "?"
         print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)} "
-              f"RUNS: bs={bs} req_ids={[str(r)[:8] for r in req_ids[:bs]]}", flush=True)
+              f"RUNS: bs={bs} qsl[:bs+1]={_qsl_head} meta={'ctx' if metadata is not None else 'mr'}",
+              flush=True)
     last_indices = query_start_loc
     default_mode = getattr(worker, "hookq_mode", "all_tokens")
     default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
@@ -283,9 +303,12 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
             q_tok = q_in[end - 1, :].detach().clone()
         k_tok = k_in[start:end, :].detach().clone()
 
-        # Prefix-K reconstruction (identical to eager qkv_hook). We are mid-
-        # forward, so _read_cached_keys' internal get_forward_context() is valid.
-        if seq_lens is not None:
+        # Prefix-K reconstruction (identical to eager qkv_hook). Needs the attn
+        # metadata's block_table, which is only available when ctx.attn_metadata
+        # is present (eager path). Under compile it is None, so prefix-K is
+        # deferred — harmless for fresh prompts (num_cached==0). TODO: reconstruct
+        # block_table from ctx.slot_mapping / no_compile_layers for prefix caching.
+        if seq_lens is not None and metadata is not None:
             try:
                 sv = seq_lens[i]
                 total_len = int(sv.item()) if hasattr(sv, "item") else int(sv)
