@@ -593,6 +593,22 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
         for _, module, _ in matched:
             _wrap_attn_class(type(module))
         worker._graph_registry = None
+        # Ensure our op is a splitting op on the WORKER's resolved config too —
+        # this is the config the worker's compiler actually reads, and it runs at
+        # load_model (BEFORE compile/capture). The driver-side append
+        # (_hook_plugin) may be lost if vLLM re-resolves splitting_ops, so set it
+        # here as well. If absent, our op is absorbed into a replayed cudagraph
+        # segment and captures nothing — this is the load-bearing fix.
+        try:
+            cc = worker.vllm_config.compilation_config
+            sops = list(getattr(cc, "splitting_ops", None) or [])
+            if "vllm_hook::qk_probe" not in sops:
+                sops.append("vllm_hook::qk_probe")
+                cc.splitting_ops = sops
+            print(f"[graph/install] splitting_ops has qk_probe="
+                  f"{'vllm_hook::qk_probe' in sops} (n={len(sops)})")
+        except Exception as e:  # noqa: BLE001
+            print(f"[graph/install] could not set splitting_ops: {e}")
         print(f"[graph/install] op-mode QK capture wired: {n_wired} layer(s); "
               f"should_capture={should_capture}; q_dim={q_dim} k_dim={k_dim}; "
               f"hooks_on={getattr(worker, '_default_hooks_on', 'prefill')}")

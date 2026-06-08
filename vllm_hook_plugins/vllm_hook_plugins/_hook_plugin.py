@@ -108,7 +108,8 @@ def _patched_create_engine_config(self, *args, **kwargs):
         else:
             self.worker_extension_cls = _WORKER_EXT_HS
 
-    if os.environ.get("VLLM_HOOK_ALLOW_CUDAGRAPH") == "1":
+    graph_mode = os.environ.get("VLLM_HOOK_ALLOW_CUDAGRAPH") == "1"
+    if graph_mode:
         # Graph mode: leave enforce_eager as the caller set it, and arm the
         # load_model install path for the worker subprocess(es).
         from vllm_hook_plugins.graph.install import set_graph_mode
@@ -118,7 +119,28 @@ def _patched_create_engine_config(self, *args, **kwargs):
         self.enforce_eager = True
 
     assert _original_create_engine_config is not None
-    return _original_create_engine_config(self, *args, **kwargs)
+    config = _original_create_engine_config(self, *args, **kwargs)
+
+    # CRITICAL (op-mode capture): register our capture op as a vLLM "splitting
+    # op" so the piecewise compiler keeps it in the EAGER seam between cudagraph
+    # segments — exactly how `unified_attention` is treated. Otherwise our op is
+    # absorbed into a cudagraphed segment and its Python impl is SKIPPED on graph
+    # replay (proven on GPU: the op only fired on non-replayed warmup forwards,
+    # never during real generation). As a splitting op it runs every step, so the
+    # capture body executes mid-forward with the live request state.
+    if graph_mode and os.environ.get("VLLM_HOOK_QK_CAPTURE", "op") == "op":
+        try:
+            cc = config.compilation_config
+            ops = list(getattr(cc, "splitting_ops", None) or [])
+            if "vllm_hook::qk_probe" not in ops:
+                ops.append("vllm_hook::qk_probe")
+                cc.splitting_ops = ops
+                print("[vllm-hook] added vllm_hook::qk_probe to "
+                      f"compilation_config.splitting_ops ({len(ops)} total)")
+        except Exception as e:  # noqa: BLE001
+            print(f"[vllm-hook] could not add qk_probe to splitting_ops: {e}")
+
+    return config
 
 
 # ---------------------------------------------------------------------------
