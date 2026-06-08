@@ -148,6 +148,7 @@ _CAPTURE_MODE = os.environ.get("VLLM_HOOK_QK_CAPTURE", "op")
 _ACTIVE_WORKER = None
 _LAYER_TO_NAME: Dict[int, str] = {}
 _capture_dbg = {"n": 0}  # one-shot capture confirmation counter (op mode)
+_ctx_dumped = [False]    # one-shot forward-context exploration dump
 
 # Diagnostic logging for the execute_model wrapper hot path. Default ON during
 # bring-up so the first GPU runs are observable; set VLLM_HOOK_QK_DEBUG=0 to mute.
@@ -191,6 +192,29 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
     ctx = get_forward_context()
     metadata = getattr(ctx, "attn_metadata", None)
     if metadata is None:
+        # One-shot exploration: when attn_metadata is None mid-forward (compile
+        # path), dump where query_start_loc / seq_lens might actually live so we
+        # can source them without the forward context.
+        if _DEBUG and _small and not _ctx_dumped[0]:
+            _ctx_dumped[0] = True
+            try:
+                ctx_attrs = [a for a in dir(ctx) if not a.startswith("_")]
+            except Exception:  # noqa: BLE001
+                ctx_attrs = "?"
+            ib = getattr(mr, "input_batch", None)
+            def _hits(obj):
+                try:
+                    return [a for a in dir(obj) if not a.startswith("__") and any(
+                        t in a.lower() for t in
+                        ("query", "start_loc", "seq_len", "num_token",
+                         "num_computed", "num_sched"))]
+                except Exception:  # noqa: BLE001
+                    return "?"
+            print(
+                f"[graph/dbg] CTX-DUMP ctx={type(ctx).__name__} "
+                f"ctx_attrs={ctx_attrs}", flush=True)
+            print(f"[graph/dbg] MR-HITS {_hits(mr)}", flush=True)
+            print(f"[graph/dbg] IB-HITS {_hits(ib)}", flush=True)
         if _DEBUG and _small and _capture_dbg["n"] < 10:
             _capture_dbg["n"] += 1
             print(f"[graph/dbg] _capture_body layer={layer_idx} q={tuple(q_in.shape)}"

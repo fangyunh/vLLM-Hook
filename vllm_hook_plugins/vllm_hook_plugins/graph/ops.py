@@ -139,7 +139,12 @@ def _qk_probe_impl(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
         return
     if capturing:
         return
-    fn(q, k, int(layer_idx))
+    # Never let a capture bug crash the model forward — capture is best-effort.
+    try:
+        fn(q, k, int(layer_idx))
+    except Exception as e:  # noqa: BLE001
+        if _DBG and _DBG_NONCAP[0] < 12:
+            print(f"[graph/dbg] qk_probe capture body raised: {e!r}", flush=True)
 
 
 def _qk_probe_fake(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
