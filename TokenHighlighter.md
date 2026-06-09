@@ -1,4 +1,8 @@
+# Token Highlighter Documentation
+
 **Reference.** [Token Highlighter: Inspecting and Mitigating Jailbreak Prompts for LLMs](https://arxiv.org/pdf/2412.18171) (arXiv:2412.18171).
+
+**Technical report (PDF).** [TokenHighlighter.pdf](TokenHighlighter.pdf) — formatted export of this writeup for offline reading and citation.
 
 This report describes the Token Highlighter integration in vLLM-Hook: attribution of prompt tokens to an affirmation loss, driver selection, and optional embedding-level mitigation during inference.
 

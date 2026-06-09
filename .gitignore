@@ -14,4 +14,6 @@ model_configs/**/*.RANDOM_TEST.json
 examples/compare_token_highlighter_scorers.py
 examples/results/
 vllm_hook_plugins/vllm_hook_plugins/utils/TokenHighlighter/scorer_validation.py
-TokenHighlighter.pdf
+docs/build-token-highlighter-pdf.sh
+docs/pandoc-pdf-tables.lua
+docs/token-highlighter-pdf.yaml

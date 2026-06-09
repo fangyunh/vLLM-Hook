@@ -11,3 +11,4 @@ Each row maps a use case to its plugin code and the corresponding contributor.
 | Activation Steering | `workers/steer_activation_worker.py`, `examples/demo_actsteer.py`, `examples/demo_actsteer_serve.py` (Colab: [@tburleyinfo](https://github.com/tburleyinfo)) | [@IRENEKO](https://github.com/IRENEKO) |
 | Hidden-State Probe | `workers/probe_hidden_states_worker.py`, `analyzers/hidden_states_analyzer.py`, `examples/demo_hiddenstate.py` | [@IRENEKO](https://github.com/IRENEKO) |
 | Science Hallucination Detector | `analyzers/science_hallucination_analyzer.py`, `examples/demo_scihal.py` | [@IRENEKO](https://github.com/IRENEKO) |
+| [Token Highlighter](../../TokenHighlighter.md) ([technical report PDF](../../TokenHighlighter.pdf)) | `workers/highlighter_worker.py`, `analyzers/highlighter_analyzer.py`, `notebooks/demo_token_highlighter.ipynb`, `notebooks/demo_token_highlighter_colab.ipynb` | [@asanth7](https://github.com/asanth7) |
