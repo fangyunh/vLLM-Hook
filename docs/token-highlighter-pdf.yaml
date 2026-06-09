@@ -1,0 +1,46 @@
+---
+title: "Token Highlighter"
+subtitle: "Technical Report — vLLM-Hook Integration"
+author: "vLLM-Hook"
+date: "\\today"
+documentclass: scrartcl
+classoption:
+  - 11pt
+  - a4paper
+  - DIV=12
+  - numbers=noenddot
+geometry: margin=1.1in
+mainfont: "TeX Gyre Termes"
+sansfont: "TeX Gyre Heros"
+monofont: "TeX Gyre Cursor"
+mathfont: "TeX Gyre Termes Math"
+colorlinks: true
+linkcolor: RoyalBlue
+urlcolor: RoyalBlue
+toc: true
+toc-depth: 2
+numbersections: true
+top-level-division: section
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{calc}
+  - \usepackage{microtype}
+  - \usepackage{xcolor}
+  - \usepackage{hyperref}
+  - \usepackage{fvextra}
+  - \usepackage{setspace}
+  - \usepackage{etoolbox}
+  - \onehalfspacing
+  - \setcounter{secnumdepth}{2}
+  - \setcounter{tocdepth}{2}
+  - \setlength{\LTpre}{8pt}
+  - \setlength{\LTpost}{8pt}
+  - \setlength{\tabcolsep}{5pt}
+  - \AtBeginEnvironment{longtable}{\footnotesize\singlespacing}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\},fontsize=\small}
+  - \setlength{\emergencystretch}{2em}
+  - \RedeclareSectionCommand[beforeskip=1.5ex plus .2ex, afterskip=1ex plus .1ex]{section}
+  - \RedeclareSectionCommand[beforeskip=1.2ex plus .2ex, afterskip=0.8ex plus .1ex]{subsection}
+---

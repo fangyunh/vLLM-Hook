@@ -10,5 +10,8 @@ output*.txt
 model_configs/**/*.RANDOM_TEST.json
 
 # local-only (not part of PR)
-.vscode/settings.json
+.vscode/
 examples/compare_token_highlighter_scorers.py
+examples/results/
+vllm_hook_plugins/vllm_hook_plugins/utils/TokenHighlighter/scorer_validation.py
+TokenHighlighter.pdf
