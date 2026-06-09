@@ -42,6 +42,7 @@ class HookLLM:
         self._hookq_mode = "all_tokens"  # default; overridable in config
         self._hs_mode = "last_token"     # default; overridable in config
         self._steering_config: Optional[Dict] = None  # set by load_config for steer worker
+        self._highlighter_config: Optional[Dict] = None  # set by load_config for token_highlighter
         if config_file:
             self.load_config(config_file)
 
@@ -100,6 +101,9 @@ class HookLLM:
             self._hs_mode = hs_cfg.get("mode", "last_token")
             self._output_layers = layers if layers else True
 
+        if "highlighter" in config_data:
+            self._highlighter_config = dict(config_data["highlighter"])
+
     def _build_extra_args(self, save_to_disk: bool, run_id: str) -> dict:
         """Build extra_args for the probe worker based on worker_name and config."""
         extra = {}
@@ -112,6 +116,12 @@ class HookLLM:
             extra["hookq_mode"] = self._hookq_mode
         elif self.worker_name == "steer_hook_act":
             extra["steer"] = self._steering_config
+        elif self.worker_name == "token_highlighter":
+            if self._highlighter_config:
+                extra["highlighter"] = self._highlighter_config
+            extra["hook_dir"] = self._hook_dir
+            extra["run_id"] = run_id
+            extra["run_id_file"] = os.path.join(self._hook_dir, "RUN_ID.txt")
         if save_to_disk:
             extra["save_to_disk"] = True
             extra["run_id"] = run_id
@@ -135,6 +145,8 @@ class HookLLM:
         if sampling_params is None:
             sampling_params = SamplingParams(**kwargs)
 
+        highlighter_mode = kwargs.pop("highlighter_mode", None)
+
         if isinstance(sampling_params, list):
             # list[SamplingParams] allows different hook params within requests
             if len(sampling_params) != len(prompts):
@@ -148,7 +160,14 @@ class HookLLM:
 
         if hook and self.worker_name:
             if run_id is None:
-                run_id = str(uuid.uuid4())
+                if (
+                    self.worker_name == "token_highlighter"
+                    and highlighter_mode == "mitigate"
+                    and getattr(self, "_last_run_id", None)
+                ):
+                    run_id = self._last_run_id
+                else:
+                    run_id = str(uuid.uuid4())
             defaults = self._build_extra_args(save_to_disk, run_id)
             new_sp_list = []
             for sp in sp_list:
@@ -157,6 +176,11 @@ class HookLLM:
 
                 for k, v in defaults.items():
                     extra.setdefault(k, v)  # insert-only-if-missing
+                if self.worker_name == "token_highlighter":
+                    if highlighter_mode:
+                        extra["highlighter_mode"] = highlighter_mode
+                    if highlighter_mode == "mitigate":
+                        extra.setdefault("scores_run_id", extra.get("run_id", run_id))
                 sp.extra_args = extra
                 new_sp_list.append(sp)
             sp_list = new_sp_list
@@ -225,9 +249,17 @@ class HookLLM:
         if probes is not None:
             return self.analyzer.analyze(analyzer_spec=analyzer_spec, probes=probes)
 
+        spec = dict(analyzer_spec or {})
+        if self._highlighter_config:
+            hl = self._highlighter_config
+            spec.setdefault("mode", hl.get("mode"))
+            spec.setdefault("alpha", hl.get("alpha"))
+            spec.setdefault("threshold_k", hl.get("threshold_k"))
+            spec.setdefault("soft_beta", hl.get("beta"))
+
         # Disk path: resolve run_id from args or _last_run_id fallback.
         effective_run_id = run_id or getattr(self, "_last_run_id", None)
-        return dispatch_disk_analyze(self.analyzer, analyzer_spec,
+        return dispatch_disk_analyze(self.analyzer, spec,
                                      run_id=effective_run_id, run_ids=run_ids)
 
     def close(self):

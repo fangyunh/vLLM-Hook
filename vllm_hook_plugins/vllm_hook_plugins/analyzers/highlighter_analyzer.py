@@ -3,14 +3,12 @@ import glob
 from typing import Any, Callable, Dict, Optional
 
 import torch
-from transformers import AutoModelForCausalLM
 
 from vllm_hook_plugins.utils.TokenHighlighter.grad_influence import compute_grad_influences
 from vllm_hook_plugins.utils.TokenHighlighter.utils import (
     build_highlighter_record,
     flag_driver_tokens,
     load_highlighter_artifact,
-    locate_last_attention,
 )
 
 
@@ -33,33 +31,10 @@ class HighlighterAnalyzer:
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
         self.hook_dir = hook_dir
         self.layer_to_heads = layer_to_heads
-        self._model = None
-        self._last_attn = None
-
-    def _load_model(self, model_path: str | None) -> torch.nn.Module:
-        """Legacy fallback when activations lack ``weight_bundle`` (old traces)."""
-        if self._model is not None:
-            return self._model
-        path = model_path or os.environ.get("VLLM_HIGHLIGHTER_MODEL")
-        if not path:
-            raise RuntimeError(
-                "HighlighterAnalyzer needs weight_bundle in activations, or "
-                "analyzer_spec['model_path'] / VLLM_HIGHLIGHTER_MODEL for legacy traces."
-            )
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._model = AutoModelForCausalLM.from_pretrained(
-            path,
-            trust_remote_code=True,
-            local_files_only=os.path.isdir(path),
-            torch_dtype=torch.float16,
-        ).to(device)
-        self._model.eval()
-        self._last_attn = locate_last_attention(self._model)
-        return self._model
 
     def analyze(self, analyzer_spec: Optional[Dict] = None, run_id: str | None = None) -> Optional[Dict]:
         cfg = analyzer_spec or {}
-        run_id_file = cfg.get("run_id_file") or os.environ.get("VLLM_RUN_ID")
+        run_id_file = cfg.get("run_id_file")
         if not run_id_file and self.hook_dir:
             run_id_file = os.path.join(self.hook_dir, "RUN_ID.txt")
         if not run_id_file:
@@ -81,21 +56,13 @@ class HighlighterAnalyzer:
 
         loss_grad_fn: Callable[..., torch.Tensor] | None = cfg.get("loss_grad_fn")
         weight_bundle = act_trace.get("weight_bundle")
-        device_str = cfg.get("device")
-        if device_str:
-            device = torch.device(device_str)
-        elif weight_bundle is not None:
-            device = torch.device("cpu")
-        else:
-            device = None
-
-        model = None
-        last_attn = None
         if weight_bundle is None:
-            model = self._load_model(cfg.get("model_path"))
-            last_attn = self._last_attn
-            if device is None:
-                device = next(model.parameters()).device
+            raise RuntimeError(
+                "HighlighterAnalyzer requires weight_bundle in highlighter_activations.pt "
+                "(re-run capture with a current worker)."
+            )
+        device_str = cfg.get("device")
+        device = torch.device(device_str) if device_str else torch.device("cpu")
 
         top_k = int(cfg.get("top_k", 5))
         sequences_out: list[dict] = []
@@ -104,13 +71,10 @@ class HighlighterAnalyzer:
             prompt_ids = seq["token_ids"]
             plen = seq.get("prompt_len", len(prompt_ids))
             target_ids = seq.get("target_ids") or []
-            if weight_bundle is not None:
-                capture = {k: v for k, v in seq["capture"].items()}
-            else:
-                capture = {k: v.to(model.device) for k, v in seq["capture"].items()}
+            capture = {k: v for k, v in seq["capture"].items()}
             # Modern bundles omit the large unembedding W_U and instead ship a tiny
-            # precomputed loss gradient g (dL/dh^N at generation positions). Feed it back
-            # through loss_grad_fn so scoring needs no W_U.
+            # precomputed loss gradient g (dL/dh^N at generation positions) to save space/time.
+            # Feed it back through loss_grad_fn to approximate affirmation loss gradient.
             seq_loss_grad_fn = loss_grad_fn
             g_loss = capture.pop("g_loss", None)
             if g_loss is not None and seq_loss_grad_fn is None:
@@ -122,8 +86,8 @@ class HighlighterAnalyzer:
             scores = compute_grad_influences(
                 capture,
                 plen,
-                last_attn,
-                model,
+                None,
+                None,
                 weights=weight_bundle,
                 loss_grad_fn=seq_loss_grad_fn,
                 target_ids=target_ids if seq_loss_grad_fn is None else None,
@@ -134,11 +98,10 @@ class HighlighterAnalyzer:
                     prompt_ids,
                     scores,
                     tokenizer=None,
-                    soft_beta=float(cfg.get("soft_beta", os.environ.get("VLLM_HIGHLIGHTER_BETA", "0.1"))),
-                    threshold_k=float(
-                        cfg.get("threshold_k", os.environ.get("VLLM_HIGHLIGHTER_THRESHOLD_K", "2.0"))
-                    ),
+                    soft_beta=float(cfg.get("soft_beta", 0.1)),
+                    threshold_k=float(cfg.get("threshold_k", 2.0)),
                     mode=cfg.get("mode"),
+                    alpha=cfg.get("alpha"),
                 )
             )
 

@@ -208,60 +208,6 @@ def get_attn_query_weight(last_attn: torch.nn.Module) -> torch.Tensor:
     return cast(torch.Tensor, attn.q_proj.weight)
 
 
-def resolve_grad_model_source(model_id: str, model_runner: Any, hook_dir: str | None) -> str:
-    """Resolve a local HF weight snapshot for the autograd scorer.
-
-    Checks ``model_id`` as a path, then vLLM ``download_dir`` and hook-adjacent cache.
-    """
-
-    def _snapshot(download_dir: str) -> str | None:
-        root = os.path.join(
-            os.path.abspath(download_dir), f"models--{model_id.replace('/', '--')}", "snapshots"
-        )
-        if not os.path.isdir(root):
-            return None
-        entries = sorted(os.listdir(root))
-        return os.path.join(root, entries[-1]) if entries else None
-
-    def _has_weights(path: str) -> bool:
-        if not os.path.isdir(path):
-            return False
-        return bool(
-            set(os.listdir(path))
-            & {"model.safetensors", "pytorch_model.bin", "model.safetensors.index.json"}
-        )
-
-    if os.path.isdir(model_id):
-        if _has_weights(model_id):
-            return model_id
-        snap = _snapshot(model_id)
-        if snap and _has_weights(snap):
-            return snap
-
-    dirs: list[str] = []
-    vllm_config = getattr(model_runner, "vllm_config", None)
-    load_cfg = getattr(vllm_config, "load_config", None) if vllm_config else None
-    if load_cfg is not None and getattr(load_cfg, "download_dir", None):
-        dirs.append(load_cfg.download_dir)
-    if hook_dir:
-        dirs.append(os.path.join(os.path.dirname(os.path.abspath(hook_dir)), "cache"))
-
-    seen: set[str] = set()
-    for d in dirs:
-        d = os.path.abspath(d)
-        if d in seen:
-            continue
-        seen.add(d)
-        snap = _snapshot(d)
-        if snap and _has_weights(snap):
-            return snap
-
-    raise RuntimeError(
-        f"Could not resolve a local weight snapshot for '{model_id}'. "
-        "Download the model into your vLLM cache or set VLLM_HIGHLIGHTER_MODEL."
-    )
-
-
 # ---------------------------------------------------------------------------
 # Driver selection / soft removal
 # ---------------------------------------------------------------------------
@@ -276,17 +222,16 @@ def flag_driver_tokens(
 ) -> list[int]:
     """Return prompt token indices selected as drivers (mean+std or top-α).
 
-    ``mean_std`` (default): score > mean + k·std. ``top_percentage``: top α fraction.
-    ``mode`` / ``alpha`` fall back to ``VLLM_HIGHLIGHTER_MODE`` / ``VLLM_HIGHLIGHTER_ALPHA``.
+    ``mean_std``: score > mean + k·std. ``top_percentage`` (default): top α fraction.
     Used for mitigate embedding scaling and trace metadata.
     """
     if not scores:
         return []
-    mode = mode or os.environ.get("VLLM_HIGHLIGHTER_MODE", "mean_std")
+    mode = mode or "top_percentage"
     s = torch.tensor(scores, dtype=torch.float32)
     if mode == "top_percentage":
         if alpha is None:
-            alpha = float(os.environ.get("VLLM_HIGHLIGHTER_ALPHA", "0.25"))
+            alpha = 0.25
         k = max(1, int(len(scores) * alpha))
         return sorted(torch.argsort(s, descending=True)[:k].tolist())
     threshold = s.mean() + threshold_k * s.std(unbiased=False)
@@ -499,17 +444,21 @@ def build_highlighter_record(
     soft_beta: float,
     threshold_k: float,
     mode: str | None = None,
+    alpha: float | None = None,
 ) -> dict:
     """Build one sequence entry for ``highlighter.pt`` (analyzer output artifact)."""
-    mode = mode or os.environ.get("VLLM_HIGHLIGHTER_MODE", "mean_std")
+    mode = mode or "top_percentage"
+    applied_alpha = alpha if alpha is not None else 0.25
     record = {
         "token_ids": list(prompt_ids),
         "token_scores": score_list,
-        "soft_indices": flag_driver_tokens(score_list, threshold_k=threshold_k, mode=mode),
+        "soft_indices": flag_driver_tokens(
+            score_list, threshold_k=threshold_k, mode=mode, alpha=applied_alpha
+        ),
         "soft_beta": soft_beta,
         "applied_mode": mode,
         "applied_threshold_k": threshold_k,
-        "applied_alpha": float(os.environ.get("VLLM_HIGHLIGHTER_ALPHA", "0.25")),
+        "applied_alpha": applied_alpha,
     }
     if tokenizer is not None:
         record["tokens"] = [
@@ -1276,7 +1225,7 @@ def _register_qkv_hooks(
     if require_post_rope:
         raise RuntimeError(
             "forward_attr: could not locate inner attention core (.attn) for post-RoPE "
-            "Q/K/V capture. Set VLLM_HIGHLIGHTER_ALLOW_PREROPE_FALLBACK=1 to allow "
+            "Q/K/V capture. Set highlighter.allow_prerope_fallback=true in config to allow "
             "legacy pre-RoPE projection hooks (approximation may degrade)."
         )
 
@@ -1320,6 +1269,7 @@ def register_forward_attr_hooks(
     model_runner: Any | None = None,
     meta: dict[str, Any] | None = None,
     require_attn_metadata: bool = False,
+    allow_prerope_fallback: bool = False,
 ) -> list[torch.utils.hooks.RemovableHandle]:
     """Install last-layer Q/K/V + ``h_L`` hooks for forward attribution.
 
@@ -1339,8 +1289,6 @@ def register_forward_attr_hooks(
         if model_runner is not None and meta is not None and enabled():
             record_batch_meta(model_runner, meta)
 
-    # Allow pre-RoPE fallback for models without inner attention core
-    allow_prerope = os.environ.get("VLLM_HIGHLIGHTER_ALLOW_PREROPE_FALLBACK", "0") == "1"
     # Register Q/K/V hooks for last-layer attention module in vLLM and HF-format serving
     # models, and collect QKV activations immediately after projection
     # and immediately before the attention module to determine whether RoPE was applied.
@@ -1349,7 +1297,7 @@ def register_forward_attr_hooks(
         dest,
         enabled=enabled,
         on_qkv=on_qkv,
-        require_post_rope=not allow_prerope,
+        require_post_rope=not allow_prerope_fallback,
         require_attn_metadata=require_attn_metadata,
     )
 

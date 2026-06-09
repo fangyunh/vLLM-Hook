@@ -277,8 +277,7 @@ def affirmation_loss_grad(
     """g_j = dL/dh_j for teacher-forced affirmation CE (L = -log P(y|x)).
 
     With ``model`` or ``final_norm``, applies the backbone's final norm before ``lm_head``
-    (Qwen/LLaMA). Without either, uses ``h_L`` slices directly (legacy: treats captured block
-    output as LM input).
+    (Qwen/LLaMA). Without either, uses ``h_L`` slices directly.
     """
     n_gen_toks = len(target_ids)
     # Apply final norm to hidden states (at generation positions) before LM head if provided

@@ -134,13 +134,11 @@ async def _patched_generate(
     wants_hs = extra.get("output_hidden_states") is not None
     wants_qk = extra.get("output_qk") is not None
     wants_steer = isinstance(extra.get("steer"), dict)
-    needs_hooks = wants_hs or wants_qk or wants_steer
-    # Token Highlighter writes its own artifacts inside the wrapped execute_model;
-    # it needs install_hooks but not the probe-style flush/get below.
-    needs_highlighter = bool(extra.get("highlighter_mode"))
+    wants_highlighter = bool(extra.get("highlighter_mode"))
+    needs_hooks = wants_hs or wants_qk or wants_steer or wants_highlighter
     save_to_disk = bool(extra.get("save_to_disk"))
 
-    if (needs_hooks or needs_highlighter) and not getattr(self, "_vllm_hook_installed", False):
+    if needs_hooks and not getattr(self, "_vllm_hook_installed", False):
         await self.collective_rpc("install_hooks")
         setattr(self, "_vllm_hook_installed", True)
 
@@ -149,7 +147,7 @@ async def _patched_generate(
         async for output in _original_generate(
             self, prompt, sampling_params, request_id, **kwargs
         ):
-            if output.finished and needs_hooks and not wants_steer:
+            if output.finished and needs_hooks and not wants_steer and not wants_highlighter:
                 if save_to_disk:
                     run_id = extra.get("run_id") or request_id
                     hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
@@ -168,7 +166,7 @@ async def _patched_generate(
                         output.probes = probes
             yield output
     finally:
-        if needs_hooks and not wants_steer and not save_to_disk:
+        if needs_hooks and not wants_steer and not wants_highlighter and not save_to_disk:
             await self.collective_rpc("clear_captured_states", args=(request_id,))
 
 
@@ -195,17 +193,11 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
         (sp.extra_args or {}).get("output_hidden_states") is not None
         or (sp.extra_args or {}).get("output_qk") is not None
         or bool((sp.extra_args or {}).get("steer"))
+        or bool((sp.extra_args or {}).get("highlighter_mode"))
         for sp in params_list
     )
-    # Token Highlighter requests are gated by ``highlighter_mode`` and write their
-    # own artifacts inside the wrapped ``execute_model``; they still need
-    # ``install_hooks`` to install that wrapper, but must NOT go through the
-    # probe-style flush_disk/get_captured_states dispatch below.
-    needs_highlighter = any(
-        bool((sp.extra_args or {}).get("highlighter_mode")) for sp in params_list
-    )
 
-    if (needs_hooks or needs_highlighter) and not getattr(self, "_vllm_hook_installed", False):
+    if needs_hooks and not getattr(self, "_vllm_hook_installed", False):
         self.collective_rpc("install_hooks")
         self._vllm_hook_installed = True
 
