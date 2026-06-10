@@ -111,4 +111,47 @@ the fallback. All new code is isolated under `vllm_hook_plugins/vllm_hook_plugin
 
 ---
 
+## 5. Enable Hybrid mode
+
+Hybrid mode is **off by default** with no env var set, `_hook_plugin.py` forces
+`enforce_eager=True` and you get the v0.2.0 eager path. The switch is the env var
+**`VLLM_HOOK_ALLOW_CUDAGRAPH`**. When it is set,
+the plugin stops forcing eager and lets vLLM's default (`enforce_eager=False`,
+graphs on) stand — and arms the `load_model` install path.
+
+```python
+# _hook_plugin.py::_patched_create_engine_config
+graph_mode = os.environ.get("VLLM_HOOK_ALLOW_CUDAGRAPH") == "1"
+if graph_mode:
+    set_graph_mode(True)          # arm Hybrid mode; leave enforce_eager as-is
+else:
+    self.enforce_eager = True     # legacy v0.2.0: force eager
+```
+
+### Examples
+
+```bash
+# Serve (OpenAI-compatible): worker via the short VLLM_HOOK_WORKER name + arm graph mode.
+# enforce_eager defaults to False here, so just set the env vars.
+VLLM_HOOK_ALLOW_CUDAGRAPH=1 VLLM_HOOK_WORKER=qk             vllm serve Qwen/Qwen2-1.5B-Instruct
+VLLM_HOOK_ALLOW_CUDAGRAPH=1 VLLM_HOOK_WORKER=hidden_states  vllm serve Qwen/Qwen2-1.5B-Instruct
+```
+
+```python
+# Offline (HookLLM): arm the env var AND pass enforce_eager=False (HookLLM defaults it
+# to True). worker_name is the registry name (probe_hook_qk / probe_hidden_states).
+import os
+os.environ["VLLM_HOOK_ALLOW_CUDAGRAPH"] = "1"
+from vllm_hook_plugins.hook_llm import HookLLM
+llm = HookLLM(model="Qwen/Qwen2-1.5B-Instruct", worker_name="probe_hook_qk",
+              analyzer_name="attn_tracker", config_file=...,
+              enforce_eager=False)   # REQUIRED — HookLLM's default is True
+```
+
+To confirm it took, the boot log prints
+`[vllm-hook] added ['vllm_hook::qk_probe', 'vllm_hook::hs_probe'] to compilation_config.splitting_ops`
+alongside `enforce_eager = False` and `cudagraph_mode = PIECEWISE`.
+
+---
+
 
