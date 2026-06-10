@@ -1,0 +1,244 @@
+[run_hs_parity_decode] config=model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json max_tokens=16 hooks_on=both
+[run_hs_parity_decode] === 1/3 graph capture (prefill+decode) ===
+[hs-parity:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False config=model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-10 12:13:48 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] added ['vllm_hook::qk_probe', 'vllm_hook::hs_probe'] to compilation_config.splitting_ops (18 total)
+(EngineCore pid=1116911) [graph/install_hs] splitting_ops has hs_probe=True (n=18)
+(EngineCore pid=1116911) [graph/install_hs] op-mode HS capture wired: 28 layer(s); should_capture=True; hidden_size=1536; hooks_on=prefill
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #1 layer=1 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #2 layer=2 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #3 layer=3 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #4 layer=4 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #5 layer=5 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #6 layer=6 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #7 layer=7 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #8 layer=8 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #9 layer=9 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #10 layer=10 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #11 layer=11 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #12 layer=12 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #13 layer=13 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #14 layer=14 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #15 layer=15 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #16 layer=16 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #17 layer=17 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #18 layer=18 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #19 layer=19 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #20 layer=20 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #21 layer=21 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #22 layer=22 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #23 layer=23 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #24 layer=24 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #25 layer=25 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #26 layer=26 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #27 layer=27 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #28 layer=28 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #29 layer=1 capturing=False h=(512, 1536) has_resid=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe impl REAL fire #30 layer=2 capturing=False h=(512, 1536) has_resid=1
+[hs-parity:graph] sampling max_tokens=16 hooks_on=both
+(EngineCore pid=1116911) WARNING 06-10 12:15:27 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1116911) WARNING 06-10 12:15:28 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1116911) [graph/dbg] _capture_body_hs layer=1 h=(8, 1536) bs=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe CAPTURED req=0-82ff5b layer=1 mode=all_tokens hs=(5, 1536) bucket=rpc
+(EngineCore pid=1116911) [graph/dbg] _capture_body_hs layer=2 h=(8, 1536) bs=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe CAPTURED req=0-82ff5b layer=2 mode=all_tokens hs=(5, 1536) bucket=rpc
+(EngineCore pid=1116911) [graph/dbg] _capture_body_hs layer=3 h=(8, 1536) bs=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe CAPTURED req=0-82ff5b layer=3 mode=all_tokens hs=(5, 1536) bucket=rpc
+(EngineCore pid=1116911) [graph/dbg] _capture_body_hs layer=4 h=(8, 1536) bs=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe CAPTURED req=0-82ff5b layer=4 mode=all_tokens hs=(5, 1536) bucket=rpc
+(EngineCore pid=1116911) [graph/dbg] _capture_body_hs layer=5 h=(8, 1536) bs=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe CAPTURED req=0-82ff5b layer=5 mode=all_tokens hs=(5, 1536) bucket=rpc
+(EngineCore pid=1116911) [graph/dbg] _capture_body_hs layer=6 h=(8, 1536) bs=1
+(EngineCore pid=1116911) [graph/dbg] hs_probe CAPTURED req=0-82ff5b layer=6 mode=all_tokens hs=(5, 1536) bucket=rpc
+(EngineCore pid=1116911) [graph/dbg] hs_probe CAPTURED req=0-82ff5b layer=7 mode=all_tokens hs=(5, 1536) bucket=rpc
+(EngineCore pid=1116911) [graph/dbg] hs_probe CAPTURED req=0-82ff5b layer=8 mode=all_tokens hs=(5, 1536) bucket=rpc
+(EngineCore pid=1116911) WARNING 06-10 12:15:29 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+[hs-parity:graph] case=clean captured 28 layers
+[hs-parity:graph] case=other captured 28 layers
+[hs-parity:graph] wrote /dev/shm/vllm_hook_yunhuafang/hs_parity_decode_1800649/graph.pkl
+[run_hs_parity_decode] === 2/3 eager capture (prefill+decode) ===
+[hs-parity:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True config=model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-10 12:16:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-10 12:16:10 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-10 12:16:10 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1117918) WARNING 06-10 12:17:13 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1117918) WARNING 06-10 12:17:13 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[hs-parity:eager] sampling max_tokens=16 hooks_on=both
+(EngineCore pid=1117918) Installed 28 hidden-state hooks on layers: ['model.layers.0', 'model.layers.1', 'model.layers.2', 'model.layers.3', 'model.layers.4', 'model.layers.5', 'model.layers.6', 'model.layers.7', 'model.layers.8', 'model.layers.9', 'model.layers.10', 'model.layers.11', 'model.layers.12', 'model.layers.13', 'model.layers.14', 'model.layers.15', 'model.layers.16', 'model.layers.17', 'model.layers.18', 'model.layers.19', 'model.layers.20', 'model.layers.21', 'model.layers.22', 'model.layers.23', 'model.layers.24', 'model.layers.25', 'model.layers.26', 'model.layers.27']
+(EngineCore pid=1117918) WARNING 06-10 12:17:13 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1117918) WARNING 06-10 12:17:13 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1117918) WARNING 06-10 12:17:13 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+[hs-parity:eager] case=clean captured 28 layers
+[hs-parity:eager] case=other captured 28 layers
+[hs-parity:eager] wrote /dev/shm/vllm_hook_yunhuafang/hs_parity_decode_1800649/eager.pkl
+[run_hs_parity_decode] === 3/3 compare ===
+[hs-parity] case=clean layer=model.layers.0: match=True max|Δ|=2.909e-05 mean|Δ|=9.522e-08 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.1: match=True max|Δ|=6.962e-05 mean|Δ|=7.013e-07 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.10: match=True max|Δ|=2.781e-03 mean|Δ|=3.329e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.11: match=True max|Δ|=2.705e-03 mean|Δ|=3.765e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.12: match=True max|Δ|=3.735e-03 mean|Δ|=3.742e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.13: match=True max|Δ|=4.484e-03 mean|Δ|=4.294e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.14: match=True max|Δ|=3.210e-03 mean|Δ|=4.378e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.15: match=True max|Δ|=3.023e-03 mean|Δ|=4.584e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.16: match=True max|Δ|=2.403e-03 mean|Δ|=4.716e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.17: match=True max|Δ|=2.527e-03 mean|Δ|=5.059e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.18: match=True max|Δ|=3.252e-03 mean|Δ|=5.632e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.19: match=True max|Δ|=4.839e-03 mean|Δ|=6.345e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.2: match=True max|Δ|=2.053e-04 mean|Δ|=3.093e-06 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.20: match=True max|Δ|=3.616e-03 mean|Δ|=7.219e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.21: match=True max|Δ|=6.617e-03 mean|Δ|=8.116e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.22: match=True max|Δ|=7.339e-03 mean|Δ|=9.615e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.23: match=True max|Δ|=8.873e-03 mean|Δ|=1.161e-04 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.24: match=True max|Δ|=1.160e-02 mean|Δ|=1.411e-04 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.25: match=True max|Δ|=1.360e-02 mean|Δ|=1.666e-04 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.26: match=True max|Δ|=1.275e-02 mean|Δ|=1.979e-04 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.27: match=True max|Δ|=3.313e-02 mean|Δ|=2.358e-04 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.3: match=True max|Δ|=4.559e-04 mean|Δ|=5.583e-06 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.4: match=True max|Δ|=7.994e-04 mean|Δ|=1.155e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.5: match=True max|Δ|=8.113e-04 mean|Δ|=1.949e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.6: match=True max|Δ|=1.090e-03 mean|Δ|=2.095e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.7: match=True max|Δ|=1.820e-03 mean|Δ|=2.629e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.8: match=True max|Δ|=1.912e-03 mean|Δ|=2.988e-05 shape=(16, 5, 1536)
+[hs-parity] case=clean layer=model.layers.9: match=True max|Δ|=2.537e-03 mean|Δ|=3.104e-05 shape=(16, 5, 1536)
+[hs-parity] case=other layer=model.layers.0: match=True max|Δ|=1.383e-05 mean|Δ|=3.787e-08 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.1: match=True max|Δ|=2.213e-04 mean|Δ|=5.873e-07 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.10: match=True max|Δ|=2.363e-03 mean|Δ|=2.086e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.11: match=True max|Δ|=2.609e-03 mean|Δ|=2.282e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.12: match=True max|Δ|=2.086e-03 mean|Δ|=2.393e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.13: match=True max|Δ|=2.254e-03 mean|Δ|=2.630e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.14: match=True max|Δ|=2.924e-03 mean|Δ|=2.729e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.15: match=True max|Δ|=3.577e-03 mean|Δ|=2.835e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.16: match=True max|Δ|=2.836e-03 mean|Δ|=3.003e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.17: match=True max|Δ|=3.845e-03 mean|Δ|=3.100e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.18: match=True max|Δ|=4.749e-03 mean|Δ|=3.309e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.19: match=True max|Δ|=4.299e-03 mean|Δ|=3.654e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.2: match=True max|Δ|=1.860e-04 mean|Δ|=1.401e-06 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.20: match=True max|Δ|=5.222e-03 mean|Δ|=4.032e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.21: match=True max|Δ|=7.008e-03 mean|Δ|=4.663e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.22: match=True max|Δ|=8.146e-03 mean|Δ|=5.143e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.23: match=True max|Δ|=8.064e-03 mean|Δ|=5.734e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.24: match=True max|Δ|=8.015e-03 mean|Δ|=6.649e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.25: match=True max|Δ|=7.896e-03 mean|Δ|=7.461e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.26: match=True max|Δ|=7.820e-03 mean|Δ|=8.864e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.27: match=True max|Δ|=1.941e-02 mean|Δ|=1.037e-04 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.3: match=True max|Δ|=5.512e-04 mean|Δ|=2.741e-06 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.4: match=True max|Δ|=5.341e-04 mean|Δ|=6.347e-06 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.5: match=True max|Δ|=8.802e-04 mean|Δ|=9.614e-06 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.6: match=True max|Δ|=1.020e-03 mean|Δ|=1.316e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.7: match=True max|Δ|=1.802e-03 mean|Δ|=1.592e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.8: match=True max|Δ|=2.627e-03 mean|Δ|=1.926e-05 shape=(16, 8, 1536)
+[hs-parity] case=other layer=model.layers.9: match=True max|Δ|=2.378e-03 mean|Δ|=1.915e-05 shape=(16, 8, 1536)
+============================================================
+[hs-parity] 56/56 tensors within rtol=0.01 atol=0.01
+[hs-parity] VERDICT: PASS — graph HS capture matches eager.
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@cccxc569>
+Subject: Job 1800649: <vllm_hook_hs_parity_decode> in cluster <CCCFP15Cluster> Done
+
+Job <vllm_hook_hs_parity_decode> was submitted from host <ccc-login2> by user <yunhuafang> in cluster <CCCFP15Cluster> at Wed Jun 10 12:13:43 2026
+Job was executed on host(s) <4*cccxc569>, in queue <normal>, as user <yunhuafang> in cluster <CCCFP15Cluster> at Wed Jun 10 12:13:09 2026
+</u/yunhuafang> was used as the home directory.
+</u/yunhuafang/vLLM-Hook> was used as the working directory.
+Started at Wed Jun 10 12:13:09 2026
+Terminated at Wed Jun 10 12:17:38 2026
+Results reported at Wed Jun 10 12:17:38 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_hs_parity_decode.sh — graph-vs-eager HIDDEN-STATE parity covering PREFILL
+# **and DECODE**. HS analogue of run_qk_parity_decode.sh: generates multiple
+# tokens with hooks_on=both so hs_probe must fire on every decode step. hs_parity
+# compare() already requires exact full-shape equality, so a graph capture that
+# dropped decode tokens FAILS as a SHAPE MISMATCH.
+#
+# Submit:  bsub < tests/cuda_graph/tests/hs_graph/run_hs_parity_decode.sh
+# Result:  grep 'hs-parity\] VERDICT' tests/cuda_graph/logs/hs_parity_decode.*.out
+#
+#BSUB -J vllm_hook_hs_parity_decode
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/hs_parity_decode.%J.out
+#BSUB -e tests/cuda_graph/logs/hs_parity_decode.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_HOOK_USE_SAFETENSORS=1
+export VLLM_HOOK_ASYNC_SAVE=1
+export VLLM_DISABLE_COMPILE_CACHE=1
+export VLLM_HOOK_CUDAGRAPH_MODE=PIECEWISE
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+# All-tokens, all-layers config so each step's full residual vector is captured.
+export VLLM_HOOK_CONFIG_FILE="model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json"
+# Decode-stage knobs: multiple tokens + fire the hook during decode too.
+export VLLM_HOOK_PARITY_MAX_TOKENS="${VLLM_HOOK_PARITY_MAX_TOKENS:-16}"
+export VLLM_HOOK_PARITY_HOOKS_ON="${VLLM_HOOK_PARITY_HOOKS_ON:-both}"
+
+WORK="/dev/shm/vllm_hook_${USER}/hs_parity_decode_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+GRAPH_PKL="$WORK/graph.pkl"
+EAGER_PKL="$WORK/eager.pkl"
+
+PY=tests/cuda_graph/tests/hs_graph/hs_parity.py
+
+echo "[run_hs_parity_decode] config=$VLLM_HOOK_CONFIG_FILE max_tokens=$VLLM_HOOK_PARITY_MAX_TOKENS hooks_on=$VLLM_HOOK_PARITY_HOOKS_ON"
+echo "[run_hs_parity_decode] === 1/3 graph capture (prefill+decode) ==="
+python -u "$PY" capture --mode graph --out "$GRAPH_PKL"
+
+echo "[run_hs_parity_decode] === 2/3 eager capture (prefill+decode) ==="
+python -u "$PY" capture --mode eager --out "$EAGER_PKL"
+
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   2591.29 sec.
+    Max Memory :                                 2 GB
+    Average Memory :                             1.05 GB
+    Total Requested Memory :                     32.00 GB
+    Delta Memory :                               30.00 GB
+    Max Swap :                                   -
+    Max Processes :                              6
+    Max Threads :                                693
+    Run time :                                   269 sec.
+    Turnaround time :                            235 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/hs_parity_decode.1800649.err> for stderr output of this job.
+

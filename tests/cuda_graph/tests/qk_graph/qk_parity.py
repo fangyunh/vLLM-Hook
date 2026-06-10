@@ -45,6 +45,17 @@ _DTYPE = {
     "Qwen/Qwen2-1.5B-Instruct": torch.float,
 }.get(_MODEL, torch.float16)
 
+# Decode-stage parity knobs (default = legacy prefill-only behaviour, unchanged):
+#   VLLM_HOOK_PARITY_MAX_TOKENS > 1  -> generate that many tokens so the capture
+#       hook MUST fire during decode, not just prefill.
+#   VLLM_HOOK_PARITY_HOOKS_ON=both   -> request decode+prefill capture (the worker
+#       gates on extra_args["hooks_on"]; the default "prefill" skips decode steps).
+# When MAX_TOKENS > 1 the compare step uses STRICT full-shape equality, so a graph
+# capture that silently drops decode tokens FAILS loudly instead of being trimmed
+# to the overlapping tail by _align().
+_MAX_TOKENS = int(os.environ.get("VLLM_HOOK_PARITY_MAX_TOKENS", "1"))
+_HOOKS_ON = os.environ.get("VLLM_HOOK_PARITY_HOOKS_ON", "").strip()
+
 _CASES = [
     {"name": "clean",
      "instruction": "Analyze and output the sentence attitude:",
@@ -137,10 +148,18 @@ def capture(mode, out_path, scenario="fresh"):
         **extra,
     )
 
-    # Greedy, single token: the prefill captures the prompt's post-RoPE q/k, which
-    # is what both paths must agree on. Deterministic so the two engines see the
-    # same inputs.
-    sp = SamplingParams(temperature=0.0, max_tokens=1)
+    # Greedy: the prefill captures the prompt's post-RoPE q/k, which both paths
+    # must agree on. With _MAX_TOKENS > 1 + hooks_on=both the hook must ALSO fire
+    # on every decode step, so the captured q/k spans prefill + decode tokens and
+    # the parity check covers the decode stage. Deterministic (temp=0) so the two
+    # engines see identical inputs and emit identical token sequences.
+    sp = SamplingParams(
+        temperature=0.0,
+        max_tokens=_MAX_TOKENS,
+        extra_args=({"hooks_on": _HOOKS_ON} if _HOOKS_ON else None),
+    )
+    print(f"[parity:{mode}] sampling max_tokens={_MAX_TOKENS} "
+          f"hooks_on={_HOOKS_ON or 'default(prefill)'}", flush=True)
 
     result = {}
     if scenario == "prefix":
@@ -232,13 +251,26 @@ def compare(graph_path, eager_path, rtol, atol):
                 gv, ev = gl[layer].get(key), el[layer].get(key)
                 if gv is None or ev is None:
                     continue
-                ga, ea = _align(gv, ev)
                 total += 1
-                if ga is None or ea is None or ga.shape != ea.shape:
-                    print(f"[parity] case={case} layer={layer} {key}: SHAPE "
-                          f"MISMATCH graph={tuple(gv.shape)} eager={tuple(ev.shape)}")
-                    overall_ok = False
-                    continue
+                if _MAX_TOKENS > 1:
+                    # Decode parity: require IDENTICAL full shape (no tail-trim).
+                    # A graph capture that missed decode-step tokens has fewer
+                    # rows than eager -> caught here as a hard failure.
+                    if gv.shape != ev.shape:
+                        print(f"[parity] case={case} layer={layer} {key}: "
+                              f"LENGTH/SHAPE MISMATCH graph={tuple(gv.shape)} "
+                              f"eager={tuple(ev.shape)} "
+                              f"(decode tokens missing under graph?)")
+                        overall_ok = False
+                        continue
+                    ga, ea = gv, ev
+                else:
+                    ga, ea = _align(gv, ev)
+                    if ga is None or ea is None or ga.shape != ea.shape:
+                        print(f"[parity] case={case} layer={layer} {key}: SHAPE "
+                              f"MISMATCH graph={tuple(gv.shape)} eager={tuple(ev.shape)}")
+                        overall_ok = False
+                        continue
                 ok = torch.allclose(ga, ea, rtol=rtol, atol=atol)
                 md = (ga - ea).abs().max().item() if ga.numel() else 0.0
                 mean = (ga - ea).abs().mean().item() if ga.numel() else 0.0

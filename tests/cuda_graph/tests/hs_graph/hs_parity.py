@@ -23,6 +23,16 @@ import torch
 _MODEL = os.environ.get("VLLM_HOOK_DEMO_MODEL", "Qwen/Qwen2-1.5B-Instruct")
 _DTYPE = torch.float if "Qwen2-1.5B" in _MODEL else torch.float16
 
+# Decode-stage parity knobs (default = legacy prefill-only behaviour, unchanged):
+#   VLLM_HOOK_PARITY_MAX_TOKENS > 1  -> generate that many tokens so hs_probe must
+#       fire on every decode step, not just prefill.
+#   VLLM_HOOK_PARITY_HOOKS_ON=both   -> request decode+prefill capture (worker
+#       gates on extra_args["hooks_on"]; default "prefill" skips decode steps).
+# compare() already requires exact full-shape equality, so a graph capture that
+# drops decode tokens FAILS as a SHAPE MISMATCH — no extra strict-mode needed.
+_MAX_TOKENS = int(os.environ.get("VLLM_HOOK_PARITY_MAX_TOKENS", "1"))
+_HOOKS_ON = os.environ.get("VLLM_HOOK_PARITY_HOOKS_ON", "").strip()
+
 _CASES = [
     {"name": "clean", "text": "The capital of France is"},
     {"name": "other", "text": "Quantum computing leverages superposition to"},
@@ -95,7 +105,13 @@ def capture(mode, out_path):
         **extra,
     )
 
-    sp = SamplingParams(temperature=0.0, max_tokens=1)
+    sp = SamplingParams(
+        temperature=0.0,
+        max_tokens=_MAX_TOKENS,
+        extra_args=({"hooks_on": _HOOKS_ON} if _HOOKS_ON else None),
+    )
+    print(f"[hs-parity:{mode}] sampling max_tokens={_MAX_TOKENS} "
+          f"hooks_on={_HOOKS_ON or 'default(prefill)'}", flush=True)
     result = {}
     for case in _CASES:
         out = llm.generate(case["text"], sp, save_to_disk=False)
