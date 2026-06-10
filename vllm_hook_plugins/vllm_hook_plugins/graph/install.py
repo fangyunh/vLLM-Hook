@@ -1,47 +1,4 @@
-"""Integration core for CUDA-graph QK capture.
-
-Wires the static-buffer hosts (``graph/hosts.py``), routing registry
-(``graph/registry.py``), and capture op (``graph/ops.py``) into a live vLLM
-worker so post-RoPE Q/K is captured inside the CUDA graph and replays every
-step — the thing the eager ``register_forward_hook`` path
-(``workers/probe_hookqk_worker.py``) cannot do under ``torch.compile``, because
-Dynamo traces each ``nn.Module.forward`` once and replaces it, bypassing instance
-hooks (see ``graph/ops.py`` for the full lesson).
-
-Three pieces, all installed from a single monkey-patch of ``Worker.load_model``:
-
-- ``install_qk_hosts(worker)`` — on the capture rank, builds one ``QKHookHost``
-  per matched attention module (buffers allocated here, at load_model timing,
-  BEFORE vLLM's cudagraph pool, so each buffer's data_ptr stays fixed across
-  replays), registers them in a ``HostRegistry`` stored on the worker, assigns
-  the row-views, and class-wraps each ``type(attn_module).forward`` so it calls
-  ``host.capture(q, k)`` on the post-RoPE q,k (``args[0]``, ``args[1]``) before
-  the original forward. The wrap is class-level only: instance hooks are bypassed
-  by Dynamo. Idempotent per class.
-- ``install_execute_model_wrapper(model_runner, worker)`` — wraps
-  ``model_runner.execute_model`` (an instance method, never compiled), so all
-  per-request Python logic lives there, legal because the wrapper sits outside
-  the traced region. Per step: pre-forward it builds the per-(layer, token)
-  destination row on the registry's pinned mirrors from scheduler_output +
-  input_batch.req_ids + model_runner.requests, honoring the output_qk layer
-  filter, hooks_on prefill/decode gating, and hookq_mode, then one ``upload()``
-  fans it out to the device slabs (unrequested tokens/layers stay at row 0, the
-  discard sentinel, an exact no-op via the op's active-gate); it calls the
-  original execute_model; post-forward it slices the scattered q_buf/k_buf rows
-  for each active request/layer, runs prefix-K reconstruction (relocated
-  ``_read_cached_keys``), and appends into the SAME worker buckets the eager path
-  uses (``_captured_states`` / ``_disk_states``) — the reuse contract, so
-  ``get_captured_states`` / ``flush_disk`` / the analyzer work unchanged.
-- ``patch_worker_load_model()`` — monkey-patches
-  ``vllm.v1.worker.gpu_worker.Worker.load_model`` so the two installers run after
-  the original load_model, guarded by the graph-mode flag and by the worker
-  actually being the QK worker.
-
-The graph path is only armed when the plugin sets the process flag (see
-``set_graph_mode`` / ``graph_mode_enabled``), which ``_hook_plugin`` only does
-when VLLM_HOOK_ALLOW_CUDAGRAPH == "1". Otherwise the legacy v0.2.0 eager path
-runs untouched.
-"""
+"""CUDA-graph QK capture — install, per-step routing, and egress."""
 from __future__ import annotations
 
 import math
@@ -71,106 +28,75 @@ from vllm_hook_plugins.workers.probe_hookqk_worker import (
 # ---------------------------------------------------------------------------
 # Process-wide graph-mode flag
 # ---------------------------------------------------------------------------
-# The plugin's _patched_create_engine_config sets this to True only when
-# VLLM_HOOK_ALLOW_CUDAGRAPH == "1"; otherwise it stays False and the load_model
-# patch is a no-op, preserving the v0.2.0 eager path exactly. We mirror it in an
-# env var too: create_engine_config runs in the driver process while load_model
-# runs in the (possibly forked/spawned) worker process, and the module global
-# would NOT survive a spawn, whereas the env var (set before workers launch) does.
+# Mirrored in an env var because create_engine_config runs in the driver but
+# load_model runs in the (possibly spawned) worker, where the module global would
+# not survive — the env var, set before workers launch, does.
 _GRAPH_MODE_ENV = "VLLM_HOOK_GRAPH_MODE"
 _graph_mode_enabled = False
 
 
 def set_graph_mode(enabled: bool) -> None:
-    """Arm or disarm the CUDA-graph QK capture path for this process tree.
-
-    Called by the plugin's ``_patched_create_engine_config``. Sets both the
-    module global (fast path, same process) and an env var, so spawned/forked
-    worker processes inherit the decision — load_model runs there, not in the
-    driver.
-    """
+    """Arm/disarm the graph path. Sets both the module global and the env var so
+    spawned workers (where load_model runs) inherit the decision."""
     global _graph_mode_enabled
     _graph_mode_enabled = bool(enabled)
     os.environ[_GRAPH_MODE_ENV] = "1" if enabled else "0"
 
 
 def graph_mode_enabled() -> bool:
-    """Return True when the CUDA-graph QK path should install at load_model.
-
-    Checks the module global first (same-process driver), then the inherited env
-    var (worker subprocess). Either one being set arms the path.
-    """
+    """True if the graph path should install: module global (driver) or inherited
+    env var (worker subprocess)."""
     return _graph_mode_enabled or os.environ.get(_GRAPH_MODE_ENV) == "1"
 
 
 # ---------------------------------------------------------------------------
 # Class-level Attention.forward wrap (survives the Dynamo instance-hook bypass)
 # ---------------------------------------------------------------------------
-# Per-class originals so the wrap is idempotent and reversible. The wrap reads a
-# host off the instance (set in install_qk_hosts) so one wrapped class serves
-# every layer; if an instance has no host (a non-attn instance of the same class,
-# or the non-capture rank) it falls straight through to the original forward.
+# Per-class originals → wrap is idempotent and reversible. One wrapped class
+# serves every layer; an instance with no host/layer attr falls straight through.
 _WRAPPED_ATTN_CLASSES: Dict[type, Any] = {}
-# Attribute name under which each attn module instance carries its QKHookHost.
-_HOST_ATTR = "_vllm_hook_qk_host"
-# Attribute name under which each attn module instance carries a back-reference
-# to the worker's HostRegistry, so the wrap can stash the live forward context
-# for post-forward egress (prefix-K) reads without re-deriving it.
-_REG_ATTR = "_vllm_hook_qk_registry"
-# Hybrid mode: a plain int layer-index attribute on each attn instance plus a
-# single module-global keep-alive sink tensor. This shape (closed-over global
-# tensor plus op call) is what survives compilation, and it avoids reading a
-# per-instance host object inside the traced forward, which Dynamo might
-# graph-break on.
+_HOST_ATTR = "_vllm_hook_qk_host"          # per-instance QKHookHost (buffer mode)
+_REG_ATTR = "_vllm_hook_qk_registry"       # per-instance HostRegistry back-ref
+# Op mode: a plain int layer-index attr + a module-global keep-alive sink. This
+# shape (closed-over global + op call) survives compilation and avoids reading a
+# per-instance object inside the traced forward (a graph-break risk).
 _LAYER_ATTR = "_vllm_hook_qk_layer"
-_GLOBAL_SINK = None  # int64 (1,) keep-alive for qk_probe; set in install (hybrid mode)
+_GLOBAL_SINK = None  # int64 (1,) keep-alive for qk_probe; set in install
 
-# Staging gate for the in-forward forward-context stash used by prefix-K
-# reconstruction. Default off so the first GPU run validates core QK capture
-# without the novel, possibly graph-breaking get_forward_context() call inside
-# the traced Attention.forward. Enable with VLLM_HOOK_QK_PREFIXK_STASH=1 once
-# core capture is confirmed. See _wrap_attn_class for the full rationale.
+# Prefix-K forward-context stash inside the traced forward. Off by default: the
+# get_forward_context() call there is novel and may graph-break, and it's only
+# needed for prefix-K (num_cached > 0). Enable once core capture is confirmed.
 _PREFIXK_STASH = os.environ.get("VLLM_HOOK_QK_PREFIXK_STASH") == "1"
 
-# Capture mechanism:
-#   "op"     (default) — impl-runs-at-runtime: the qk_probe op runs the eager
-#                        capture body mid-forward (works for prefill under
-#                        PIECEWISE, where the forward is NOT cudagraph-replayed).
-#                        No pre-forward routing, which sidesteps the input_batch
-#                        staleness that made the buffer path capture nothing.
-#   "buffer"           — the static-buffer + device-routing path, needed for
-#                        decode-under-cudagraph; kept for that later milestone.
+# Capture mechanism. "op" (default): qk_probe op runs the eager capture body
+# mid-forward — works for prefill under PIECEWISE (forward not replayed) and
+# sidesteps the input_batch staleness that made the buffer path capture nothing.
+# "buffer": static-buffer + device-routing, for the decode-under-cudagraph milestone.
 _CAPTURE_MODE = os.environ.get("VLLM_HOOK_QK_CAPTURE", "op")
 
-# Set at install for the impl-runs capture body (hybrid mode).
+# Set at install for the op-mode capture body.
 _ACTIVE_WORKER = None
 _LAYER_TO_NAME: Dict[int, str] = {}
-_capture_dbg = {"n": 0}  # one-shot capture confirmation counter (hybrid mode)
+_capture_dbg = {"n": 0}  # one-shot capture confirmation counter
 _ctx_dumped = [False]    # one-shot forward-context exploration dump
 
-# Diagnostic logging for the execute_model wrapper hot path. Default ON during
-# bring-up so the first GPU runs are observable; set VLLM_HOOK_QK_DEBUG=0 to mute.
-# Prints are compact, flushed, and capped to the first few calls.
+# Diagnostic logging for the hot path. ON during bring-up; VLLM_HOOK_QK_DEBUG=0
+# to mute. Compact, flushed, capped to the first few calls.
 _DEBUG = os.environ.get("VLLM_HOOK_QK_DEBUG", "1") == "1"
 _DBG_MAX_CALLS = int(os.environ.get("VLLM_HOOK_QK_DEBUG_MAX", "8"))
 _dbg_call_n = [0]
 
-# Prefix-K reconstruction controls (hybrid mode). _NO_PREFIXK skips it entirely
-# (bisection / fallback when prefix caching is off); _PREFIXK_SYNC forces a CUDA
-# sync right after the gather so an async device-side assert surfaces at our line
-# instead of a later cudagraph replay (debug localizer only).
+# _NO_PREFIXK skips prefix-K (bisection / no prefix caching); _PREFIXK_SYNC forces
+# a CUDA sync after the gather so an async device assert surfaces at our line
+# instead of a later replay (debug localizer only).
 _NO_PREFIXK = os.environ.get("VLLM_HOOK_QK_NO_PREFIXK") == "1"
 _PREFIXK_SYNC = os.environ.get("VLLM_HOOK_QK_PREFIXK_SYNC") == "1"
 
 
 def _dbg_prefixk(meta_kv, module_name, req_idx, num_cached, total_len, layer_idx):
-    """Log the inputs to the prefix-K gather so an OOB block index is diagnosable.
-
-    Prints the ``block_table`` shape/dtype, the computed ``block_ids`` slice and
-    its min/max, and the ``key_cache`` block geometry — the values that determine
-    whether ``key_cache[block_ids]`` can go out of bounds, which is the
-    device-assert suspect.
-    """
+    """Log the prefix-K gather inputs (block_table, computed block_ids min/max,
+    key_cache geometry) so an OOB block index — the device-assert suspect — is
+    diagnosable."""
     try:
         bt = getattr(meta_kv, "block_table", None)
         bt_shape = tuple(bt.shape) if isinstance(bt, torch.Tensor) else type(bt).__name__
@@ -200,12 +126,9 @@ def _dbg(msg: str) -> None:
 
 
 def _cpu_1d(x):
-    """Coerce a ``query_start_loc``/``seq_lens`` carrier to a 1-D CPU tensor.
-
-    vLLM v1 stores these as CpuGpuBuffer-like objects (``.cpu``/``.gpu``/``.np``
-    tensor attributes) on the model_runner, or sometimes as plain tensors. We
-    prefer the CPU mirror to avoid a device sync. Returns None if nothing usable.
-    """
+    """Coerce a query_start_loc/seq_lens carrier (CpuGpuBuffer-like or plain
+    tensor) to a 1-D CPU tensor, preferring the CPU mirror to avoid a device sync.
+    None if nothing usable."""
     if x is None:
         return None
     if isinstance(x, torch.Tensor):
@@ -225,18 +148,13 @@ def _cpu_1d(x):
 
 
 def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> None:
-    """Run the eager qkv_hook capture body inside the qk_probe op (hybrid mode).
+    """Run the eager qkv_hook capture body inside the qk_probe op (op mode).
 
-    Invoked by ``graph/ops._qk_probe_impl`` at runtime, mid-forward, where
-    ``get_forward_context()`` and ``model_runner.input_batch`` are current — the
-    same point the eager ``register_forward_hook`` ran. Performs the identical
-    per-request slicing, hooks_on gating, hookq_mode, and prefix-K as the eager
-    ``ProbeHookQKWorker.qkv_hook`` and writes into the SAME worker buckets, so
-    ``get_captured_states`` / ``flush_disk`` / the analyzer consume it unchanged.
-
-    ``q_in``/``k_in`` are the post-RoPE q/k passed to ``Attention.forward`` (whole
-    batch, (num_tokens, dim)); ``layer_idx`` is the host's layer_num. No static
-    buffers or pre-forward routing are involved — capture is the op's side effect.
+    Invoked by ``graph/ops._qk_probe_impl`` mid-forward, where get_forward_context()
+    and input_batch are current — the same point the eager hook ran. Does the
+    identical per-request slicing / hooks_on / hookq_mode / prefix-K as the eager
+    ``qkv_hook`` and writes the SAME worker buckets. q_in/k_in are post-RoPE q/k
+    for the whole batch (num_tokens, dim); layer_idx is the host's layer_num.
     """
     worker = _ACTIVE_WORKER
     if worker is None:
@@ -246,19 +164,15 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
         return
     mr = worker.model_runner
 
-    # Diagnostics gated on real (small) batches — warmup uses a huge shape
-    # (e.g. 16384) with no metadata and would flood and consume the log budget.
+    # Gate diagnostics on real (small) batches — warmup uses a huge shape with no
+    # metadata and would flood the log budget.
     _small = q_in.shape[0] <= 2048
 
     ctx = get_forward_context()
     metadata = getattr(ctx, "attn_metadata", None)
 
-    # Resolve query_start_loc / seq_lens. The eager path read these from
-    # ctx.attn_metadata, but under torch.compile/PIECEWISE that field is None.
-    # Fall back to the model_runner's persistent buffers (mr.query_start_loc /
-    # mr.seq_lens), which ARE current mid-forward (built in _prepare_inputs before
-    # the model runs). These are CpuGpuBuffer-like, so _cpu_1d unwraps them to CPU
-    # tensors.
+    # Under PIECEWISE ctx.attn_metadata is None, so fall back to the model_runner's
+    # persistent buffers, which ARE current mid-forward (built in _prepare_inputs).
     query_start_loc = None
     seq_lens = None
     if metadata is not None:
@@ -273,9 +187,8 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
     except Exception:
         return
 
-    # Silently skip dummy/profiling forwards (no real requests). vLLM runs many
-    # of these at warmup/capture (e.g. q=512, reqs=0) and they would flood the
-    # log and exhaust the debug budget before the real prompt forward appears.
+    # Skip dummy/profiling forwards (no real requests) — vLLM runs many at
+    # warmup/capture and they would exhaust the debug budget.
     if not req_ids:
         return
 
@@ -286,9 +199,8 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
                   f" reqs={len(req_ids)} EXIT: query_start_loc is None", flush=True)
         return
 
-    # bs = actual request count. mr.query_start_loc may be a padded persistent
-    # buffer (length max_reqs+1), so do NOT use len(query_start_loc)-1; the valid
-    # cumulative offsets are query_start_loc[:bs+1], indexed by request.
+    # bs = request count. query_start_loc may be a padded persistent buffer, so use
+    # len(req_ids), not len(query_start_loc)-1; valid offsets are qsl[:bs+1].
     bs = len(req_ids)
     if _DEBUG and _small and _capture_dbg["n"] < 10:
         _capture_dbg["n"] += 1
@@ -323,9 +235,8 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
             if layer_idx not in output_spec:
                 continue
 
-        # hooks_on prefill/decode gating; output_token_ids==[] detects prefill.
-        # Correct here, unlike the pre-forward path: we are mid-forward, so the
-        # request state reflects the CURRENT step.
+        # hooks_on gating; output_token_ids==[] detects prefill. Correct here
+        # (mid-forward) — the request state reflects the CURRENT step.
         hooks_on = extra.get("hooks_on", default_hooks_on)
         if hooks_on != "both":
             is_prefill = len(req_state.output_token_ids) == 0
@@ -344,11 +255,8 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
             q_tok = q_in[end - 1, :].detach().clone()
         k_tok = k_in[start:end, :].detach().clone()
 
-        # Prefix-K reconstruction (identical to eager qkv_hook). Needs the attn
-        # metadata's block_table. Note: fresh prompts have num_cached==0, so this
-        # path is FIRST exercised under hybrid-mode/compile only when prefix
-        # caching trims the prompt. Gated by VLLM_HOOK_QK_NO_PREFIXK=1 (bisection:
-        # skip it to confirm whether a num_cached>0 crash originates here).
+        # Prefix-K reconstruction (identical to eager qkv_hook); only fires when
+        # prefix caching trimmed the prompt (num_cached > 0).
         if seq_lens is not None and metadata is not None and not _NO_PREFIXK:
             try:
                 sv = seq_lens[i]
@@ -366,10 +274,8 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
                     with PROF.timed("kv.prefix_recon"):
                         prefix_k = _read_cached_keys(
                             module_name, meta_kv, i, num_cached, total_len)
-                    # Debug localizer: force any async device-side assert from the
-                    # gather above to surface HERE. The op runs as an eager seam,
-                    # not inside a graph replay, so a sync is legal. Off unless
-                    # VLLM_HOOK_QK_PREFIXK_SYNC=1, so production pays nothing.
+                    # Debug localizer: surface an async device assert from the
+                    # gather HERE. Legal — the op is an eager seam, not a replay.
                     if _PREFIXK_SYNC:
                         torch.cuda.synchronize()
                     if prefix_k is not None:
@@ -406,27 +312,13 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
 
 
 def _wrap_attn_class(cls: type) -> None:
-    """Class-wrap ``cls.forward`` to call ``host.capture(q, k)`` pre-forward.
+    """Class-wrap ``cls.forward``, idempotent per class. Op mode emits one qk_probe
+    op; buffer mode calls ``host.capture(q,k)``. args[0]=post-RoPE q, args[1]=k
+    (the eager hook's input[0]/input[1]); capture runs before the original forward.
 
-    Idempotent per class. The capture fires on the post-RoPE q,k passed to the
-    vLLM Attention module — ``args[0]`` is q, ``args[1]`` is k (the same inputs
-    the eager ``qkv_hook`` reads as ``input[0]``/``input[1]``). Capture happens
-    BEFORE the original forward so it is recorded as a graph node upstream of the
-    attention compute.
-
-    The wrap ALSO snapshots the live forward context onto the registry on its
-    first fire of each step (a pure-Python side effect on install-time-constant
-    objects; under graph replay it does not run, which is fine because egress only
-    needs the snapshot during a non-captured / eager-recorded step and the stash
-    persists for the matching egress drain). This is the ONLY place the forward
-    context is provably live — the eager qkv_hook relied on exactly this — so it
-    is where the kv_cache handles and attn_metadata for prefix-K are read.
-
-    The snapshot uses getattr-on-self for the host/registry. A closure-captured
-    counter is known to land in the compiled graph; the getattr-on-self pattern
-    here must be confirmed on GPU to (a) still record the ``capture_qk`` node in
-    the compiled graph and (b) not graph-break on the host attribute. The branch
-    is on install-time constants only, so it should be Dynamo-constant-folded.
+    Buffer mode also snapshots the live forward context onto the registry on its
+    first fire each step — the only place it's provably live — so egress can read
+    kv_cache/attn_metadata for prefix-K post-forward.
     """
     if cls in _WRAPPED_ATTN_CLASSES:
         return
@@ -435,10 +327,9 @@ def _wrap_attn_class(cls: type) -> None:
 
     def make_wrapped(orig_fwd):
         def wrapped(self, *args, **kwargs):
-            # Hybrid mode (default): lean path — read a plain int layer attribute
-            # (install-time constant; -1 means don't capture) and emit ONE
-            # qk_probe op against the closed-over global sink. No per-instance
-            # host object is touched inside the traced forward.
+            # Op mode (default): read the int layer attr (-1 = don't capture) and
+            # emit one qk_probe op against the global sink. No per-instance object
+            # touched inside the traced forward.
             if _CAPTURE_MODE == "op":
                 layer_idx = getattr(self, _LAYER_ATTR, -1)
                 if layer_idx >= 0 and len(args) >= 2:
@@ -447,32 +338,16 @@ def _wrap_attn_class(cls: type) -> None:
                 return orig_fwd(self, *args, **kwargs)
 
             # ---- buffer mode (decode milestone): static-buffer scatter ----
+            # do_capture is an install-time constant, so this branch adds no
+            # data-dependent control flow to the traced region.
             host = getattr(self, _HOST_ATTR, None)
-            # do_capture is an install-time constant (True only on the capture
-            # rank). This branch is on a python-level constant, never on
-            # per-request graph data, so it does not introduce data-dependent
-            # control flow into the traced region. When a host is present we emit
-            # the single opaque capture_qk node; otherwise we fall straight
-            # through.
             if host is not None and host.do_capture:
-                # Stash the live forward context for post-forward egress (prefix-K
-                # reconstruction). Only the first attn layer of the step takes
-                # effect (the registry clears the stash each step); its metadata
-                # carries the batch-wide query_start_loc / block_table that
-                # prefix-K needs. Wrapped in a bare except because a missing or
-                # torn-down context must never break the forward — egress simply
-                # falls back to no prefix-K then.
-                #
-                # Staging gate (default off): calling get_forward_context() inside
-                # the traced Attention.forward is novel — vLLM normally reads the
-                # forward context inside the opaque attention op, not in traced
-                # Python — so it may provoke a Dynamo graph break under
-                # torch.compile. It is ONLY needed for prefix-K (num_cached > 0),
-                # which fresh-prompt capture never triggers, so the first GPU run
-                # validates the core capture path without this risk; set
-                # VLLM_HOOK_QK_PREFIXK_STASH=1 to enable prefix-K once core capture
-                # is confirmed. If enabling it breaks compile, the fix is to grab
-                # kv_cache refs at install time instead of stashing here.
+                # Stash the live forward context for post-forward prefix-K egress
+                # (only the first attn layer of the step takes effect; bare-except
+                # so a torn-down context never breaks the forward). Gated off:
+                # get_forward_context() in traced Python may graph-break, and it's
+                # only needed for prefix-K. If it breaks compile, grab kv_cache refs
+                # at install time instead.
                 if _PREFIXK_STASH:
                     reg = getattr(self, _REG_ATTR, None)
                     if reg is not None and reg.fwd_ctx is None:
@@ -483,9 +358,8 @@ def _wrap_attn_class(cls: type) -> None:
                             )
                         except Exception:  # noqa: BLE001
                             pass
-                # args[0] = post-RoPE q, args[1] = post-RoPE k. Positional in
-                # every vLLM Attention.forward signature; guard length
-                # defensively.
+                # args[0]=post-RoPE q, args[1]=k (positional in every Attention
+                # signature; guard length defensively).
                 if len(args) >= 2:
                     host.capture(args[0], args[1])
             return orig_fwd(self, *args, **kwargs)
@@ -496,13 +370,9 @@ def _wrap_attn_class(cls: type) -> None:
 
 
 def _resolve_max_num_batched_tokens(worker) -> int:
-    """Return ``max_num_batched_tokens`` for the buffer cap, version-robustly.
-
-    The scheduler config is reachable via the worker's ``vllm_config`` on every
-    vLLM v1 release; the model_runner may also expose ``scheduler_config``
-    directly on some versions. Probes both, preferring the model_runner attribute
-    when present. Raises if neither carrier has it.
-    """
+    """Return max_num_batched_tokens for the buffer cap, version-robustly: probe
+    model_runner.scheduler_config then worker.vllm_config.scheduler_config. Raises
+    if neither carrier has it."""
     for owner in (worker.model_runner, worker):
         sched = getattr(owner, "scheduler_config", None)
         if sched is not None:
@@ -527,19 +397,13 @@ def _resolve_max_num_batched_tokens(worker) -> int:
 
 
 def install_qk_hosts(worker) -> Optional[HostRegistry]:
-    """Build and register the per-layer QK hosts and class-wrap Attention.forward.
+    """Class-wrap Attention.forward (and, in buffer mode, build per-layer hosts).
 
-    Runs inside the worker process from the load_model patch, AFTER the model is
-    built but BEFORE warm-up/compile/capture, so the buffers are allocated before
-    the cudagraph pool and each one's data_ptr stays fixed across replays.
-
-    On a non-capture rank (TP rank != 0) we build NO registry and allocate NO
-    buffers; the class-wrap still installs (harmless — its per-instance host check
-    short-circuits because no host is attached), so the model's forward behaviour
-    is identical to the capture rank's, only without the scatter.
-
-    Returns the ``HostRegistry`` (also stored on ``worker._graph_registry``), or
-    None on the non-capture rank or when no attention modules match.
+    Runs at load_model, after the model is built but BEFORE compile/capture, so
+    buffers land before the cudagraph pool and their data_ptrs stay fixed across
+    replays. On a non-capture rank no buffers/hosts are built; the class-wrap still
+    installs (harmless — the per-instance check short-circuits). Returns the
+    HostRegistry (buffer mode) or None.
     """
     model = getattr(worker.model_runner, "model", None)
     if model is None:
@@ -549,41 +413,35 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
     # Register the capture op(s) once per process, BEFORE any wrap can fire.
     register_graph_ops()
 
-    # Hybrid mode: wire the impl-runs capture body + the worker it writes into.
+    # Op mode: wire the capture body + the worker it writes into.
     if _CAPTURE_MODE == "op":
         from vllm_hook_plugins.graph.ops import set_capture_fn
         global _ACTIVE_WORKER
         _ACTIVE_WORKER = worker
         set_capture_fn(_capture_body)
 
-    # Capture-rank gating (mirrors probe_hookqk_worker.install_hooks): only TP
-    # rank 0 captures — residual streams are replicated across TP ranks after
-    # all-reduce, so the data is identical.
+    # Only TP rank 0 captures — residual streams are replicated across ranks.
     tp_size = worker.parallel_config.tensor_parallel_size
     should_capture = tp_size <= 1 or worker.rank % tp_size == 0
 
-    # Model dims — pulled EXACTLY like probe_hookqk_worker.install_hooks so the
-    # buffer widths match the eager path and the analyzer config is identical.
+    # Model dims pulled EXACTLY like the eager worker so buffer widths and the
+    # analyzer config match.
     cfg = model.config
     text_cfg = getattr(cfg, "text_config", cfg)
     num_h = int(getattr(text_cfg, "num_attention_heads"))
     num_kv = int(getattr(text_cfg, "num_key_value_heads", num_h))
     hidden = int(getattr(text_cfg, "hidden_size"))
-    # _conf.head_dim MUST match the eager worker exactly (the analyzer reads
-    # _conf), so derive it the same way (hidden // num_h). For buffer sizing we
-    # additionally honour an explicit config.head_dim when present, because the
-    # real post-RoPE q width is num_h * (model's actual head_dim): if that differs
-    # from hidden//num_h, the eager-derived width would mis-size the buffers and
-    # index_copy_ would raise on a width mismatch. A first-capture assertion
-    # (q_dim == q.shape[1]) below verifies the chosen width on GPU.
+    # _conf.head_dim must match the eager worker (analyzer reads _conf): hidden//num_h.
+    # Buffer sizing honours an explicit config.head_dim when present, because the real
+    # post-RoPE q width is num_h * actual_head_dim; a mismatch would mis-size buffers.
     head_dim = hidden // num_h                       # for _conf (eager parity)
     buf_head_dim = int(getattr(text_cfg, "head_dim", None) or head_dim)  # for buffers
     attn_mult = float(getattr(text_cfg, "attention_multiplier", 1 / math.sqrt(head_dim)))
     q_dim = num_h * buf_head_dim
     k_dim = num_kv * buf_head_dim
 
-    # _conf is consumed by get_captured_states / flush_disk (payload["config"]),
-    # so the egress path MUST populate it identically to the eager worker.
+    # _conf feeds get_captured_states / flush_disk payload["config"] — populate it
+    # identically to the eager worker.
     worker._conf = dict(
         num_attention_heads=num_h,
         num_key_value_heads=num_kv,
@@ -602,16 +460,13 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
     if not hasattr(worker, "_disk_states") or worker._disk_states is None:
         worker._disk_states = {}
 
-    # Background I/O thread for async disk saves (no-op unless VLLM_HOOK_ASYNC_SAVE=1).
-    # _background_save_loop is defined on ProbeHookQKWorker, which the Worker
-    # mixes in via worker_extension_cls, so the bound method is present.
+    # Async disk-save thread (no-op unless VLLM_HOOK_ASYNC_SAVE=1). The bound
+    # method is mixed in via worker_extension_cls.
     if hasattr(worker, "_background_save_loop"):
         init_async_save_thread(worker, worker._background_save_loop, "vllm-hook-qk-io")
 
-    # CAP = max_num_batched_tokens (covers an all-prefill batch — every token in
-    # the largest possible batch can land in a distinct buffer row). The
-    # scheduler config lives on the worker's vllm_config across vLLM versions;
-    # probe a few known carriers so the lookup is version-robust.
+    # CAP = max_num_batched_tokens: every token in the largest possible all-prefill
+    # batch can land in a distinct buffer row.
     cap = _resolve_max_num_batched_tokens(worker)
 
     device = next(model.parameters()).device
@@ -625,11 +480,9 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
         return None
     num_layers = max(layer_num for _, _, layer_num in matched) + 1
 
-    # ---- hybrid mode (default): NO static buffers / registry. Tag each attn
-    # instance with its layer index, map layer->module name (for egress keys /
-    # prefix-K), create the global keep-alive sink, and class-wrap. Capture runs
-    # inside the qk_probe op mid-forward, which sidesteps the input_batch
-    # staleness that made the pre-forward buffer routing capture nothing. ----
+    # ---- op mode (default): no static buffers/registry. Tag each attn instance
+    # with its layer index, map layer->module name, create the sink, class-wrap.
+    # Capture runs inside the qk_probe op mid-forward. ----
     if _CAPTURE_MODE == "op":
         global _GLOBAL_SINK
         device_t = next(model.parameters()).device
@@ -643,12 +496,11 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
         for _, module, _ in matched:
             _wrap_attn_class(type(module))
         worker._graph_registry = None
-        # Ensure our op is a splitting op on the WORKER's resolved config too:
-        # this is the config the worker's compiler actually reads, and it runs at
-        # load_model (BEFORE compile/capture). The driver-side append
-        # (_hook_plugin) may be lost if vLLM re-resolves splitting_ops, so set it
-        # here as well. If absent, our op is absorbed into a replayed cudagraph
-        # segment and captures nothing — this is the load-bearing fix.
+        # The load-bearing fix: register qk_probe as a splitting op so the piecewise
+        # compiler keeps it as an eager seam between cudagraph segments. Without it
+        # the op is absorbed into a replayed segment and its Python impl is skipped
+        # → captures nothing. Set on the WORKER's resolved config (what its compiler
+        # reads) since the driver-side append may be lost on re-resolution.
         try:
             cc = worker.vllm_config.compilation_config
             sops = list(getattr(cc, "splitting_ops", None) or [])
@@ -675,10 +527,8 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
     buf_dtype = model.dtype if hasattr(model, "dtype") else next(model.parameters()).dtype
 
     # Build a host per matched module, attach to the instance, wrap its class.
-    # On a non-capture rank we allocate no buffers and attach no host: the class
-    # wrap still installs (so forward behaviour matches the capture rank) but its
-    # per-instance host check short-circuits, so the scatter never runs and no
-    # memory is wasted (under TP, only the capture rank materialises buffers).
+    # Non-capture rank: no buffers/host attached; the wrap still installs but its
+    # per-instance check short-circuits.
     n_hosts = 0
     for name, module, layer_num in matched:
         if should_capture:
@@ -692,27 +542,21 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
                 device=device,
                 do_capture=True,
             )
-            # Attach the host to the instance so the class-level wrap finds it via
-            # getattr(self, _HOST_ATTR). One wrapped class serves every layer.
+            # Host + registry back-ref on the instance, so the class-wrap finds them
+            # (host for capture, registry to stash the forward context for prefix-K).
             setattr(module, _HOST_ATTR, host)
-            # Back-ref to the registry so the wrap can stash the live forward
-            # context (for post-forward prefix-K) from inside the forward.
             setattr(module, _REG_ATTR, registry)
             registry.register_host(host)
-            # Hybrid mode: map layer_num -> module name so the capture body can
-            # key the egress buckets / prefix-K kv_cache lookup by module name.
+            # layer_num -> module name, for egress bucket / prefix-K keys.
             _LAYER_TO_NAME[layer_num] = name
             n_hosts += 1
         _wrap_attn_class(type(module))
 
     if registry is not None:
         registry.assign_views()
-        # Buffer memory accounting: cap scales with max_num_batched_tokens, and
-        # the buffers are allocated BEFORE the KV-cache profiling run, so for
-        # large models / large cap this can be multiple GB on the capture rank and
-        # perturb gpu_memory_utilization accounting. Log it so an OOM here is
-        # diagnosable. (Possible future tweak: cap at min(mnbt, max_model_len) for
-        # larger-model runs — not yet wired.)
+        # Buffers are allocated before KV-cache profiling and can be multiple GB
+        # (cap scales with max_num_batched_tokens), perturbing memory accounting —
+        # log the size so an OOM here is diagnosable.
         buf_bytes = sum(
             h.q_buf.numel() * h.q_buf.element_size()
             + h.k_buf.numel() * h.k_buf.element_size()
@@ -734,34 +578,18 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
 
 
 def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
-    """Fill the registry's pinned mirrors for the current batch.
+    """Fill the registry's pinned mirrors with a destination ROW per captured token
+    for the current batch (the scatter runs in-graph against these). Mirrors the
+    qkv_hook gating (output_qk filter, hooks_on, hookq_mode).
 
-    Mirrors the per-request gating in ``qkv_hook`` (output_qk layer filter,
-    hooks_on prefill/decode gating, hookq_mode) but writes a destination ROW per
-    captured token instead of capturing inline. The scatter then runs inside the
-    graph against these uploaded indices.
+    Must run pre-forward — the compiled graph only READS the indices at replay.
+    ``qsl_cpu`` is the host-side cumulative query_start_loc (len bs+1) from
+    pre-forward CPU state, so no per-step device sync. Returns one ``plan`` per
+    active request, which egress reuses so it doesn't re-derive the gating.
 
-    ``qsl_cpu`` is the cumulative query-start-loc as a host-side python list
-    (length bs+1); the caller derives it from pre-forward CPU state (see
-    ``_preforward_qsl``) so routing carries the CURRENT step's bounds without a
-    per-step device sync. Routing MUST run pre-forward because the compiled graph
-    only READS the uploaded indices at replay time.
-
-    Returns a list of ``plan`` dicts (one per active request) that egress reuses
-    so it does not recompute the gating — each holds the per-request slice bounds
-    and the bucket routing the egress drain needs.
-
-    Row assignment: a capture-requested token at flat position ``start`` for layer
-    L gets a UNIQUE row ``r = start + 1``, so ``q_buf[r]`` / ``k_buf[r]`` hold
-    exactly that token after the scatter. Row 0 is reserved as the discard
-    sentinel, hence the ``+ 1`` offset. The same row r is used for every requested
-    layer (each layer has its own buffers). Unrequested tokens stay at 0 (the
-    caller zeroes the mirrors via ``reset_pinned`` before calling this) — exact
-    no-ops.
-
-    The pinned mirror is filled with vectorised tensor slices (one assignment per
-    request, not per (token, layer) scalar), so per-step host cost is ~O(num
-    requests) tensor ops, not O(num_tokens * num_layers) python scalar writes.
+    Row r = flat_position + 1 (row 0 is the discard sentinel); the same r serves
+    every requested layer. Unrequested tokens stay at 0 (exact no-ops). Written as
+    vectorised slices, so host cost is O(num_requests), not O(tokens * layers).
     """
     try:
         req_ids = model_runner.input_batch.req_ids
@@ -789,9 +617,8 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
             dbg_rows.append(f"r{i}:no_output_qk")
             continue
 
-        # output_qk: True (all layers) | [layer_ids] | {layer: [heads]} — only
-        # the keys are used for layer filtering (heads are forwarded to the
-        # analyzer by the caller). None means no filter (all layers).
+        # output_qk: True (all) | [layer_ids] | {layer: [heads]} — only keys filter
+        # layers; None = all layers.
         output_spec = extra.get("output_qk")
         layer_filter: Optional[set] = None
         if isinstance(output_spec, dict):
@@ -799,8 +626,8 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         elif isinstance(output_spec, list):
             layer_filter = {int(x) for x in output_spec}
 
-        # hooks_on: "prefill" (default) | "decode" | "both". output_token_ids==[]
-        # detects the first (prefill) pass robustly under prefix caching.
+        # hooks_on: "prefill" (default) | "decode" | "both"; output_token_ids==[]
+        # detects prefill robustly under prefix caching.
         hooks_on = extra.get("hooks_on", getattr(model_runner, "_default_hooks_on", "prefill"))
         n_out = len(req_state.output_token_ids)
         n_computed = getattr(req_state, "num_computed_tokens", None)
@@ -825,10 +652,8 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         if end <= start:
             dbg_rows.append(f"r{i}:empty_range")
             continue
-        # Clamp the routed range to buffer capacity. Row = flat position + 1, so
-        # the highest routable position is cap-1 (row cap). Tokens beyond that
-        # cannot happen when cap == max_num_batched_tokens, but to stay safe they
-        # are simply not routed -> they land in the sentinel and are discarded.
+        # Clamp to buffer capacity (highest routable position is cap-1 → row cap);
+        # over-cap tokens stay in the sentinel and are discarded.
         end = min(end, cap)
         if end <= start:
             continue
@@ -841,17 +666,10 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         if not req_layers:
             continue
 
-        # Route EVERY new token of this request, for BOTH modes. The capture op
-        # uses one index per token to scatter q and k together, and even in
-        # last_token mode k_all must hold every new token's key (only q is reduced
-        # to the last token, done at egress) — matching the eager qkv_hook, which
-        # slices q but keeps the full k window.
-        #
-        # Vectorised write (was a per-(token, layer) python double loop): the
-        # destination row for flat position pos is pos + 1 for EVERY requested
-        # layer, so build the row vector once and assign the [start, end) column
-        # span for all requested layers in one indexed assignment. Cost is
-        # O(num_requests) tensor ops, independent of token count x layer count.
+        # Route EVERY new token, for BOTH modes: q and k scatter together, and even
+        # in last_token mode k_all keeps the full window (q is reduced at egress).
+        # Vectorised: assign the [start, end) column span for all requested layers
+        # in one indexed write (O(num_requests), not a per-token double loop).
         rows = torch.arange(start + 1, end + 1, dtype=torch.int64)
         layer_idx = torch.tensor(req_layers, dtype=torch.long)
         capture_index_pinned[layer_idx[:, None], start:end] = rows[None, :]
@@ -884,23 +702,16 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
 def _read_cached_keys_from_ctx(
     ctx, module_name, attn_metadata, req_idx: int, num_cached: int, total_len: int
 ):
-    """Read prefix keys using an explicitly-passed forward context.
-
-    Identical algorithm to ``probe_hookqk_worker._read_cached_keys``, but reads
-    the kv_cache from the supplied ``ctx`` instead of calling
-    ``get_forward_context()``. The eager path could call ``get_forward_context()``
-    because it ran mid-forward; the graph egress runs post-forward (after
-    ``set_forward_context`` has exited), so it must use the context the attention
-    wrap stashed during the forward. Reproduces the eager reader's output
-    byte-for-byte given the same ctx + attn_metadata + req_idx.
+    """Like ``_read_cached_keys`` but reads the kv_cache from the supplied ``ctx``
+    instead of get_forward_context() — graph egress runs post-forward, after
+    set_forward_context has exited, so it uses the context the wrap stashed.
     """
     try:
-        # kv_cache is bound to the vLLM Attention wrapper in the forward context,
-        # not to the PyTorch module: ctx.no_compile_layers[layer_name].kv_cache.
+        # kv_cache lives on the Attention wrapper in the forward context, not the
+        # PyTorch module.
         kv_cache = ctx.no_compile_layers[module_name].kv_cache
-        # Correct key cache via the shared layout-robust extractor. kv_cache[0]
-        # would gather a size-2 key/value axis and trigger an OOB device assert;
-        # see workers.probe_hookqk_worker.key_cache_from_layer_kv.
+        # Layout trap: the extractor takes kv_cache[:, 0]; kv_cache[0] would gather
+        # the size-2 key/value axis → OOB device assert.
         key_cache = key_cache_from_layer_kv(kv_cache)
 
         num_blocks = key_cache.shape[0]
@@ -923,28 +734,15 @@ def _read_cached_keys_from_ctx(
 
 
 def _egress(worker, registry: HostRegistry, plans: list) -> None:
-    """Read the scattered q_buf/k_buf rows back into the worker buckets.
+    """Drain the scattered q_buf/k_buf rows into the worker buckets in the exact
+    shape eager ``qkv_hook`` produces (the reuse contract), so egress/analyzers run
+    unchanged: bucket[req_id][module_name] = {"q":[...], "k_all":[...],
+    "layer_num": L, "hookq_mode": mode}.
 
-    Populates ``worker._captured_states`` / ``worker._disk_states`` with the exact
-    shape the eager ``qkv_hook`` produces, so ``get_captured_states`` /
-    ``flush_disk`` / ``_save_safetensors`` / the analyzer all work UNCHANGED:
-
-        bucket[req_id][module_name] = {"q":[...], "k_all":[...],
-                                       "layer_num": L, "hookq_mode": mode}
-
-    For each active (request, layer): in all_tokens mode q is the
-    (query_len, q_dim) slice of this request's scattered rows, and in last_token
-    mode q is the (q_dim,) final row. k_all is always the (query_len, k_dim) key
-    slice with cached prefix keys prepended (prefix-K reconstruction), matching
-    eager.
-
-    metadata / seq_lens / the kv-cache handle for prefix-K all come from the
-    forward context the attention wrap stashed on the registry during the forward
-    (``registry.fwd_ctx`` / ``registry.fwd_attn_metadata``). They are read here,
-    post-forward, because ``get_forward_context()`` is no longer valid once
-    execute_model has returned (``set_forward_context`` has exited). Falling back
-    to no prefix-K when the stash is absent matches the eager path's own
-    except-fallback.
+    Per (request, layer): q is the (query_len, q_dim) slice (all_tokens) or final
+    row (last_token); k_all is the key slice with prefix keys prepended. metadata /
+    seq_lens / kv-cache come from the wrap's stashed forward context (the live one
+    is gone post-forward); absent stash → no prefix-K, matching eager.
     """
     if not plans:
         return
@@ -952,15 +750,13 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
     ctx = registry.fwd_ctx
     metadata = registry.fwd_attn_metadata
 
-    # seq_lens for the prefix-K total length come from the stashed (current-step)
-    # metadata — same source the eager path read mid-forward.
+    # seq_lens (prefix-K total length) from the stashed current-step metadata.
     seq_lens = None
     if metadata is not None:
         _, seq_lens = get_query_metadata(metadata)
 
-    # Per-layer attn-metadata view (hybrid models key metadata by layer; the
-    # eager path passes the first dict entry to the prefix-K reader). Normalise to
-    # a single metadata object for block_table reads.
+    # Normalise per-layer metadata (hybrid models key by layer) to one object for
+    # block_table reads.
     meta_for_kv = metadata
     if isinstance(metadata, dict):
         try:
@@ -984,15 +780,10 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             req_mode = plan["hookq_mode"]
             req_idx = plan["req_idx"]
 
-            # Rows for this request's tokens are start+1 .. end (sentinel-offset).
-            # Slice once; clone so we own the data (the buffers are overwritten
-            # next step). .cpu() is deferred to retrieval/flush, matching eager.
-            #
-            # Note: q_buf[end] for last_token depends on row end (= (end-1)+1)
-            # having been scattered this step. _build_routing always routes the
-            # full [start, end) range for BOTH modes (see its docstring), so row
-            # end is populated. The clamp end = min(end, cap) in _build_routing
-            # also bounds the row at cap; guard the read defensively here too.
+            # Rows are start+1 .. end (sentinel-offset). Clone so we own the data
+            # (buffers are overwritten next step); .cpu() deferred to flush. The
+            # last_token row end is populated because routing always covers the full
+            # range; clamp to cap defensively.
             cap = host.cap
             if req_mode == "all_tokens":
                 q_tok = q_buf[start + 1:end + 1, :].detach().clone()
@@ -1001,12 +792,9 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                 q_tok = q_buf[last_row, :].detach().clone()
             k_tok = k_buf[start + 1:end + 1, :].detach().clone()
 
-            # Prefix-K reconstruction (relocated from qkv_hook). seq_lens[i] is
-            # the total length (cached + new); query_len is new tokens only. When
-            # num_cached > 0, read the missing prefix keys from the paged KV cache
-            # and prepend, so k_all is the full key history the analyzer expects.
-            # Reads the kv_cache via the stashed forward context (post-forward the
-            # live context is gone), so ctx must be present.
+            # Prefix-K: when num_cached > 0 (total seq_len minus new query_len),
+            # read the missing prefix keys from the paged KV cache and prepend.
+            # Needs the stashed ctx (live context gone post-forward).
             if seq_lens is not None and meta_for_kv is not None and ctx is not None:
                 try:
                     sv = seq_lens[req_idx]
@@ -1053,12 +841,9 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
 
 
 def _any_qk_requested(model_runner) -> bool:
-    """Return True if any request in the current batch set output_qk.
-
-    Cheap, host-side, no device sync — lets the wrapper short-circuit the entire
-    routing/upload/egress block (including the qsl D2H read) on the common case
-    where no request wants QK, so an unrelated capture-rank worker does not pay
-    the per-step cost for the whole serving lifetime.
+    """True if any request in the batch set output_qk. Cheap, host-side, no device
+    sync — lets the wrapper short-circuit the whole routing/egress block when no
+    request wants QK, so an unrelated capture-rank worker pays nothing per step.
     """
     try:
         req_ids = model_runner.input_batch.req_ids
@@ -1078,27 +863,14 @@ def _any_qk_requested(model_runner) -> bool:
 
 
 def _preforward_qsl(model_runner, scheduler_output) -> Optional[list]:
-    """Derive the cumulative query_start_loc as a host-side list, pre-forward.
+    """Build the cumulative query_start_loc as a host-side list, pre-forward.
 
-    Routing must run BEFORE the forward (the compiled graph only READS the
-    uploaded indices at replay), but in vLLM v1 the forward context / attn
-    metadata (the eager path's query_start_loc source) is only established inside
-    execute_model. So we instead build qsl from ``scheduler_output`` /
-    ``input_batch``, which the runner populates pre-forward — entirely on the
-    host, with no device sync.
-
-    qsl is the exclusive cumulative sum of per-request scheduled (new) token
-    counts, in ``input_batch.req_ids`` order: qsl[0]=0, qsl[i+1]=qsl[i]+n_i. This
-    matches the ``attn_metadata.query_start_loc`` the eager path used (the runner
-    builds that same cumsum from the same per-request counts).
-
-    Returns the (bs+1,) python list, or None when the counts are unavailable
-    (warmup / shape mismatch) so the caller skips routing this step.
-
-    ``scheduler_output.num_scheduled_tokens`` is a dict {req_id: int} on current
-    vLLM v1; confirm the attribute name/shape on the target version. The fallback
-    probes ``input_batch.num_scheduled_tokens`` if the scheduler-output form
-    differs.
+    Routing must run before the forward, but the forward context (the eager path's
+    qsl source) is only established inside execute_model — so build qsl from
+    scheduler_output / input_batch, which the runner populates pre-forward, no
+    device sync. qsl is the exclusive cumsum of per-request scheduled token counts
+    in req_ids order, matching attn_metadata.query_start_loc. Returns (bs+1,) or
+    None (warmup / counts unavailable) → caller skips routing.
     """
     try:
         req_ids = list(model_runner.input_batch.req_ids)
@@ -1138,19 +910,14 @@ def _preforward_qsl(model_runner, scheduler_output) -> Optional[list]:
 
 
 def install_execute_model_wrapper(model_runner, worker) -> None:
-    """Wrap ``model_runner.execute_model`` for routing + egress.
-
-    Idempotent: a second call is a no-op (guarded by a sentinel attribute). The
-    wrapper is an instance-method replacement on the model_runner, OUTSIDE the
-    compiled region, so it is the legal home for every per-request Python branch
-    (the compiled graph only READS the routing buffers we upload here).
+    """Wrap ``model_runner.execute_model`` for routing + egress. Idempotent. An
+    instance-method replacement, outside the compiled region — the legal home for
+    per-request Python (the graph only READS the buffers we upload here).
     """
     if getattr(model_runner, "_vllm_hook_qk_wrapped", False):
         return
 
-    # Hybrid mode captures inside the qk_probe op (mid-forward); the pre-forward
-    # routing + post-forward egress wrapper is only needed for the buffer
-    # (decode-under-cudagraph) path. Skip it so hybrid mode pays nothing per step.
+    # Op mode captures inside the op, so it needs no wrapper — skip it.
     if _CAPTURE_MODE == "op":
         print("[graph/install] capture mode=op — execute_model wrapper skipped "
               "(capture runs inside qk_probe)")
@@ -1158,8 +925,8 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
 
     model_runner._vllm_hook_qk_wrapped = True
 
-    # Surface the worker fallback mode + default phase onto the runner so the
-    # routing helper can read them without reaching back through the worker.
+    # Surface worker fallback mode + default phase onto the runner so the routing
+    # helper reads them without reaching through the worker.
     model_runner._worker_hookq_mode = getattr(worker, "hookq_mode", "all_tokens")
     model_runner._default_hooks_on = getattr(
         worker, "_default_hooks_on", "prefill"
@@ -1178,36 +945,30 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         if registry is None or not registry.should_capture:
             return orig_execute_model(scheduler_output, *args, **kwargs)
 
-        # Do NOT touch routing during vLLM's CUDA-graph capture pass: a host sync
-        # or pinned write while the stream is capturing is illegal and can corrupt
-        # the graph. The buffers are populated at replay time, not capture time, so
-        # skipping routing here is correct. Mirrors the eager hook's
-        # is_current_stream_capturing() bail.
+        # Don't route during vLLM's graph capture pass — a host sync / pinned write
+        # while capturing is illegal. Buffers are populated at replay, not capture,
+        # so skipping is correct. Mirrors the eager hook's is_current_stream_capturing bail.
         try:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 return orig_execute_model(scheduler_output, *args, **kwargs)
         except Exception:  # noqa: BLE001
             pass
 
-        # Cheap host-side gate: if no request wants QK, skip the whole routing /
-        # upload / egress block (and its costs) entirely. An unrelated capture
-        # worker then pays nothing per step.
+        # Cheap host-side gate: skip the whole routing/egress block when no request
+        # wants QK.
         any_qk = _any_qk_requested(model_runner)
         if not any_qk:
             _dbg(f"call#{_dbg_call_n[0]}: wrapper live, any_qk=False -> skip")
             return orig_execute_model(scheduler_output, *args, **kwargs)
 
         # ---- pre-forward: build routing on the pinned mirror + upload ----
-        # query_start_loc comes from pre-forward CPU state (scheduler_output /
-        # input_batch), NOT from get_forward_context(): in vLLM v1 the forward
-        # context is only established inside execute_model, so reading it here
-        # would see None/stale metadata. The attention wrap stashes the live
-        # context onto the registry during the forward for egress's prefix-K.
+        # qsl comes from pre-forward CPU state, not get_forward_context() (the
+        # context is only live inside execute_model). The wrap stashes the live
+        # context during the forward for egress's prefix-K.
         plans: list = []
         registry.begin_step()  # clear the stash so the wrap re-snapshots this step
-        # Refresh the mode/phase snapshot from the worker each step so a later
-        # mutation of worker.hookq_mode / _default_hooks_on cannot desync the
-        # routing helper (cheap getattrs; current code never mutates them).
+        # Refresh the mode/phase snapshot each step so a later worker mutation can't
+        # desync the routing helper.
         model_runner._worker_hookq_mode = getattr(worker, "hookq_mode", "all_tokens")
         model_runner._default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
         qsl_cpu = _preforward_qsl(model_runner, scheduler_output)
@@ -1221,21 +982,20 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         from vllm_hook_plugins.graph.ops import get_fire_count
         fire_before = get_fire_count()
 
-        # ---- forward (compiled graph replays; capture_qk scatters inline; the
-        # attn wrap stashes the live forward context on the registry) ----
+        # ---- forward (graph replays; capture_qk scatters inline; the wrap stashes
+        # the forward context) ----
         result = orig_execute_model(scheduler_output, *args, **kwargs)
 
         fire_after = get_fire_count()
 
-        # ---- post-forward: drain static buffers into the worker buckets. The
-        # stashed forward context supplies metadata/seq_lens/kv_cache for prefix-K
-        # (the live context is gone now). ----
+        # ---- post-forward: drain buffers into the worker buckets (the stashed
+        # context supplies prefix-K metadata; the live one is gone). ----
         if plans:
             with PROF.timed("graph.egress"):
                 _egress(worker, registry, plans)
 
-        # Print on every prefill/QK step (plans>0) and for the first few calls,
-        # so we always see the decisive prefill rows without flooding on decode.
+        # Print on every QK step (plans>0) and the first few calls, so the decisive
+        # prefill rows show without flooding on decode.
         if _DEBUG and (plans or _dbg_call_n[0] <= _DBG_MAX_CALLS):
             qsl_bs = (len(qsl_cpu) - 1) if qsl_cpu is not None else None
             n_disk = sum(len(v) for v in getattr(worker, "_disk_states", {}).values())
@@ -1261,18 +1021,11 @@ _LOAD_MODEL_PATCHED = False
 
 
 def patch_worker_load_model() -> None:
-    """Monkey-patch ``Worker.load_model`` to install the QK graph path.
-
-    Called once from the plugin's ``register()``. After the original
-    ``load_model`` builds the model (and BEFORE warm-up/compile/capture), the
-    patched method installs the QK hosts + execute_model wrapper, but ONLY when
-    graph mode is armed (``graph_mode_enabled()``, set by the plugin when
-    VLLM_HOOK_ALLOW_CUDAGRAPH == "1") AND this worker actually defines a
-    ``graph_install`` entry — a cheap callable guard so the steer worker, which
-    has no graph path, is never touched.
-
-    Idempotent: re-patching is a no-op. When graph mode is off, the patched
-    method is byte-for-byte the original behaviour, preserving v0.2.0 exactly.
+    """Monkey-patch ``Worker.load_model`` to install the graph path after the model
+    is built (before compile/capture). Idempotent. Runs the worker's own
+    ``graph_install`` only when graph mode is armed AND the worker defines one —
+    so the steer worker (no graph path) is untouched and graph-off is the original
+    behaviour byte-for-byte.
     """
     global _LOAD_MODEL_PATCHED
     if _LOAD_MODEL_PATCHED:
@@ -1285,15 +1038,12 @@ def patch_worker_load_model() -> None:
     def patched_load_model(self, *args, **kwargs):
         result = orig_load_model(self, *args, **kwargs)
 
-        # Gate 1: graph mode must be armed, else the legacy eager path is left
-        # untouched.
+        # Gate 1: graph mode armed, else leave the eager path untouched.
         if not graph_mode_enabled():
             return result
 
-        # Gate 2: dispatch by the worker's own graph-install entry. Each
-        # graph-capable worker defines graph_install (QK -> qk hosts, HS -> hs
-        # hosts); workers without it (e.g. steer) are left on the eager path, and
-        # each is routed to ITS own installer.
+        # Gate 2: dispatch by the worker's own graph_install (QK/HS define it; steer
+        # doesn't, so it stays eager).
         graph_install = getattr(self, "graph_install", None)
         if not callable(graph_install):
             return result
@@ -1302,7 +1052,7 @@ def patch_worker_load_model() -> None:
             graph_install()
         except Exception as e:  # noqa: BLE001
             # Never let an install failure take down model loading — fall back to
-            # the eager path's behaviour (no capture) rather than crashing.
+            # no capture rather than crashing.
             print(f"[graph/install] graph install FAILED ({e}); continuing "
                   f"without graph capture.")
             PROF.incr("graph.install.errors")
