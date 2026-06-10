@@ -67,6 +67,7 @@ from vllm_hook_plugins.workers._common import (
 )
 from vllm_hook_plugins.workers.probe_hookqk_worker import (
     _read_cached_keys,
+    key_cache_from_layer_kv,
     match_attn,
 )
 
@@ -156,6 +157,43 @@ _ctx_dumped = [False]    # one-shot forward-context exploration dump
 _DEBUG = os.environ.get("VLLM_HOOK_QK_DEBUG", "1") == "1"
 _DBG_MAX_CALLS = int(os.environ.get("VLLM_HOOK_QK_DEBUG_MAX", "8"))
 _dbg_call_n = [0]
+
+# Prefix-K reconstruction controls (op mode). _NO_PREFIXK skips it entirely
+# (bisection / fallback when prefix caching is off); _PREFIXK_SYNC forces a
+# CUDA sync right after the gather so an async device-side assert surfaces at our
+# line instead of a later cudagraph replay (debug localizer only).
+_NO_PREFIXK = os.environ.get("VLLM_HOOK_QK_NO_PREFIXK") == "1"
+_PREFIXK_SYNC = os.environ.get("VLLM_HOOK_QK_PREFIXK_SYNC") == "1"
+
+
+def _dbg_prefixk(meta_kv, module_name, req_idx, num_cached, total_len, layer_idx):
+    """Log the inputs to the prefix-K gather so an OOB block index is diagnosable.
+
+    Prints block_table shape/dtype, the computed block_ids slice and its
+    min/max, and the key_cache block geometry — the values that determine whether
+    ``key_cache[block_ids]`` can go out of bounds (the device-assert suspect).
+    """
+    try:
+        bt = getattr(meta_kv, "block_table", None)
+        bt_shape = tuple(bt.shape) if isinstance(bt, torch.Tensor) else type(bt).__name__
+        bt_dtype = str(bt.dtype) if isinstance(bt, torch.Tensor) else "?"
+        info = (f"[graph/dbg] prefixK layer={layer_idx} req_idx={req_idx} "
+                f"num_cached={num_cached} total_len={total_len} "
+                f"block_table={bt_shape}/{bt_dtype}")
+        if isinstance(bt, torch.Tensor):
+            import math as _m
+            ctx = get_forward_context()
+            kc = key_cache_from_layer_kv(ctx.no_compile_layers[module_name].kv_cache)
+            block_size = kc.shape[1]
+            nbn = _m.ceil(total_len / block_size)
+            row = bt[req_idx, :nbn] if bt.dim() == 2 else bt[:nbn]
+            info += (f" key_cache={tuple(kc.shape)} block_size={block_size} "
+                     f"num_blocks_needed={nbn} num_blocks_total={kc.shape[0]} "
+                     f"block_ids={row.tolist()} "
+                     f"min={int(row.min())} max={int(row.max())}")
+        print(info, flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[graph/dbg] prefixK dbg failed: {e!r}", flush=True)
 
 
 def _dbg(msg: str) -> None:
@@ -309,11 +347,11 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
         k_tok = k_in[start:end, :].detach().clone()
 
         # Prefix-K reconstruction (identical to eager qkv_hook). Needs the attn
-        # metadata's block_table, which is only available when ctx.attn_metadata
-        # is present (eager path). Under compile it is None, so prefix-K is
-        # deferred — harmless for fresh prompts (num_cached==0). TODO: reconstruct
-        # block_table from ctx.slot_mapping / no_compile_layers for prefix caching.
-        if seq_lens is not None and metadata is not None:
+        # metadata's block_table. NOTE: fresh prompts have num_cached==0, so this
+        # path is FIRST exercised under op-mode/compile only when prefix caching
+        # trims the prompt. Gated by VLLM_HOOK_QK_NO_PREFIXK=1 (bisection: skip it
+        # to confirm whether a num_cached>0 crash originates here).
+        if seq_lens is not None and metadata is not None and not _NO_PREFIXK:
             try:
                 sv = seq_lens[i]
                 total_len = int(sv.item()) if hasattr(sv, "item") else int(sv)
@@ -321,17 +359,31 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
                 num_cached = total_len - query_len
                 if num_cached > 0:
                     PROF.incr("kv.prefix_recon")
+                    meta_kv = metadata if not isinstance(metadata, dict) \
+                        else next(iter(metadata.values()))
+                    if _DEBUG and _capture_dbg.get("pk", 0) < 16:
+                        _capture_dbg["pk"] = _capture_dbg.get("pk", 0) + 1
+                        _dbg_prefixk(meta_kv, module_name, i, num_cached,
+                                     total_len, layer_idx)
                     with PROF.timed("kv.prefix_recon"):
-                        meta_kv = metadata if not isinstance(metadata, dict) \
-                            else next(iter(metadata.values()))
                         prefix_k = _read_cached_keys(
                             module_name, meta_kv, i, num_cached, total_len)
+                    # DEBUG localizer: force any async device-side assert from the
+                    # gather above to surface HERE (the op runs as an eager seam,
+                    # not inside a graph replay, so a sync is legal). Off unless
+                    # VLLM_HOOK_QK_PREFIXK_SYNC=1 so production pays nothing.
+                    if _PREFIXK_SYNC:
+                        torch.cuda.synchronize()
                     if prefix_k is not None:
                         k_tok = torch.cat(
                             [prefix_k.to(k_tok.device, dtype=k_tok.dtype), k_tok],
                             dim=0)
-            except Exception:
+            except Exception as _pk_e:  # noqa: BLE001
                 PROF.incr("kv.prefix_recon.errors")
+                if _DEBUG and _capture_dbg.get("pke", 0) < 8:
+                    _capture_dbg["pke"] = _capture_dbg.get("pke", 0) + 1
+                    print(f"[graph/dbg] prefix_recon EXC layer={layer_idx} "
+                          f"i={i}: {_pk_e!r}", flush=True)
 
         PROF.incr("hook.fire.qk")
         bucket = worker._disk_states if extra.get("save_to_disk") \
@@ -848,8 +900,12 @@ def _read_cached_keys_from_ctx(
         # kv_cache is bound to the vLLM Attention wrapper in the forward context,
         # not to the PyTorch module: ctx.no_compile_layers[layer_name].kv_cache.
         kv_cache = ctx.no_compile_layers[module_name].kv_cache
-        key_cache = kv_cache[0]  # [num_blocks, block_size, num_kv_heads, head_size]
+        # Correct key cache via the shared layout-robust extractor (kv_cache[0]
+        # would gather a size-2 key/value axis -> OOB device assert; see
+        # workers.probe_hookqk_worker.key_cache_from_layer_kv).
+        key_cache = key_cache_from_layer_kv(kv_cache)
 
+        num_blocks = key_cache.shape[0]
         block_size = key_cache.shape[1]
         num_kv_heads = key_cache.shape[2]
         head_size = key_cache.shape[3]
@@ -857,6 +913,10 @@ def _read_cached_keys_from_ctx(
         block_table = attn_metadata.block_table
         num_blocks_needed = math.ceil(total_len / block_size)
         block_ids = block_table[req_idx, :num_blocks_needed]
+
+        if block_ids.numel() == 0 or int(block_ids.max()) >= num_blocks \
+                or int(block_ids.min()) < 0:
+            return None
 
         prefix_keys = key_cache[block_ids].reshape(-1, num_kv_heads * head_size)
         return prefix_keys[:num_cached].detach()
@@ -1231,25 +1291,21 @@ def patch_worker_load_model() -> None:
         if not graph_mode_enabled():
             return result
 
-        # Gate 2: only the QK worker. The QK extension defines get_captured_states;
-        # the HS / steer workers do not, so this hasattr check selects QK only.
-        if not hasattr(self, "get_captured_states"):
+        # Gate 2: dispatch by the worker's own graph-install entry. Each
+        # graph-capable worker defines `graph_install` (QK -> qk hosts, HS -> hs
+        # hosts); workers without it (e.g. steer) are left on the eager path. This
+        # replaces the old QK-only `get_captured_states` gate so the HS worker is
+        # routed to ITS installer, not the QK one.
+        graph_install = getattr(self, "graph_install", None)
+        if not callable(graph_install):
             return result
 
         try:
-            # Prefer the worker's thin graph-install entry (it seeds the egress
-            # buckets as instance dicts, then delegates straight back here). Fall
-            # back to the installers directly if a worker build predates it.
-            graph_install = getattr(self, "graph_install", None)
-            if callable(graph_install):
-                graph_install()
-            else:
-                install_qk_hosts(self)
-                install_execute_model_wrapper(self.model_runner, self)
+            graph_install()
         except Exception as e:  # noqa: BLE001
             # Never let an install failure take down model loading — fall back to
             # the eager path's behaviour (no capture) rather than crashing.
-            print(f"[graph/install] QK graph install FAILED ({e}); continuing "
+            print(f"[graph/install] graph install FAILED ({e}); continuing "
                   f"without graph capture.")
             PROF.incr("graph.install.errors")
 

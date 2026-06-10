@@ -152,7 +152,64 @@ def _qk_probe_fake(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
     return None
 
 
+# ---------------------------------------------------------------------------
+# hs_probe: impl-runs-at-runtime hidden-state capture (mirrors qk_probe).
+# ---------------------------------------------------------------------------
+# Same lesson as qk_probe, but for the HIDDEN-STATES worker: capture the decoder
+# LAYER OUTPUT (the residual stream) rather than attention q/k. The decoder-layer
+# class wrap is the exact point step0_8 proved lands in the captured graph. vLLM
+# decoder layers use a fused-residual pattern and return (hidden_states,
+# residual); the residual stream is their sum. We pass BOTH tensors to the op and
+# a `has_residual` flag (1 for the tuple-of-two case, 0 when the layer returned a
+# single tensor — then `residual` is just a copy of `hidden` and is ignored), and
+# the capture body forms `hidden + residual` exactly like the eager hs_hook.
+_HS_CAPTURE_FN = None  # set by install_hs.set_hs_capture_fn; (hidden, residual, layer_idx, has_residual)
+
+
+def set_hs_capture_fn(fn) -> None:
+    """Register the runtime hidden-state capture callback hs_probe's impl calls."""
+    global _HS_CAPTURE_FN
+    _HS_CAPTURE_FN = fn
+
+
+def _hs_probe_impl(hidden: torch.Tensor, residual: torch.Tensor,
+                   sink: torch.Tensor, layer_idx: int,
+                   has_residual: int) -> None:
+    """Runtime hidden-state capture: keep the op alive then run the eager body.
+
+    Skips during vLLM's CUDA-graph CAPTURE pass (same bail as the eager hook), so
+    warmup/capture forwards don't pollute the buckets; real forwards capture.
+    """
+    sink.add_(1)
+    _FIRE_COUNT[0] += 1
+    fn = _HS_CAPTURE_FN
+    capturing = False
+    try:
+        capturing = torch.cuda.is_current_stream_capturing()
+    except Exception:  # noqa: BLE001
+        pass
+    if _DBG and not capturing and hidden.shape[0] <= 2048 and _DBG_NONCAP[0] < 30:
+        _DBG_NONCAP[0] += 1
+        print(f"[graph/dbg] hs_probe impl REAL fire #{_DBG_NONCAP[0]} "
+              f"layer={int(layer_idx)} capturing={capturing} "
+              f"h={tuple(hidden.shape)} has_resid={int(has_residual)}", flush=True)
+    if fn is None or capturing:
+        return
+    try:
+        fn(hidden, residual, int(layer_idx), int(has_residual))
+    except Exception as e:  # noqa: BLE001
+        if _DBG and _DBG_NONCAP[0] < 12:
+            print(f"[graph/dbg] hs_probe capture body raised: {e!r}", flush=True)
+
+
+def _hs_probe_fake(hidden: torch.Tensor, residual: torch.Tensor,
+                   sink: torch.Tensor, layer_idx: int,
+                   has_residual: int) -> None:
+    return None
+
+
 QK_PROBE_OP_NAME = "qk_probe"
+HS_PROBE_OP_NAME = "hs_probe"
 
 # Public op name + qualified path, so downstream files import constants rather
 # than hard-coding strings.
@@ -309,6 +366,22 @@ def register_graph_ops() -> None:
         if "already" not in str(e).lower() and "exist" not in str(e).lower():
             raise
 
+    # hs_probe: the impl-runs-at-runtime hidden-state capture op (decoder-layer
+    # output). Registered alongside the QK ops so a single register_graph_ops()
+    # call serves either worker; an unused op is simply never called.
+    try:
+        direct_register_custom_op(
+            op_name=HS_PROBE_OP_NAME,
+            op_func=_hs_probe_impl,
+            mutates_args=["sink"],
+            fake_impl=_hs_probe_fake,
+            target_lib=_LIB,
+            dispatch_key="CUDA",
+        )
+    except Exception as e:  # noqa: BLE001
+        if "already" not in str(e).lower() and "exist" not in str(e).lower():
+            raise
+
     # Only mark registered once the op handle actually resolves, so a partial
     # failure (registration raised an "already"-looking error but the op is not
     # actually present) does not leave callers to hit a confusing AttributeError
@@ -316,7 +389,7 @@ def register_graph_ops() -> None:
     ns = getattr(torch.ops, LIB_NAMESPACE, None)
     if ns is None or not hasattr(ns, CAPTURE_QK_OP_NAME) or not hasattr(
         ns, QK_PROBE_OP_NAME
-    ):
+    ) or not hasattr(ns, HS_PROBE_OP_NAME):
         raise RuntimeError(
             f"register_graph_ops: ops under torch.ops.{LIB_NAMESPACE} "
             "did not resolve after registration"

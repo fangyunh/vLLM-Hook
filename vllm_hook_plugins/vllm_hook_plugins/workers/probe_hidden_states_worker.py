@@ -259,6 +259,30 @@ class ProbeHiddenStatesWorker:
         print(f"Installed {len(self._hooks)} hidden-state hooks on layers: {matched}")
 
     # ------------------------------------------------------------------
+    # v0.3.0 CUDA-graph capture install (graph mode only)
+    # ------------------------------------------------------------------
+
+    def graph_install(self):
+        """Install the CUDA-graph hidden-state capture path (op-mode).
+
+        Thin delegating entry called by the Worker.load_model monkey-patch
+        (graph/install.py:patch_worker_load_model) AFTER the model is built but
+        BEFORE warm-up/compile/capture. No-op for the eager v0.2.0 path: the
+        patch only reaches here when graph mode is armed.
+
+        Seeds the egress buckets as per-instance dicts (so the graph capture body
+        can populate them and get_captured_states / flush_disk / _save_safetensors
+        consume them UNCHANGED — REUSE CONTRACT), then delegates to graph.install_hs
+        which wraps the decoder-layer class and registers the hs_probe op.
+        """
+        if not getattr(self, "_captured_states", None):
+            self._captured_states = {}
+        if not getattr(self, "_disk_states", None):
+            self._disk_states = {}
+        from vllm_hook_plugins.graph.install_hs import install_hs_hosts
+        install_hs_hosts(self)
+
+    # ------------------------------------------------------------------
     # API serving: collective_rpc-callable artifact retrieval
     # ------------------------------------------------------------------
 

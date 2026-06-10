@@ -44,6 +44,41 @@ def match_attn(name: str):
     return None
 
 
+def key_cache_from_layer_kv(kv_cache):
+    """Return the KEY cache as ``[num_blocks, block_size, num_kv_heads, head_size]``.
+
+    The KV cache layout differs across vLLM versions / backends, and getting it
+    wrong makes ``key_cache[block_ids]`` gather along the WRONG dimension — an
+    out-of-bounds index into a size-2 (key/value) axis that triggers an
+    unrecoverable device-side assert. vLLM v1 stores ONE tensor shaped
+    ``[num_blocks, 2, block_size, num_kv_heads, head_size]`` and splits it with
+    ``kv_cache.unbind(1)`` (confirmed in the TRITON/FLASH backends), so the key
+    cache is ``kv_cache[:, 0]`` — NOT ``kv_cache[0]`` (which is block 0).
+
+    Handles, in order:
+      * a per-virtual-engine list/tuple wrapping ONE kv tensor -> unwrap it;
+      * a (key, value) pair already split -> take element 0;
+      * tensor ``[num_blocks, 2, block_size, H, D]`` (current vLLM) -> ``[:, 0]``;
+      * tensor ``[2, num_blocks, block_size, H, D]`` (legacy) -> ``[0]``;
+      * an already-key-only 4-D tensor -> as-is.
+    """
+    kv = kv_cache
+    # Unwrap a single-element per-virtual-engine list -> the kv tensor.
+    if isinstance(kv, (list, tuple)) and len(kv) == 1 and hasattr(kv[0], "ndim"):
+        kv = kv[0]
+    # Already-split (key, value) pair.
+    if isinstance(kv, (list, tuple)) and len(kv) == 2 and hasattr(kv[0], "ndim"):
+        return kv[0]
+    if not hasattr(kv, "ndim"):
+        return kv
+    if kv.ndim == 5:
+        if kv.shape[1] == 2:      # [num_blocks, 2, block_size, H, D] — vLLM unbind(1)
+            return kv[:, 0]
+        if kv.shape[0] == 2:      # [2, num_blocks, block_size, H, D] — legacy
+            return kv[0]
+    return kv                     # 4-D: already key-only
+
+
 def _read_cached_keys(
     module_name,
     attn_metadata,
@@ -66,8 +101,12 @@ def _read_cached_keys(
         # kv_cache is bound to the vLLM Attention wrapper in the forward context,
         # not to the PyTorch module. Access via no_compile_layers[layer_name].kv_cache.
         kv_cache = ctx.no_compile_layers[module_name].kv_cache
-        key_cache = kv_cache[0]  # [num_blocks, block_size, num_kv_heads, head_size]
+        # Correct key cache: [num_blocks, block_size, num_kv_heads, head_size]
+        # (see key_cache_from_layer_kv for the layout lesson — using kv_cache[0]
+        # here gathers a size-2 axis with real block ids -> device-side assert).
+        key_cache = key_cache_from_layer_kv(kv_cache)
 
+        num_blocks   = key_cache.shape[0]
         block_size   = key_cache.shape[1]
         num_kv_heads = key_cache.shape[2]
         head_size    = key_cache.shape[3]
@@ -76,6 +115,14 @@ def _read_cached_keys(
         block_table = attn_metadata.block_table
         num_blocks_needed = math.ceil(total_len / block_size)
         block_ids = block_table[req_idx, :num_blocks_needed]  # [num_blocks_needed]
+
+        # Bounds guard: an out-of-range block id makes the gather below trigger an
+        # UNRECOVERABLE device-side assert (kills the whole engine). If anything is
+        # off (wrong layout, stale block_table), skip prefix-K rather than crash —
+        # the caller then keeps the new-tokens-only keys, a safe degradation.
+        if block_ids.numel() == 0 or int(block_ids.max()) >= num_blocks \
+                or int(block_ids.min()) < 0:
+            return None
 
         # Gather and flatten: [num_blocks_needed * block_size, kv_hidden]
         prefix_keys = key_cache[block_ids].reshape(-1, num_kv_heads * head_size)

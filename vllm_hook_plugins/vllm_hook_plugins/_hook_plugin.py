@@ -132,13 +132,21 @@ def _patched_create_engine_config(self, *args, **kwargs):
         try:
             cc = config.compilation_config
             ops = list(getattr(cc, "splitting_ops", None) or [])
-            if "vllm_hook::qk_probe" not in ops:
-                ops.append("vllm_hook::qk_probe")
+            # Register both capture ops as splitting ops so whichever worker is
+            # active (QK or HS) runs its op as an eager seam. An op that never
+            # appears in the traced graph is simply ignored, so adding both is
+            # safe regardless of which worker_extension_cls is in use.
+            added = []
+            for _op in ("vllm_hook::qk_probe", "vllm_hook::hs_probe"):
+                if _op not in ops:
+                    ops.append(_op)
+                    added.append(_op)
+            if added:
                 cc.splitting_ops = ops
-                print("[vllm-hook] added vllm_hook::qk_probe to "
+                print(f"[vllm-hook] added {added} to "
                       f"compilation_config.splitting_ops ({len(ops)} total)")
         except Exception as e:  # noqa: BLE001
-            print(f"[vllm-hook] could not add qk_probe to splitting_ops: {e}")
+            print(f"[vllm-hook] could not add capture ops to splitting_ops: {e}")
 
     return config
 

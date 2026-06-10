@@ -1,0 +1,73 @@
+/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+(EngineCore pid=2925061) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=2925061) Loading safetensors checkpoint shards: 100% Completed | 1/1 [01:05<00:00, 65.44s/it]
+(EngineCore pid=2925061) Loading safetensors checkpoint shards: 100% Completed | 1/1 [01:05<00:00, 65.45s/it]
+(EngineCore pid=2925061) 
+(EngineCore pid=2925061) /u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/_inductor/compile_fx.py:322: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+(EngineCore pid=2925061)   warnings.warn(
+(EngineCore pid=2925061) /u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/graphs.py:126: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /pytorch/aten/src/ATen/cuda/CUDAGraph.cpp:147.)
+(EngineCore pid=2925061)   super().capture_end()
+(EngineCore pid=2925061) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   2%|▏         | 1/51 [00:00<00:07,  6.49it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   4%|▍         | 2/51 [00:00<00:07,  6.95it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   6%|▌         | 3/51 [00:00<00:06,  7.12it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   8%|▊         | 4/51 [00:00<00:06,  7.17it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  10%|▉         | 5/51 [00:00<00:10,  4.29it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  12%|█▏        | 6/51 [00:01<00:09,  4.96it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  14%|█▎        | 7/51 [00:01<00:07,  5.63it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  16%|█▌        | 8/51 [00:01<00:06,  6.21it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  18%|█▊        | 9/51 [00:01<00:06,  6.66it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  20%|█▉        | 10/51 [00:01<00:05,  7.06it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  22%|██▏       | 11/51 [00:01<00:05,  7.45it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  24%|██▎       | 12/51 [00:01<00:05,  7.75it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  25%|██▌       | 13/51 [00:01<00:04,  7.93it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  27%|██▋       | 14/51 [00:02<00:04,  8.22it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  29%|██▉       | 15/51 [00:02<00:04,  8.55it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  31%|███▏      | 16/51 [00:02<00:03,  8.79it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  33%|███▎      | 17/51 [00:02<00:07,  4.48it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  35%|███▌      | 18/51 [00:02<00:06,  5.21it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  37%|███▋      | 19/51 [00:02<00:05,  6.02it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  39%|███▉      | 20/51 [00:03<00:04,  6.68it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  41%|████      | 21/51 [00:03<00:04,  7.39it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  43%|████▎     | 22/51 [00:03<00:06,  4.76it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  47%|████▋     | 24/51 [00:03<00:04,  6.29it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  49%|████▉     | 25/51 [00:03<00:04,  6.48it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  53%|█████▎    | 27/51 [00:04<00:03,  7.77it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  57%|█████▋    | 29/51 [00:04<00:02,  8.58it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  59%|█████▉    | 30/51 [00:04<00:02,  8.77it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  63%|██████▎   | 32/51 [00:04<00:02,  9.44it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  67%|██████▋   | 34/51 [00:04<00:01,  9.67it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  71%|███████   | 36/51 [00:04<00:01, 10.18it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  75%|███████▍  | 38/51 [00:05<00:01, 10.74it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  78%|███████▊  | 40/51 [00:05<00:01, 10.79it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  82%|████████▏ | 42/51 [00:05<00:00, 11.17it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  86%|████████▋ | 44/51 [00:05<00:00, 11.36it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  90%|█████████ | 46/51 [00:05<00:00, 11.79it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  94%|█████████▍| 48/51 [00:05<00:00, 11.94it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  98%|█████████▊| 50/51 [00:06<00:00, 11.98it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:06<00:00,  7.81it/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 46.40it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:03<00:00,  3.54s/it, est. speed input: 10.16 toks/s, output: 1.98 toks/s]Processed prompts: 100%|██████████| 1/1 [00:03<00:00,  3.54s/it, est. speed input: 10.16 toks/s, output: 1.98 toks/s]Processed prompts: 100%|██████████| 1/1 [00:03<00:00,  3.54s/it, est. speed input: 10.16 toks/s, output: 1.98 toks/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 716.98it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  7.02it/s, est. speed input: 309.16 toks/s, output: 49.16 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  7.02it/s, est. speed input: 309.16 toks/s, output: 49.16 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  6.99it/s, est. speed input: 309.16 toks/s, output: 49.16 toks/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 727.17it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00, 36.28it/s, est. speed input: 1309.80 toks/s, output: 36.34 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00, 35.87it/s, est. speed input: 1309.80 toks/s, output: 36.34 toks/s]
+/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+(EngineCore pid=2931074) Process EngineCore:
+(EngineCore pid=2931074) Traceback (most recent call last):
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
+(EngineCore pid=2931074)     self.run()
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/multiprocessing/process.py", line 108, in run
+(EngineCore pid=2931074)     self._target(*self._args, **self._kwargs)
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 1144, in run_engine_core
+(EngineCore pid=2931074)     raise e
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 1114, in run_engine_core
+(EngineCore pid=2931074)     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+(EngineCore pid=2931074)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=2931074)     return func(*args, **kwargs)
+(EngineCore pid=2931074)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 880, in __init__
+(EngineCore pid=2931074)     super().__init__(
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/engine/core.py", line 118, in __init__
+(EngineCore pid=2931074)     self.model_executor = executor_class(vllm_config)
+(EngineCore pid=2931074)                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=2931074)     return func(*args, **kwargs)
+(EngineCore pid=2931074)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/executor/abstract.py", line 109, in __init__
+(EngineCore pid=2931074)     self._init_executor()
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/executor/uniproc_executor.py", line 60, in _init_executor
+(EngineCore pid=2931074)     self.driver_worker.init_device()
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/worker/worker_base.py", line 317, in init_device
+(EngineCore pid=2931074)     self.worker.init_device()  # type: ignore
+(EngineCore pid=2931074)     ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=2931074)     return func(*args, **kwargs)
+(EngineCore pid=2931074)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/v1/worker/gpu_worker.py", line 302, in init_device
+(EngineCore pid=2931074)     self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+(EngineCore pid=2931074)                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074)   File "<string>", line 12, in __init__
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/utils/mem_utils.py", line 94, in __post_init__
+(EngineCore pid=2931074)     self.measure()
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/vllm/utils/mem_utils.py", line 108, in measure
+(EngineCore pid=2931074)     self.free_memory, self.total_memory = current_platform.mem_get_info(device)
+(EngineCore pid=2931074)                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074)   File "/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/memory.py", line 842, in mem_get_info
+(EngineCore pid=2931074)     return torch.cuda.cudart().cudaMemGetInfo(device)
+(EngineCore pid=2931074)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=2931074) torch.AcceleratorError: CUDA error: CUDA-capable device(s) is/are busy or unavailable
+(EngineCore pid=2931074) Search for `cudaErrorDevicesUnavailable' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+(EngineCore pid=2931074) CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+(EngineCore pid=2931074) For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+(EngineCore pid=2931074) Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+(EngineCore pid=2931074) 
+[rank0]:[W609 10:48:11.301117566 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank0]:[W609 10:48:14.931162611 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

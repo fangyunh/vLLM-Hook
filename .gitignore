@@ -11,3 +11,9 @@ model_configs/**/*.RANDOM_TEST.json
 
 # developer cuda_graph debug tests (not shipped)
 # tests/cuda_graph/tests/
+
+docs/
+
+ignore/
+
+CLAUDE.md

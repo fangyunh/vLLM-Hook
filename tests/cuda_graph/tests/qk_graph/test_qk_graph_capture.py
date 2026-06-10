@@ -124,7 +124,15 @@ def _fail(msg):
 
 def main():
     cache_dir = "./cache/"
-    hook_dir = "/dev/shm/vllm_hook"
+    # /dev/shm is node-local and shared across all users/jobs on a compute node.
+    # A bare "/dev/shm/vllm_hook" collides with another user's leftover directory
+    # on some nodes -> makedirs() raises EACCES ([Errno 13] Permission denied) in
+    # flush_disk, which is an INFRA collision, not a capture bug. Namespace the
+    # path by user (and allow an explicit override) so reruns by the same user
+    # reuse a dir they own and other users never block us.
+    import getpass
+    _user = os.environ.get("USER") or getpass.getuser()
+    hook_dir = os.environ.get("VLLM_HOOK_DIR", f"/dev/shm/vllm_hook_{_user}")
     model = os.environ.get("VLLM_HOOK_DEMO_MODEL", "Qwen/Qwen2-1.5B-Instruct")
     cudagraph_mode = os.environ.get("VLLM_HOOK_CUDAGRAPH_MODE", "PIECEWISE")
     parity = os.environ.get("VLLM_HOOK_PARITY") == "1"
