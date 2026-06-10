@@ -45,9 +45,8 @@ first-class operation the graph knows about":
 ```
 
 1. **Custom op instead of a hook.** Registered via `direct_register_custom_op` with
-   `mutates_args=["sink"]`, the op is *opaque* to Dynamo — recorded as one
-   side-effecting node, never dead-code-eliminated. A forward hook fundamentally
-   lacks this property.
+   `mutates_args=["sink"]`, the op recorded as one side-effecting node, never dead-code-eliminated. 
+   A forward hook fundamentally lacks this property.
 2. **Install before compile.** Installed at the worker's `load_model`, so the op exists when the compiler traces the model.
 3. **Decide per-request as data, not Python branches in the graph.** All per-request
    logic (which layers, prefill vs decode, token range) runs *inside the eager section*,
