@@ -76,8 +76,18 @@ class HighlighterAnalyzer:
             # precomputed loss gradient g (dL/dh^N at generation positions) to save space/time.
             # Feed it back through loss_grad_fn to approximate affirmation loss gradient.
             seq_loss_grad_fn = loss_grad_fn
+            apply_final_norm_to_g = True
+            g_mid = capture.pop("g_mid", None)
             g_loss = capture.pop("g_loss", None)
-            if g_loss is not None and seq_loss_grad_fn is None:
+            if g_mid is not None and seq_loss_grad_fn is None:
+                seq_loss_grad_fn = (
+                    lambda h_L, prompt_len, W_U, dev, _g=g_mid: _g.to(
+                        device=h_L.device, dtype=h_L.dtype
+                    )
+                )
+                # g_mid is already in pre-attention (h_mid) space.
+                apply_final_norm_to_g = False
+            elif g_loss is not None and seq_loss_grad_fn is None:
                 seq_loss_grad_fn = (
                     lambda h_L, prompt_len, W_U, dev, _g=g_loss: _g.to(
                         device=h_L.device, dtype=h_L.dtype
@@ -91,6 +101,7 @@ class HighlighterAnalyzer:
                 weights=weight_bundle,
                 loss_grad_fn=seq_loss_grad_fn,
                 target_ids=target_ids if seq_loss_grad_fn is None else None,
+                apply_final_norm_to_g=apply_final_norm_to_g,
                 device=device,
             )
             sequences_out.append(

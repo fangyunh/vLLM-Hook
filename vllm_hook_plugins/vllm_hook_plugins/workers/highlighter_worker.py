@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 import os
+import json
 import warnings
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.nn as nn
 
 from vllm_hook_plugins.utils.TokenHighlighter.utils import (
     ForwardAttrCapture,
     capture_ready,
     capture_ready_for_teacher,
     expand_suffix_capture,
+    export_final_norm_spec,
     export_forward_attr_weights,
     flag_driver_tokens,
     iter_prompt_batches,
     lm_head_weight,
+    locate_final_norm,
     load_highlighter_artifact,
     merge_real_and_teacher_captures,
     plan_teacher_prefill_extend,
@@ -33,10 +37,16 @@ from vllm_hook_plugins.utils.TokenHighlighter.utils import (
     vllm_teacher_suffix_capture,
 )
 
-from vllm_hook_plugins.utils.TokenHighlighter.grad_influence import affirmation_loss_grad
+from vllm_hook_plugins.utils.TokenHighlighter.grad_influence import (
+    affirmation_loss_grad,
+    compute_mid_boundary_gradient,
+    project_g_through_norm,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig
+
+# pyright: reportOperatorIssue=false, reportArgumentType=false, reportIndexIssue=false, reportCallIssue=false, reportOptionalCall=false
 
 
 def _highlighter_active(scheduler_output: Any, model_runner: Any) -> bool:
@@ -74,8 +84,13 @@ def _iter_highlighter_extras(
 
 
 def _apply_highlighter_config(worker: "HighlighterWorker", extra: dict) -> None:
-    """Apply per-request highlighter settings from ``extra_args['highlighter']`` (like ``steer``)."""
+    """Apply per-request highlighter settings from ``extra_args['highlighter']``."""
     hl = extra.get("highlighter")
+    if isinstance(hl, str):
+        try:
+            hl = json.loads(hl)
+        except (TypeError, ValueError):
+            hl = None
     if not isinstance(hl, dict):
         return
     if "threshold_k" in hl:
@@ -170,6 +185,7 @@ class HighlighterWorker:
         parallel_config: "ParallelConfig"
 
     _hooks_installed: bool = False
+    _input_embeddings: nn.Module
 
     def install_hooks(self):
         """Wrap ``execute_model`` and install the mitigate embedding hook.
@@ -191,6 +207,31 @@ class HighlighterWorker:
 
             self.execute_model = execute_model
         self._hooks_installed = True
+
+    def flush_disk(self, external_req_ids: list, run_id: str, hook_dir: str) -> bool:
+        """collective_rpc-compatible disk flush for save_to_disk requests.
+
+        The generic hook plugin calls ``flush_disk`` after sync ``LLM.generate``
+        when ``extra_args['save_to_disk']`` is set. Token Highlighter writes its
+        own artifact in ``_finish_capture``; this method bridges that API by
+        forcing a pending capture finalize against the caller-provided run path.
+        """
+        if hook_dir:
+            self.hook_dir = hook_dir
+        if self.hook_dir:
+            os.makedirs(self.hook_dir, exist_ok=True)
+        if run_id and self.hook_dir:
+            self.run_id_file = os.path.join(self.hook_dir, "RUN_ID.txt")
+            with open(self.run_id_file, "a") as f:
+                f.write(str(run_id) + "\n")
+
+        # If capture completion was deferred (common in transition from extended to suffix path),
+        # finish now so the caller can immediately load highlighter_activations.pt.
+        if self._pending and (self._capture_finish_pending or capture_ready(self._cap.live)):
+            self._capture_finish_pending = False
+            self._finish_capture()
+            return True
+        return False
 
     def _install_highlighter_state(self):
         """Attach persistent state and the mitigate embedding hook."""
@@ -229,15 +270,19 @@ class HighlighterWorker:
         self._soft_indices_by_prompt: dict[tuple[int, ...], list[int]] = {}
 
         getter = getattr(self._model, "get_input_embeddings", None)
+        emb: nn.Module | None
         if callable(getter):
-            self._input_embeddings = getter()
+            candidate = getter()
+            emb = candidate if isinstance(candidate, nn.Module) else None
         else:
-            self._input_embeddings = (
+            raw = (
                 getattr(getattr(self._model, "model", None), "embed_tokens", None)
                 or getattr(self._model, "embed_tokens", None)
             )
-        if self._input_embeddings is None:
+            emb = raw if isinstance(raw, nn.Module) else None
+        if emb is None:
             raise RuntimeError("Input embeddings not found in the model.")
+        self._input_embeddings = emb
         # Register the embedding_soft_hook to the input embeddings. Note that
         # this is present even in "capture" mode but captured embeddings are only used in "mitigate" mode.
         self._input_embeddings.register_forward_hook(self._embedding_soft_hook)
@@ -365,11 +410,12 @@ class HighlighterWorker:
         if self._target_tensor is not None:
             return
         if not self.target_ids:
-            phrase = self._target_phrase or "Sure! I can help with that"
-            tok = getattr(self, "_tokenizer", None)
-            self.target_ids = (
-                tok.encode(phrase, add_special_tokens=False) if tok else []
-            )
+            raw_ids = os.environ.get("VLLM_HIGHLIGHTER_TARGET_TOKEN_IDS", "")
+            if raw_ids.strip():
+                try:
+                    self.target_ids = [int(x.strip()) for x in raw_ids.split(",") if x.strip()]
+                except ValueError:
+                    self.target_ids = []
         self._target_tensor = (
             torch.tensor(self.target_ids, dtype=torch.long, device=self._device).unsqueeze(0)
             if self.target_ids
@@ -530,9 +576,46 @@ class HighlighterWorker:
             capture = self._capture_for_prompt(prompt_ids)
             cpu_capture = {k: v.detach().cpu() for k, v in capture.items()}
             if target_ids:
-                g_loss = affirmation_loss_grad(capture["h_L"], len(prompt_ids), 
-                    target_ids, w_u, device=capture["h_L"].device, model=self._model)
+                g_loss = affirmation_loss_grad(
+                    capture["h_L"],
+                    len(prompt_ids),
+                    target_ids,
+                    w_u,
+                    device=capture["h_L"].device,
+                    model=self._model,
+                )
                 cpu_capture["g_loss"] = g_loss.detach().cpu()
+                # FFN-aware boundary gradient at h_mid in the final decoder block.
+                # This replaces naive g_out in the analyzer attention paths.
+                start = len(prompt_ids) - 1
+
+                # Compute the gradient at the boundary of the final FFN
+                # Locate final norm module and project dL/dh_j through
+                norm = locate_final_norm(self._model)
+                g_out = g_loss
+                if norm is not None:
+                    norm_spec = export_final_norm_spec(norm)
+                    if norm_spec is not None:
+                        h_gen = capture["h_L"][start : start + len(target_ids)]
+                        g_out = project_g_through_norm(
+                            g_loss,
+                            h_gen,
+                            norm_spec,
+                            capture["h_L"].device,
+                            capture["h_L"].dtype,
+                        )
+                # Compute dL/dh_mid = dL/dh_out + J_norm2^T J_ffn^T dL/dh_out
+                # where dL/dh_out is the gradient at the boundary of the final FFN
+                # (affirmation loss gradient wrt direct last layer hidden states)
+                g_mid = compute_mid_boundary_gradient(
+                    capture,
+                    len(prompt_ids),
+                    g_out,
+                    model=self._model,
+                    device=capture["h_L"].device,
+                )
+                # Pass single gradient vector to analyzer via highlighter.pt for efficiency
+                cpu_capture["g_mid"] = g_mid.detach().cpu()
             sequences.append({
                 "token_ids": list(prompt_ids),
                 "prompt_len": len(prompt_ids),

@@ -147,7 +147,7 @@ async def _patched_generate(
         async for output in _original_generate(
             self, prompt, sampling_params, request_id, **kwargs
         ):
-            if output.finished and needs_hooks and not wants_steer and not wants_highlighter:
+            if output.finished and needs_hooks and not wants_steer:
                 if save_to_disk:
                     run_id = extra.get("run_id") or request_id
                     hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR

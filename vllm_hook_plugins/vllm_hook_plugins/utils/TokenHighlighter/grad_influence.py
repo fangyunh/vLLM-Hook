@@ -4,22 +4,181 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+import logging
 
 import torch
 
 from vllm_hook_plugins.utils.TokenHighlighter.utils import (
+    _last_transformer_block,
     export_final_norm_spec,
     export_input_norm_spec,
     get_attn_query_weight,
     get_attn_key_value_weights,
+    locate_ffn_input_norm,
     locate_final_norm,
     locate_input_norm,
     lm_head_weight,
 )
 
-# pyright: reportOperatorIssue=false
+# pyright: reportOperatorIssue=false, reportArgumentType=false, reportIndexIssue=false, reportCallIssue=false, reportOptionalCall=false
 
 LossGradFn = Callable[[torch.Tensor, int, torch.Tensor, torch.device], torch.Tensor]
+
+
+def _silu_prime(x: torch.Tensor) -> torch.Tensor:
+    sig = torch.sigmoid(x)
+    return sig * (1.0 + x * (1.0 - sig))
+
+
+def _gelu_prime(x: torch.Tensor) -> torch.Tensor:
+    # Matches torch.nn.functional.gelu(..., approximate="tanh") derivative.
+    c = 0.044715
+    k = torch.sqrt(2/torch.pi)
+    x3 = x * x * x
+    u = k * (x + c * x3)
+    t = torch.tanh(u)
+    sech2 = 1.0 - t * t
+    du = k * (1.0 + 3.0 * c * x * x)
+    return 0.5 * (1.0 + t) + 0.5 * x * sech2 * du
+
+
+def _activation_prime(ffn: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    # Use approximations of activation functions to avoid costly differentiation
+    act = getattr(ffn, "act_fn", None)
+    name = type(act).__name__.lower() if act is not None else ""
+    if "silu" in name or "swish" in name:
+        return _silu_prime(x)
+    if "relu" in name:
+        return (x > 0).to(dtype=x.dtype)
+    return _gelu_prime(x)
+
+
+def _activation_value(ffn: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    # Use exact activation functions instead of approximations for values themselves
+    act = getattr(ffn, "act_fn", None)
+    name = type(act).__name__.lower() if act is not None else ""
+    if "silu" in name or "swish" in name:
+        return torch.nn.functional.silu(x)
+    if "relu" in name:
+        return torch.nn.functional.relu(x)
+    logging.warning(f"Assuming GELU activation in final FFN since {name} is not supported")
+    return torch.nn.functional.gelu(x)
+
+
+def _linear_forward(module: torch.nn.Module, x: torch.Tensor, *, device: torch.device) -> torch.Tensor:
+    """Evaluate a linear projection including bias when present."""
+    w = module.weight.to(device=device, dtype=x.dtype)
+    y = x @ w.T
+    b = getattr(module, "bias", None)
+    if b is not None:
+        y = y + b.to(device=device, dtype=x.dtype)
+    return y
+
+
+def _resolve_final_ffn(module: torch.nn.Module | None) -> torch.nn.Module | None:
+    if module is None:
+        return None
+    try:
+        block = _last_transformer_block(module)
+    except RuntimeError:
+        return None
+    for name in ("mlp", "feed_forward", "ffn"):
+        ffn = getattr(block, name, None)
+        if isinstance(ffn, torch.nn.Module):
+            return ffn
+    return None
+
+
+def _ffn_jacobian_vjp(
+    ffn: torch.nn.Module,
+    x: torch.Tensor,
+    g_out: torch.Tensor,
+    *,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """``J_ffn^T g_out = dL/dx`` for the block MLP, given ``dL/d(mlp_out) = g_out`` and ``x = norm(h_mid)``.
+
+    Handles gated MLPs (SwiGLU/GeGLU) with either separate ``gate_proj``/``up_proj`` (HF) or a
+    fused ``gate_up_proj`` whose rows are ``[gate; up]`` (vLLM), and plain MLPs (GELU/ReLU),
+    including input biases. Assumes ``nn.Linear``-style weights ``(out, in)``; the down/output
+    bias drops out of the VJP. Returns ``None`` for unrecognized layouts so the caller can fall back.
+    We compute a VJP with the incoming boundary gradient signal g_out to avoid building the full Jacobian matrix in memory.
+    """
+    def w(mod: torch.nn.Module) -> torch.Tensor | torch.nn.Module:
+        return mod.weight.to(device=device, dtype=x.dtype)
+
+    # Second (output) projection -> dL/d(activation output) in the intermediate space.
+    down = next((getattr(ffn, n) for n in ("down_proj", "c_proj", "fc2", "w2") if hasattr(ffn, n)), None)
+    if down is None:
+        return None
+    d_h = g_out @ w(down)
+
+    # Gated MLP, separate gate/up projections (LLaMA/Qwen/Mistral HF layout).
+    if hasattr(ffn, "gate_proj") and hasattr(ffn, "up_proj"):
+        gate_pre = _linear_forward(ffn.gate_proj, x, device=device) # gate_pre = x @ W_gate^T
+        up_val = _linear_forward(ffn.up_proj, x, device=device) # up_val = x @ W_up^T
+        d_gate = d_h * up_val * _activation_prime(ffn, gate_pre) # d_gate = d_h * up_val * f'(gate_pre)
+        d_up = d_h * _activation_value(ffn, gate_pre) # d_up = d_h * f(gate_pre)
+        return d_gate @ w(ffn.gate_proj) + d_up @ w(ffn.up_proj) # d_gate @ W_gate^T + d_up @ W_up^T
+
+    # Gated MLP, fused gate_up projection (vLLM): output columns are [gate, up].
+    if hasattr(ffn, "gate_up_proj"):
+        pre = _linear_forward(ffn.gate_up_proj, x, device=device)
+        w_gu = w(ffn.gate_up_proj)
+        half = w_gu.size(0) // 2
+        gate_pre, up_val = pre[..., :half], pre[..., half:]
+        d_gate = d_h * up_val * _activation_prime(ffn, gate_pre)
+        d_up = d_h * _activation_value(ffn, gate_pre)
+        return d_gate @ w_gu[:half] + d_up @ w_gu[half:]
+
+    # Plain MLP: single input projection + pointwise activation (GPT-2/OPT/GELU-style).
+    in_proj = next((getattr(ffn, n) for n in ("c_fc", "fc1", "up_proj", "w1") if hasattr(ffn, n)), None)
+    if in_proj is None:
+        return None
+    in_pre = _linear_forward(in_proj, x, device=device)
+    return (d_h * _activation_prime(ffn, in_pre)) @ w(in_proj)
+
+
+def compute_mid_boundary_gradient(
+    captured: dict[str, torch.Tensor],
+    prompt_len: int,
+    g_out: torch.Tensor,
+    *,
+    model: torch.nn.Module | None,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute g_mid = dL/dh_mid = g_out + J_norm2^T J_ffn^T g_out at generation positions.
+
+    Backpropagates the affirmation-loss gradient through the last block's residual MLP branch:
+    ``h_L = h_mid + MLP(Norm2(h_mid))``, so ``dL/dh_mid = g_out + J_norm2^T J_ffn^T g_out``.
+    Fully analytical (no autograd); falls back to ``g_out`` when the FFN/norm layout is unknown.
+    """
+    if model is None:
+        return g_out
+    h_mid_full = captured.get("h_mid")
+    if h_mid_full is None:
+        return g_out
+
+    n_gen_toks = g_out.size(0)
+    start = prompt_len - 1
+    h_mid = h_mid_full.squeeze(0).to(device=device)[start : start + n_gen_toks]
+    if h_mid.size(0) != n_gen_toks:
+        return g_out
+
+    ffn = _resolve_final_ffn(model)
+    norm2_spec = _materialize_norm_spec(
+        export_input_norm_spec(locate_ffn_input_norm(model)), device, g_out.dtype
+    )
+    if ffn is None or norm2_spec is None:
+        return g_out
+
+    # x = Norm2(h_mid): MLP input, computed analytically from the exported norm spec.
+    x = _apply_final_norm_hidden(h_mid, norm2_spec)
+    j_ffn_t_g = _ffn_jacobian_vjp(ffn, x, g_out, device=device)
+    if j_ffn_t_g is None:
+        return g_out
+    g_ffn_input = _project_g_through_norm(j_ffn_t_g, h_mid, norm2_spec, device, x.dtype)
+    return g_out + g_ffn_input
 
 
 def _has_rope(rope_spec: dict[str, Any]) -> bool:
@@ -68,7 +227,14 @@ def _rope_cos_sin(
     if inv_freq_cpu is not None:
         inv_freq = inv_freq_cpu.to(device=device, dtype=dtype)
     else:
-        theta = float(rope_spec.get("rope_theta", 10000.0))
+        # Resolve the RoPE base. Some configs (e.g. vLLM's Qwen2) expose it only inside
+        # ``rope_scaling['rope_theta']`` rather than as a top-level ``rope_theta``; missing it
+        # silently falls back to 10000 and corrupts the key-path inverse rotation.
+        theta = rope_spec.get("rope_theta")
+        scaling = rope_spec.get("rope_scaling")
+        if theta is None and isinstance(scaling, dict):
+            theta = scaling.get("rope_theta")
+        theta = float(theta) if theta is not None else 10000.0
         half = rotary_dim // 2
         inv_freq = 1.0 / (
             theta ** (torch.arange(0, half, device=device, dtype=dtype) / float(rotary_dim))
@@ -242,6 +408,17 @@ def _project_g_through_norm(
     return inv_std * (g_gamma - mu_grad - h_hat * mu_stat)
 
 
+def project_g_through_norm(
+    g: torch.Tensor,
+    h_in: torch.Tensor,
+    norm_spec: dict[str, Any],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Public wrapper for analytic norm VJP."""
+    return _project_g_through_norm(g, h_in, norm_spec, device, dtype)
+
+
 def _lm_head_input_slice(
     h_L: torch.Tensor,
     prompt_len: int,
@@ -397,12 +574,7 @@ def compute_grad_influence_vectors(
     **Fidelity vs full one-block autograd.** Given ``g_j = dL/dh_L_j`` the attention-sub-block
     backprop here is *exact*: the value path holds alpha fixed (partial wrt v_i) while the key
     path carries the full softmax Jacobian ``delta_ji = alpha_ji (l_ji - l_bar_j)`` (alpha is
-    *not* frozen), plus exact input/final-norm VJPs, GQA replication and ``R_i^T``. The single
-    systematic approximation is the **last-block MLP/FFN**: the gradient entering the attention
-    output should be ``(I + J_MLP_j) g_j`` but we use ``g_j`` (the MLP is position-wise, so it
-    only rescales the per-generation-position upstream gradient — it adds no cross-position
-    path). The residual skip-connection identity term for the boundary token is restored
-    exactly (see end of function).
+    *not* frozen), plus exact input/final-norm VJPs, GQA replication and ``R_i^T``. 
 
     Optional ``loss_grad_fn(h_L, prompt_len, W_U, device)`` returns g with shape (n_gen, d_model).
 
@@ -469,6 +641,22 @@ def compute_grad_influence_vectors(
         h_gen = h_L[start : start + n_gen_toks]
         g = _project_g_through_norm(g, h_gen, final_norm_spec, device, h_L.dtype)
 
+    # Prefer precomputed FFN-corrected boundary gradient if available (worker path).
+    g_mid_cap = captured.get("g_mid")
+    if g_mid_cap is not None:
+        g_attn = g_mid_cap.to(device=device, dtype=g.dtype)
+    elif model is not None:
+        logging.info("Computing g_mid gradient through final FFN")
+        g_attn = compute_mid_boundary_gradient(
+            captured, prompt_len, g, model=model, device=device
+        )
+    else:
+        logging.info("No gradient through final FFN found and model unavailable: using g directly, which is an approximation.")
+        g_attn = g
+    if g_attn.size(0) != n_gen_toks:
+        logging.error(f"g_mid gradient has {g_attn.size(0)} tokens but expected {n_gen_toks} tokens")
+        g_attn = g
+
     # Reshape projection matrices for batched matrix operations
     Q = Q.view(S_seq, n_heads, d_head).transpose(0, 1).contiguous()
     K = K.view(S_seq, n_kv_heads, d_head).transpose(0, 1).contiguous()
@@ -505,7 +693,7 @@ def compute_grad_influence_vectors(
     # Project LM head gradient with respect to last layer hidden state
     # of generation token j (dL/dh_j = g_j) through W_O per head (to d_head space)
     # g_a[h,j] = W_O^(h)^T (dL/dh_j)
-    g_a = torch.einsum("md,hdj->hmj", g, W_O)
+    g_a = torch.einsum("md,hdj->hmj", g_attn, W_O)
 
     # Value path: apply R_i^T only when runtime probe indicates V is rotated.
     val_post = A_in.transpose(-1, -2) @ g_a
@@ -514,21 +702,17 @@ def compute_grad_influence_vectors(
     )
     value_heads = val_pre @ W_V # Ensure value projections are in the pre-RoPe space
 
-    l_full = g_a @ V.transpose(-1, -2)
+    # Compute baseline alignment without materializing the full [n_heads, n_gen, S_seq] causal masking matrix.
+    # Mathematically equivalent to: sum(A * (g_a @ V.T)) -> sum(g_a * (A @ V)) by associativity/commutativity of finite summation.
+    context_heads = A @ V  # Shape: [n_heads, n_gen_toks, d_head]
+    baseline = torch.sum(g_a * context_heads, dim=-1, keepdim=True)  # Shape: [n_heads, n_gen_toks, 1]
 
-    # Enforce strict causal masking over l_full to prevent
-    # tokens at position j from being influenced by future positions (i > j).
-    # l_full = l_full.masked_fill(causal.unsqueeze(0), 0.0)
+    # Compute the alignment matrix only for the prompt segment to evaluate delta.
+    # This reduces the size of the matrix from S_seq to prompt_len.
+    l_full_prompt = g_a @ V[:, :prompt_len, :].transpose(-1, -2)  # Shape: [n_heads, n_gen_toks, prompt_len]
 
-    # Compute expected alignment baseline over all tokens generation token j attends to:
-    # l_bar_j = sum_m alpha_jm l_jm
-    # under current attention distribution in matrix A, for each generation token
-    baseline = (A * l_full).sum(dim=-1, keepdim=True)
-
-    # Compute softmax-adjusted attention sensitivity for each prompt token i:
-    # delta_ji = dL/ds_ji = alpha_ji (l_ji - l_bar_j)
-    # delta > 0: increasing alpha_ji increases loss
-    delta = A_in * (l_full[:, :, :prompt_len] - baseline)
+    # Compute softmax-adjusted attention sensitivity for each prompt token i
+    delta = A_in * (l_full_prompt - baseline)
 
     # dL/dk_post_i = sum_j delta_ji q_j^post / sqrt(d); dL/dk_pre_i = R_i^T dL/dk_post_i
     key_post = (delta.transpose(-1, -2) @ Q_gen) / sqrt_d
@@ -562,6 +746,7 @@ def compute_grad_influence_vectors(
         # sum over heads -> (d_model). A plain ``q_pre0 @ W_Q`` would broadcast-matmul
         # the [n_heads, d_head] tensor against [n_heads, d_head, d_model] and yield
         # [n_heads, d_model] instead of the intended per-head contraction.
+        # Add query term dL/dq_j for boundary token j = start
         total_grad[start] = total_grad[start] + torch.einsum("hd,hde->e", q_pre0, W_Q)
 
     # VJP 2: Attention Input Norm.
@@ -585,7 +770,9 @@ def compute_grad_influence_vectors(
     # (The MLP/attention *self*-Jacobians of this token remain part of the last-block
     # approximation; only the exact identity contribution is restored here.)
     if 0 <= start < prompt_len:
-        total_grad[start] = total_grad[start] + g[0].to(device=device, dtype=total_grad.dtype)
+        total_grad[start] = total_grad[start] + g_attn[0].to(
+            device=device, dtype=total_grad.dtype
+        )
 
     return total_grad
 

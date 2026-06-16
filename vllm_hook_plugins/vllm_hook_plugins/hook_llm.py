@@ -147,6 +147,13 @@ class HookLLM:
 
         highlighter_mode = kwargs.pop("highlighter_mode", None)
 
+        if (
+            hook
+            and self.worker_name == "token_highlighter"
+            and highlighter_mode == "capture"
+        ):
+            save_to_disk = True
+
         if isinstance(sampling_params, list):
             # list[SamplingParams] allows different hook params within requests
             if len(sampling_params) != len(prompts):

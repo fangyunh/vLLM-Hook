@@ -98,18 +98,22 @@ The scorer approximates $\|\partial L_{\mathrm{aff}} / \partial x_i\|$ by back-p
 3. **Value and key paths** to a per-prompt-token gradient. The value path holds $\alpha$ fixed ($\partial/\partial v_i$); the key path uses the full softmax Jacobian $\delta_{ji} = \alpha_{ji}(l_{ji} - \bar{l}_j)$. Captured Q/K/V are post-RoPE; `W_K`/`W_V` are pre-RoPE, so inverse RoPE ($R_i^{\mathsf T}$) is applied per the capture-time probe.
 4. Score for token $x_i$: L2 norm of the resulting vector.
 
-**Fidelity.** Given $g_j$, the attention-sub-block VJP is exact. The systematic approximation is omission of the last-block MLP Jacobian: $(I + J_{\mathrm{MLP},j}) \cdot g_j$ is approximated by $g_j$. Formal derivation: `utils/TokenHighlighter/grad_influence.py`; see also `TokenHighlighter_GradientScore_Derivation.pdf`.
+**Fidelity.** The last-block residual MLP branch is back-propagated analytically: from $g_{\mathrm{out}} = \mathrm{d}L/\mathrm{d}h_L$ we form $g_{\mathrm{mid}} = g_{\mathrm{out}} + J_{\mathrm{Norm2}}^{\mathsf T} J_{\mathrm{MLP}}^{\mathsf T} g_{\mathrm{out}}$ (`compute_mid_boundary_gradient`), so the MLP Jacobian is no longer dropped. The closed form covers gated MLPs (SwiGLU/GeGLU, separate `gate_proj`/`up_proj` or fused `gate_up_proj`) and plain MLPs (GELU/ReLU), including input biases. On Qwen2-1.5B, validated with `examples/compare_highlighter_scorers.py` (seeded HuggingFace last-block autograd on vLLM's captured block input): $g_{\mathrm{out}}$ / $g_{\mathrm{mid}}$ relative L2 $\approx 0.16\%$ (cosine $\approx 0.99999$), block-input gradient relative L2 $\approx 2.6\%$ (cosine $\approx 0.9996$). Formal derivation: `utils/TokenHighlighter/grad_influence.py`; see also `TokenHighlighter_GradientScore_Derivation.pdf`.
 
 ## Scorer validation
 
-Offline comparison against HuggingFace references (`examples/compare_token_highlighter_scorers.py`, local-only, not in the deployment path):
+Offline comparison against a seeded HuggingFace last-block autograd reference (`examples/compare_highlighter_scorers.py`, local-only, not in the deployment path). The reference is seeded with vLLM's captured block input so the comparison measures last-block VJP fidelity, not vLLM-vs-HF forward divergence.
 
-| Reference | Spearman $\rho$ | Driver Jaccard |
-| --------- | --------------- | -------------- |
-| Last-block autograd ($dL/dh^{L-1}$) | $\approx 0.93$ | $\approx 0.83$ |
-| Full embedding autograd | $\approx 0.49$ | $\approx 0.38$ |
+| Metric | Qwen2-1.5B (3 prompts) |
+| ------ | ---------------------- |
+| Spearman $\rho$ | $1.0$ |
+| Kendall $\tau$ | $\approx 1.0$ |
+| Pearson $r$ | $\approx 0.99999$ |
+| Driver Jaccard (top-$\alpha$) | $1.0$ |
+| $\|\Delta g\|_2 / \|g\|_2$ at $h_L$ / $h_{\mathrm{mid}}$ | $\approx 0.16\%$ |
+| $\|\Delta g\|_2 / \|g\|_2$ at block input $h^{(L-1)}$ | $\approx 2.6\%$ |
 
-Results are for Qwen2-1.5B on four prompts. Driver sets overlap sufficiently for mitigation on many jailbreak-style prompts; metrics should be revalidated per deployment.
+Revalidate per model and prompt distribution before deployment. Wall-clock in the harness is not a fair speed benchmark: analytical `forward_attr` includes full vLLM capture (inference you already pay for) plus offline analyze; the autograd reference times only a warm-model last-block backward and excludes model load.
 
 # Mitigation
 
@@ -199,7 +203,7 @@ Decoder-only causal transformers with pre-norm blocks, optional final norm, and 
 | Area | Limitation |
 | ---- | ---------- |
 | Architecture | No encoder-decoder, Mamba/RWKV-only, or incompatible custom attention. |
-| forward_attr | Last-block only; MLP Jacobian omitted. |
+| forward_attr | Last-block only; MLP Jacobian included analytically (gated/plain MLPs, `nn.Linear`-style weights); GPT-2 `Conv1D` MLPs unsupported. |
 | Tensor parallel | No merged `weight_bundle` across ranks. |
 | Quantization | Hooked modules must expose readable weights. |
 | Mitigation | Task-specific ($\alpha$, $\beta$, affirmation phrase); not a general safety filter. |

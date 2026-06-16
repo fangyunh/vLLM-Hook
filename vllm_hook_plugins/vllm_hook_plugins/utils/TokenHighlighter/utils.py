@@ -20,8 +20,10 @@ from vllm.forward_context import get_forward_context
 
 from vllm_hook_plugins.workers._common import get_query_metadata
 
+# pyright: reportOperatorIssue=false, reportArgumentType=false, reportIndexIssue=false, reportCallIssue=false, reportOptionalCall=false, reportAttributeAccessIssue=false
+
 _REQUIRED_CAPTURE_KEYS = ("Q", "K", "V", "h_L")
-_OPTIONAL_CAPTURE_KEYS = ("h_input",)
+_OPTIONAL_CAPTURE_KEYS = ("h_input", "h_mid")
 _CAPTURE_KEYS = _REQUIRED_CAPTURE_KEYS + _OPTIONAL_CAPTURE_KEYS
 
 
@@ -77,6 +79,14 @@ _INPUT_NORM_ATTRS = (
     "attention_norm",       # Custom Triton wrappers
 )
 
+# Attribute names for the FFN/pre-MLP norm on a single transformer block
+_FFN_NORM_ATTRS = (
+    "post_attention_layernorm",  # LLaMA, Qwen, Mistral, Gemma
+    "ln_2",                      # GPT-2, GPT-NeoX
+    "final_layer_norm",          # OPT-style block
+    "ffn_norm",                  # custom wrappers
+)
+
 def _get_submodule(model: torch.nn.Module, path: str) -> torch.nn.Module | None:
     obj: Any = model
     for part in path.split("."):
@@ -117,6 +127,22 @@ def locate_input_norm(
             # Verify it's a module with learnable parameters
             if getattr(norm, "weight", None) is not None or getattr(norm, "bias", None) is not None:
                 return norm
+    return None
+
+
+def locate_ffn_input_norm(
+    model: torch.nn.Module,
+) -> torch.nn.Module | None:
+    """Find the FFN input norm (norm between attention and MLP) for the final block."""
+    try:
+        block = _last_transformer_block(model)
+    except RuntimeError:
+        return None
+    for attr in _FFN_NORM_ATTRS:
+        if (norm := getattr(block, attr, None)) is None:
+            continue
+        if getattr(norm, "weight", None) is not None or getattr(norm, "bias", None) is not None:
+            return norm
     return None
 
 # Try to capture common norm families: rmsnorm, layernorm, gemma_rms
@@ -355,13 +381,16 @@ def export_forward_attr_weights(
         "rotate_v": None,
     }
     rope_theta = getattr(cfg, "rope_theta", None)
+    rope_scaling = getattr(cfg, "rope_scaling", None)
+    # Some configs (e.g. vLLM's Qwen2) expose the RoPE base only inside ``rope_scaling``.
+    if rope_theta is None and isinstance(rope_scaling, dict):
+        rope_theta = rope_scaling.get("rope_theta")
     if rope_theta is not None:
         rope_spec["has_rope"] = True
         rope_spec["rope_theta"] = float(rope_theta)
     partial_rotary = getattr(cfg, "partial_rotary_factor", None)
     if partial_rotary is not None:
         rope_spec["partial_rotary_factor"] = float(partial_rotary)
-    rope_scaling = getattr(cfg, "rope_scaling", None)
     if rope_scaling is not None:
         rope_spec["has_rope"] = True
         rope_spec["rope_scaling"] = (
@@ -526,8 +555,9 @@ def _slice_capture(
             k: live[k][:n].detach()
             for k in _REQUIRED_CAPTURE_KEYS
         }
-        if "h_input" in live:
-            out["h_input"] = live["h_input"][:n].detach()
+        for key in _OPTIONAL_CAPTURE_KEYS:
+            if key in live:
+                out[key] = live[key][:n].detach()
         return out
 
     qsl, flat_ids = meta["query_start_loc"], meta["input_ids"]
@@ -540,8 +570,9 @@ def _slice_capture(
                 k: live[k][start : start + n].detach()
                 for k in _REQUIRED_CAPTURE_KEYS
             }
-            if "h_input" in live:
-                out["h_input"] = live["h_input"][start : start + n].detach()
+            for key in _OPTIONAL_CAPTURE_KEYS:
+                if key in live:
+                    out[key] = live[key][start : start + n].detach()
             return out
     raise RuntimeError(match_msg)
 
@@ -742,8 +773,16 @@ def merge_real_and_teacher_captures(
     """
     if not capture_ready(real_capture):
         raise RuntimeError("forward_attr: real prefill capture required for prompt merge.")
-    merged = {key: teacher_capture[key].clone() for key in _CAPTURE_KEYS}
-    for key in merged:
+    merged: dict[str, torch.Tensor] = {}
+    for key, t in teacher_capture.items():
+        if torch.is_tensor(t):
+            merged[key] = t.clone()
+    for key in real_capture:
+        if key not in merged and torch.is_tensor(real_capture[key]):
+            merged[key] = real_capture[key].clone()
+    for key in tuple(merged.keys()):
+        if key not in real_capture:
+            continue
         end = min(prompt_len, real_capture[key].size(0), merged[key].size(0))
         merged[key][:end] = real_capture[key][:end]  # prompt slice from scheduler path
     return merged
@@ -768,8 +807,9 @@ def expand_suffix_capture(
     if not capture_ready(suffix_capture):
         raise RuntimeError("forward_attr: suffix capture missing Q/K/V/h_L.")
     out: dict[str, torch.Tensor] = {}
-    for key in _CAPTURE_KEYS:
-        t = suffix_capture[key]
+    for key, t in suffix_capture.items():
+        if not torch.is_tensor(t):
+            continue
         # [0:prompt_len) placeholder; [prompt_len:] filled from suffix-only forward.
         full = torch.zeros(
             (prompt_len + t.size(0),) + tuple(t.shape[1:]), dtype=t.dtype, device=t.device
@@ -1283,6 +1323,7 @@ def register_forward_attr_hooks(
     # Locate last transformer block and last attention module
     last_layer = _last_transformer_block(model)
     last_attn = _attention_on_block(last_layer)
+    ffn_input_norm = locate_ffn_input_norm(model)
 
     # Record batch metadata for multi-request slicing
     def on_qkv() -> None:
@@ -1301,14 +1342,40 @@ def register_forward_attr_hooks(
         require_attn_metadata=require_attn_metadata,
     )
 
+    def layer_input_prehook(_m, _i) -> None:
+        if not enabled() or _skip_forward_capture():
+            return
+        if require_attn_metadata and _forward_context_att_metadata() is None:
+            return
+        # Capture the block's residual-stream input BEFORE the layer runs. vLLM's fused
+        # add+norm rewrites the ``residual`` tensor in-place during forward, so reading the
+        # layer inputs in a post-forward hook observes a mutated (wrong) residual stream and
+        # corrupts the Norm1 base used by the attention VJP. A pre-hook clones the true input.
+        dest["h_input"] = _decoder_layer_input(_i).detach().clone()
+
     def layer_hook(_m, _i, output: Any) -> None:
         if not enabled() or _skip_forward_capture():
             return
         if require_attn_metadata and _forward_context_att_metadata() is None:
             return
-        dest["h_input"] = _decoder_layer_input(_i).detach().clone()
         dest["h_L"] = _decoder_layer_hidden(output).detach().clone()
         on_qkv()
 
+    hooks.append(last_layer.register_forward_pre_hook(layer_input_prehook))  # block input
     hooks.append(last_layer.register_forward_hook(layer_hook))  # residual stream at layer L
+    if ffn_input_norm is not None:
+        def ffn_norm_prehook(_m, inputs: Any) -> None:
+            if not enabled() or _skip_forward_capture():
+                return
+            if require_attn_metadata and _forward_context_att_metadata() is None:
+                return
+            if not inputs:
+                return
+            # vLLM's fused add+norm passes (attn_out, residual); the true MLP-norm input is
+            # their sum. _decoder_layer_input sums the >=2-D tensors (and is a no-op for the
+            # single-tensor HF call), matching the residual stream h_mid we backprop through.
+            dest["h_mid"] = _decoder_layer_input(inputs).detach().clone()
+            on_qkv()
+
+        hooks.append(ffn_input_norm.register_forward_pre_hook(ffn_norm_prehook))
     return hooks
