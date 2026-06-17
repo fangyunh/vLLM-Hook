@@ -6,6 +6,8 @@
 
 **Mathematical Derivation of Gradient Scores (PDF) -- June 14, 2026.** [TH_Grad.pdf](TokenHighlighter_GradientScore_Derivation.pdf) — discussion of architectural motivations and design, mathematical principles, and implementation of the Token Highlighter algorithm.
 
+**Interactive notebook:** [`live_highlighter/live_TH.ipynb`](live_highlighter/live_TH.ipynb) — Jupyter UI for capture, token heatmap, and β mitigation.
+
 This document describes the Token Highlighter integration in vLLM-Hook: attribution of prompt tokens to an affirmation loss, driver selection, and optional embedding-level mitigation during inference.
 
 # Overview

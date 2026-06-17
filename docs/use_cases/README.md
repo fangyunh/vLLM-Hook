@@ -12,5 +12,5 @@ Each row maps a use case to its plugin code and the corresponding contributor.
 | Hidden-State Probe | `probe_hidden_states_worker.py` | `hidden_states_analyzer.py` | `demo_hiddenstate.py` | [@IRENEKO](https://github.com/IRENEKO) |
 | Science Hallucination Detector | `probe_hidden_states_worker.py` † | `science_hallucination_analyzer.py` | `demo_scihal.py` | [@IRENEKO](https://github.com/IRENEKO) |
 | [Spotlight](spotlight.md) | `spotlight_worker.py` | — | `demo_spotlight.py` | [@danishcontractor](https://github.com/danishcontractor) |
-| [Token Highlighter](./TH_markdown_report.md) | `highlighter_worker.py` | `highlighter_analyzer.py` | `demo_token_highlighter.py` | [@asanth7](https://github.com/asanth7) |
+| [Token Highlighter](live_highlighter/TokenHighlighter.md) | `highlighter_worker.py` | `highlighter_analyzer.py` | `demo_token_highlighter.py`, [`live_TH.ipynb`](live_highlighter/live_TH.ipynb) | [@asanth7](https://github.com/asanth7) |
 > † Reuses an existing worker.

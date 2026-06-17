@@ -142,10 +142,10 @@ class HookLLM:
         if not isinstance(prompts, list):
             prompts = [prompts]
 
+        highlighter_mode = kwargs.pop("highlighter_mode", None)
+
         if sampling_params is None:
             sampling_params = SamplingParams(**kwargs)
-
-        highlighter_mode = kwargs.pop("highlighter_mode", None)
 
         if (
             hook

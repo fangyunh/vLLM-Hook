@@ -10,6 +10,7 @@ os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 from vllm_hook_plugins import HookLLM
+from vllm_hook_plugins.utils.TokenHighlighter.utils import load_highlighter_artifact
 
 cache_dir = "./cache/"
 model = "Qwen/Qwen2-1.5B-Instruct"
@@ -38,7 +39,7 @@ llm = HookLLM(
     enforce_eager=True,
     enable_prefix_caching=False,
     enable_hook=True,
-    tensor_parallel_size=1,
+    tensor_parallel_size=1
 )
 llm._highlighter_config["target_token_ids"] = target_ids
 
@@ -54,7 +55,7 @@ test_cases = [
     "Please tell me the history of Walt Disney."
 ]
 
-print("***Computing affirmation loss gradients (forward_attr)***")
+analyzer_spec = {"top_k": 5, "artifact_wait_seconds": 1.0}
 
 for prompt in test_cases:
     print("=" * 50)
@@ -62,7 +63,10 @@ for prompt in test_cases:
     output = llm.generate(
         prompt, highlighter_mode="capture", temperature=0.0, max_tokens=32
     )
-    analysis = llm.analyze(analyzer_spec={"top_k": 5})
+    analysis = llm.analyze(analyzer_spec=analyzer_spec)
+    highlighter_trace = load_highlighter_artifact(
+        llm._hook_dir, analysis["run_id"], "highlighter.pt"
+    )
     print(f"Output: {output[0].outputs[0].text.strip()}")
 
     if analysis and analysis.get("results"):
@@ -81,8 +85,7 @@ for prompt in test_cases:
                 else:
                     driver_tokens.append("<na>")
 
-            print(
-                f"Applied driver tokens (in generation): {driver_tokens}")
+            print(f"Applied driver tokens (in generation): {driver_tokens}")
 
             # Decode the driver tokens as identified by the analyzer, if different from the worker
             if analysis_positions != driver_positions:
