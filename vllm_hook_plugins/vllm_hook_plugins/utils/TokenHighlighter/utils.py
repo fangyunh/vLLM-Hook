@@ -1379,3 +1379,140 @@ def register_forward_attr_hooks(
 
         hooks.append(ffn_input_norm.register_forward_pre_hook(ffn_norm_prehook))
     return hooks
+
+
+# ---------------------------------------------------------------------------
+# User-facing generation wrappers
+# ---------------------------------------------------------------------------
+
+
+def load_highlighter_config(config_file: str) -> dict:
+    """Load the ``highlighter`` section from a model config JSON file."""
+    import json
+
+    with open(config_file, "r", encoding="utf-8") as f:
+        return dict(json.load(f).get("highlighter", {}))
+
+
+def generate_with_highlighter(
+    llm,
+    prompts,
+    mode: str = "capture",
+    highlighter_config: dict | None = None,
+    sampling_params=None,
+    run_id: str | None = None,
+    scores_run_id: str | None = None,
+    save_to_disk: bool | None = None,
+    **kwargs,
+):
+    """Generate with Token Highlighter capture or mitigation.
+
+    Works with ``HookLLM`` configured with ``worker_name="token_highlighter"``.
+    Installs worker hooks, sets per-request ``extra_args``, runs ``HookLLM.generate``,
+    and flushes disk artifacts when ``save_to_disk`` is enabled (capture mode).
+    """
+    import copy
+    import os
+    import uuid
+
+    from vllm import SamplingParams
+
+    if isinstance(prompts, str):
+        prompts = [prompts]
+
+    mode = str(mode).strip().lower()
+    if save_to_disk is None:
+        save_to_disk = mode == "capture"
+
+    if run_id is None:
+        if mode == "mitigate" and getattr(llm, "_last_run_id", None):
+            run_id = llm._last_run_id
+        else:
+            run_id = str(uuid.uuid4())
+
+    hook_dir = getattr(llm, "_hook_dir", None)
+    if not hook_dir:
+        raise ValueError("llm._hook_dir missing: pass a HookLLM instance")
+
+    run_id_file = os.path.join(hook_dir, "RUN_ID.txt")
+    base_params = sampling_params or SamplingParams(**kwargs)
+    if isinstance(base_params, list):
+        if len(base_params) != len(prompts):
+            raise ValueError(
+                f"sampling_params list length ({len(base_params)}) "
+                f"must match prompts length ({len(prompts)})"
+            )
+        sp_list = list(base_params)
+    else:
+        sp_list = [base_params] * len(prompts)
+
+    new_sp_list = []
+    for sp in sp_list:
+        sp = copy.copy(sp)
+        extra = dict(sp.extra_args or {})
+        if highlighter_config:
+            extra["highlighter"] = dict(highlighter_config)
+        extra["highlighter_mode"] = mode
+        extra["hook_dir"] = hook_dir
+        extra["run_id"] = run_id
+        extra["run_id_file"] = run_id_file
+        if save_to_disk:
+            extra["save_to_disk"] = True
+        if mode == "mitigate":
+            extra.setdefault("scores_run_id", scores_run_id or run_id)
+        sp.extra_args = extra
+        new_sp_list.append(sp)
+
+    sp_arg = new_sp_list[0] if len(new_sp_list) == 1 else new_sp_list
+
+    engine = getattr(llm, "llm", llm)
+    if not getattr(engine, "_vllm_hook_installed", False):
+        install_hooks = getattr(engine, "collective_rpc", None)
+        if callable(install_hooks):
+            print("Installing hooks via collective_rpc")
+            install_hooks("install_hooks")
+            setattr(engine, "_vllm_hook_installed", True)
+
+    outputs = llm.generate(
+        prompts,
+        sampling_params=sp_arg,
+        use_hook=True,
+        save_to_disk=save_to_disk,
+        run_id=run_id,
+    )
+    if not isinstance(outputs, list):
+        outputs = list(outputs)
+
+    if save_to_disk:
+        req_ids = [output.request_id for output in outputs]
+        if req_ids:
+            flush_disk = getattr(engine, "collective_rpc", None)
+            if callable(flush_disk):
+                print("Flushing disk via collective_rpc")
+                flush_disk("flush_disk", args=(req_ids, run_id, hook_dir))
+
+    return outputs
+
+
+def analyze_with_highlighter(
+    llm,
+    analyzer_spec: dict | None = None,
+    *,
+    highlighter_config: dict | None = None,
+    run_id: str | None = None,
+    run_ids: list[str] | None = None,
+    probes: dict | None = None,
+):
+    """Run the Token Highlighter analyzer with optional config defaults."""
+    spec = dict(analyzer_spec or {})
+    if highlighter_config:
+        spec.setdefault("mode", highlighter_config.get("mode"))
+        spec.setdefault("alpha", highlighter_config.get("alpha"))
+        spec.setdefault("threshold_k", highlighter_config.get("threshold_k"))
+        spec.setdefault("soft_beta", highlighter_config.get("beta"))
+    return llm.analyze(
+        analyzer_spec=spec,
+        probes=probes,
+        run_id=run_id,
+        run_ids=run_ids,
+    )

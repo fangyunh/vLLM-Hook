@@ -11,6 +11,11 @@ from vllm_hook_plugins.analyzers.core_reranker_analyzer import CorerAnalyzer
 from vllm_hook_plugins.analyzers.hidden_states_analyzer import HiddenStatesAnalyzer
 from vllm_hook_plugins.analyzers.science_hallucination_analyzer import ScienceHallucinationAnalyzer
 from vllm_hook_plugins.utils.spotlight.utils import generate_with_spotlight
+from vllm_hook_plugins.utils.TokenHighlighter.utils import (
+    analyze_with_highlighter,
+    generate_with_highlighter,
+    load_highlighter_config,
+)
 from vllm_hook_plugins.analyzers.highlighter_analyzer import HighlighterAnalyzer
 
 
@@ -44,6 +49,9 @@ __all__ = [
     "HiddenStatesAnalyzer",
     "ScienceHallucinationAnalyzer",
     "generate_with_spotlight",
+    "generate_with_highlighter",
+    "analyze_with_highlighter",
+    "load_highlighter_config",
     "HighlighterAnalyzer",
     "register_plugins"
 ]

@@ -47,12 +47,12 @@ Artifacts: `{hook_dir}/{run_id}/tp_rank_0/highlighter_activations.pt` and `highl
 
 | Component             | Role                                                                             |
 | --------------------- | -------------------------------------------------------------------------------- |
-| `HookLLM`             | Single GPU engine; forwards mode, run id, hook dir, and config via `extra_args`. |
+| `HookLLM`             | Single GPU engine; `generate_with_highlighter` wires mode, run id, hook dir, and config via `extra_args`. |
 | `HighlighterWorker`   | Capture hooks, trace I/O, embedding soft-removal at mitigate prefill.            |
 | `HighlighterAnalyzer` | Closed-form `forward_attr` from disk traces.                                     |
 
 
-Capture and mitigate share one `HookLLM` instance and one worker class. Mitigation is a later `generate(..., highlighter_mode="mitigate")` call that reuses the capture `run_id`.
+Capture and mitigate share one `HookLLM` instance and one worker class. Mitigation is a later `generate_with_highlighter(..., mode="mitigate")` call that reuses the capture `run_id`.
 
 Implementation: `workers/highlighter_worker.py`, `analyzers/highlighter_analyzer.py`, `utils/TokenHighlighter/`.
 
@@ -69,7 +69,7 @@ Implementation: `workers/highlighter_worker.py`, `analyzers/highlighter_analyzer
 
 Each scheduling step runs pre-forward setup, `orig_execute_model(...)`, then post-forward bookkeeping (`_highlighter_execute_model_step`). The analyzer runs in the driver process on disk artifacts.
 
-Configuration flows from `model_configs/token_highlighter/*.json` to `HookLLM._highlighter_config` to `extra_args["highlighter"]`. Prefix caching should be disabled or cleared between capture and mitigate on the same prompt.
+Configuration flows from `model_configs/token_highlighter/*.json` via `load_highlighter_config()` into `highlighter_config=` on `generate_with_highlighter` / `analyze_with_highlighter` (wired to `extra_args["highlighter"]`). Prefix caching should be disabled or cleared between capture and mitigate on the same prompt.
 
 ## Capture and scoring
 
@@ -180,29 +180,47 @@ Per-model defaults: `model_configs/token_highlighter/<model_short>.json`.
 | `reselect_drivers`       | `false`                        | Recompute drivers at mitigate time.                  |
 
 
-### Per-request and analyzer parameters
+### Wrapper API (`generate_with_highlighter` / `analyze_with_highlighter`)
+
+Import from `vllm_hook_plugins` (or `vllm_hook_plugins.utils.TokenHighlighter.utils`). Load JSON defaults with `load_highlighter_config(path)` and pass `highlighter_config=hl_cfg` on each call.
 
 
-| Parameter          | Role                                                     |
-| ------------------ | -------------------------------------------------------- |
-| `highlighter_mode` | `"capture"` or `"mitigate"` (required).                  |
-| `run_id`           | Artifact directory key; must match capture for mitigate. |
-| `scores_run_id`    | Alternate run id for `highlighter.pt`.                   |
+| Parameter            | Role                                                     |
+| -------------------- | -------------------------------------------------------- |
+| `mode`               | `"capture"` or `"mitigate"` (required on generate).      |
+| `highlighter_config` | Dict from JSON + runtime overrides (`target_token_ids`, `beta`, …). |
+| `run_id`             | Artifact directory key; must match capture for mitigate. |
+| `scores_run_id`      | Alternate run id for `highlighter.pt` (mitigate only).   |
 
 
-`HookLLM.analyze(analyzer_spec={...})` merges `mode`, `alpha`, `threshold_k`, and `beta` from the loaded JSON when omitted.
+`analyze_with_highlighter(..., highlighter_config=hl_cfg)` merges `mode`, `alpha`, `threshold_k`, and `beta` from the config when omitted from `analyzer_spec`.
 
 ### Minimal API sequence
 
 ```python
+from vllm_hook_plugins import (
+    HookLLM,
+    analyze_with_highlighter,
+    generate_with_highlighter,
+    load_highlighter_config,
+)
+
+hl_cfg = load_highlighter_config("model_configs/token_highlighter/Qwen2-1.5B-Instruct.json")
+hl_cfg["target_token_ids"] = tokenizer.encode(hl_cfg["target_phrase"], add_special_tokens=False)
+
 llm = HookLLM(model=..., worker_name="token_highlighter", analyzer_name="token_highlighter", ...)
 
-out_cap = llm.generate(prompt, highlighter_mode="capture", temperature=0.0, max_tokens=32)
+out_cap = generate_with_highlighter(
+    llm, prompt, mode="capture", highlighter_config=hl_cfg, temperature=0.0, max_tokens=32
+)
 capture_run_id = llm._last_run_id
 
-stats = llm.analyze(analyzer_spec={"top_k": 5})
+stats = analyze_with_highlighter(llm, analyzer_spec={"top_k": 5}, highlighter_config=hl_cfg)
 
-out_mit = llm.generate(prompt, highlighter_mode="mitigate", run_id=capture_run_id, temperature=0.0, max_tokens=32)
+out_mit = generate_with_highlighter(
+    llm, prompt, mode="mitigate", highlighter_config=hl_cfg,
+    run_id=capture_run_id, temperature=0.0, max_tokens=32,
+)
 ```
 
 Demos: `examples/demo_token_highlighter.py`, `notebooks/demo_token_highlighter.ipynb`, `notebooks/demo_token_highlighter_colab.ipynb`.

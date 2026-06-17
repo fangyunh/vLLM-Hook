@@ -134,8 +134,7 @@ async def _patched_generate(
     wants_hs = extra.get("output_hidden_states") is not None
     wants_qk = extra.get("output_qk") is not None
     wants_steer = isinstance(extra.get("steer"), dict)
-    wants_highlighter = bool(extra.get("highlighter_mode"))
-    needs_hooks = wants_hs or wants_qk or wants_steer or wants_highlighter
+    needs_hooks = wants_hs or wants_qk or wants_steer
     save_to_disk = bool(extra.get("save_to_disk"))
 
     if needs_hooks and not getattr(self, "_vllm_hook_installed", False):
@@ -166,7 +165,7 @@ async def _patched_generate(
                         output.probes = probes
             yield output
     finally:
-        if needs_hooks and not wants_steer and not wants_highlighter and not save_to_disk:
+        if needs_hooks and not wants_steer and not save_to_disk:
             await self.collective_rpc("clear_captured_states", args=(request_id,))
 
 
@@ -193,7 +192,6 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
         (sp.extra_args or {}).get("output_hidden_states") is not None
         or (sp.extra_args or {}).get("output_qk") is not None
         or bool((sp.extra_args or {}).get("steer"))
-        or bool((sp.extra_args or {}).get("highlighter_mode"))
         for sp in params_list
     )
 
