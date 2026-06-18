@@ -1,5 +1,8 @@
 """Path resolution for standalone installs and in-repo development.
 
+In the vLLM-Hook repo the ``live_highlighter`` package lives at
+``notebooks/demo_token_highlighter/live_highlighter/``.
+
 Precedence for **writes** (``download_dir``, hook artifacts under ``_v1_qk_peeks``):
 
 1. ``cache_dir`` argument to :func:`resolve_runtime_paths`
@@ -19,6 +22,7 @@ from pathlib import Path
 
 ENV_CACHE = "LIVE_HIGHLIGHTER_CACHE"
 ENV_CONFIG = "LIVE_HIGHLIGHTER_CONFIG"
+IN_REPO_PACKAGE_REL = Path("notebooks") / "demo_token_highlighter" / "live_highlighter"
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,25 @@ def find_repo_root(cwd: Path | str | None = None) -> Path | None:
   for root in (start, *start.parents):
     if (root / "vllm_hook_plugins").is_dir() and (root / "model_configs").is_dir():
       return root
+  return None
+
+
+def find_live_highlighter_dir(
+  *,
+  cwd: Path | str | None = None,
+  repo_root: Path | None = None,
+) -> Path | None:
+  """Return the in-repo ``live_highlighter`` package directory when present."""
+  root = repo_root if repo_root is not None else find_repo_root(cwd)
+  if root is not None:
+    candidate = (root / IN_REPO_PACKAGE_REL).resolve()
+    if (candidate / "setup.py").is_file():
+      return candidate
+
+  start = Path(cwd or Path.cwd()).resolve()
+  for base in (start, *start.parents):
+    if base.name == "live_highlighter" and (base / "setup.py").is_file():
+      return base.resolve()
   return None
 
 
