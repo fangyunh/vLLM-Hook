@@ -225,11 +225,9 @@ class HookLLM:
         if probes is not None:
             return self.analyzer.analyze(analyzer_spec=analyzer_spec, probes=probes)
 
-        spec = dict(analyzer_spec or {})
-
         # Disk path: resolve run_id from args or _last_run_id fallback.
         effective_run_id = run_id or getattr(self, "_last_run_id", None)
-        return dispatch_disk_analyze(self.analyzer, spec,
+        return dispatch_disk_analyze(self.analyzer, analyzer_spec,
                                      run_id=effective_run_id, run_ids=run_ids)
 
     def close(self):

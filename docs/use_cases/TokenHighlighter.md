@@ -4,7 +4,7 @@
 
 **Paper.** [Token Highlighter: Inspecting and Mitigating Jailbreak Prompts for LLMs](https://arxiv.org/pdf/2412.18171) (arXiv:2412.18171)
 
-**Related docs.** [Gradient score derivation (PDF)](TokenHighlighter_GradientScore_Derivation.pdf) · [Interactive notebook](live_TH.ipynb)
+**Related docs.** [Gradient score derivation (PDF)](https://drive.google.com/uc?export=download&id=1gWZYZE7rgqT4GuHkmFMNJJz7RlLX4idR) (click to download) · [PDF Version](https://drive.google.com/uc?export=download&id=1LaLxYR63qnLurJI4_BpeInYw-k9IAB7A) (click to download) · [Interactive notebook](../../notebooks/demo_token_highlighter/live_highlighter/live_TH.ipynb)
 
 Token Highlighter ranks prompt tokens by their contribution to a fixed **affirmation target phrase** under teacher forcing, then optionally **mitigates** jailbreak-style completions by scaling selected **driver** embeddings by β < 1 at a subsequent prefill. This writeup covers the vLLM-Hook integration: capture, offline scoring, driver selection, and embedding-level mitigation during inference.
 
