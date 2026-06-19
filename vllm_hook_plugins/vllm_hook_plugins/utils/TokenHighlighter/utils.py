@@ -187,20 +187,64 @@ def export_input_norm_spec(norm: torch.nn.Module | None) -> dict[str, Any] | Non
     return export_norm_spec(norm, norm_placement="attn")
 
 
+def linear_weight(
+    module: torch.nn.Module,
+    *,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Return unquantized weights in ``[out_features, in_features]`` layout.
+
+    vLLM fp16 layers expose ``.weight``; AWQ/GPTQ-style layers use ``qweight`` and
+    require dequantization before the analyzer can run matmul-based influence math.
+    """
+    weight = getattr(module, "weight", None)
+    if weight is not None:
+        w = cast(torch.Tensor, weight)
+        return w if out_dtype is None else w.to(dtype=out_dtype)
+
+    try:
+        from vllm.model_executor.layers.linear import LinearBase
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            get_and_maybe_dequant_weights,
+        )
+
+        if isinstance(module, LinearBase):
+            dtype = out_dtype or torch.float16
+            return get_and_maybe_dequant_weights(module, out_dtype=dtype)
+    except Exception:
+        pass
+
+    qweight = getattr(module, "qweight", None)
+    scales = getattr(module, "scales", None)
+    qzeros = getattr(module, "qzeros", None)
+    if qweight is not None and scales is not None and qzeros is not None:
+        from vllm import _custom_ops as ops
+
+        w = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+        return w if out_dtype is None else w.to(dtype=out_dtype)
+
+    raise AttributeError(
+        f"Could not resolve weight for {type(module).__name__} "
+        f"(expected .weight or quantized qweight/scales/qzeros)."
+    )
+
+
 def lm_head_weight(model: torch.nn.Module) -> torch.Tensor:
     """Return unembedding / ``lm_head`` weights for affirmation loss gradients."""
     getter = getattr(model, "get_output_embeddings", None)
     if callable(getter):
         out = getter()
-        if isinstance(out, torch.nn.Module) and hasattr(out, "weight"):
-            return cast(torch.Tensor, out.weight)
+        if isinstance(out, torch.nn.Module):
+            try:
+                return linear_weight(out)
+            except AttributeError:
+                pass
     lm_head = getattr(model, "lm_head", None)
-    if (
-        isinstance(lm_head, torch.nn.Module)
-        and type(lm_head).__name__ != "PPMissingLayer"
-        and hasattr(lm_head, "weight")
-    ):
-        return cast(torch.Tensor, lm_head.weight)
+    if isinstance(lm_head, torch.nn.Module) and type(lm_head).__name__ != "PPMissingLayer":
+        try:
+            return linear_weight(lm_head)
+        except AttributeError:
+            pass
     raise RuntimeError(f"Could not resolve output embeddings for {type(model).__name__}.")
 
 
@@ -213,25 +257,25 @@ def get_attn_key_value_weights(
     Handles fused ``qkv_proj`` (vLLM) vs separate projections (HF-style layouts).
     """
     attn = cast(Any, last_attn)
-    w_o = cast(torch.Tensor, attn.o_proj.weight)
+    w_o = linear_weight(attn.o_proj)
     # Fused QKV proj: common with vLLM models
     if hasattr(last_attn, "qkv_proj"):
-        qkv_w = cast(torch.Tensor, attn.qkv_proj.weight)
+        qkv_w = linear_weight(attn.qkv_proj)
         q_size, kv_size = int(attn.q_size), int(attn.kv_size)
         return w_o, qkv_w[q_size + kv_size : q_size + 2 * kv_size], qkv_w[q_size : q_size + kv_size]
     
     # Separate QKV projections: common with HF models
-    return w_o, cast(torch.Tensor, attn.v_proj.weight), cast(torch.Tensor, attn.k_proj.weight)
+    return w_o, linear_weight(attn.v_proj), linear_weight(attn.k_proj)
 
 
 def get_attn_query_weight(last_attn: torch.nn.Module) -> torch.Tensor:
     """Return ``W_Q`` for the last attention module."""
     attn = cast(Any, last_attn)
     if hasattr(last_attn, "qkv_proj"):
-        qkv_w = cast(torch.Tensor, attn.qkv_proj.weight)
+        qkv_w = linear_weight(attn.qkv_proj)
         q_size = int(attn.q_size)
         return qkv_w[:q_size]
-    return cast(torch.Tensor, attn.q_proj.weight)
+    return linear_weight(attn.q_proj)
 
 
 # ---------------------------------------------------------------------------

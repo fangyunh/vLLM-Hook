@@ -14,6 +14,7 @@ from vllm_hook_plugins.utils.TokenHighlighter.utils import (
     export_input_norm_spec,
     get_attn_query_weight,
     get_attn_key_value_weights,
+    linear_weight,
     locate_ffn_input_norm,
     locate_final_norm,
     locate_input_norm,
@@ -67,7 +68,7 @@ def _activation_value(ffn: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 def _linear_forward(module: torch.nn.Module, x: torch.Tensor, *, device: torch.device) -> torch.Tensor:
     """Evaluate a linear projection including bias when present."""
-    w = module.weight.to(device=device, dtype=x.dtype)
+    w = linear_weight(module, out_dtype=x.dtype).to(device=device)
     y = x @ w.T
     b = getattr(module, "bias", None)
     if b is not None:
@@ -104,8 +105,8 @@ def _ffn_jacobian_vjp(
     bias drops out of the VJP. Returns ``None`` for unrecognized layouts so the caller can fall back.
     We compute a VJP with the incoming boundary gradient signal g_out to avoid building the full Jacobian matrix in memory.
     """
-    def w(mod: torch.nn.Module) -> torch.Tensor | torch.nn.Module:
-        return mod.weight.to(device=device, dtype=x.dtype)
+    def w(mod: torch.nn.Module) -> torch.Tensor:
+        return linear_weight(mod, out_dtype=x.dtype).to(device=device)
 
     # Second (output) projection -> dL/d(activation output) in the intermediate space.
     down = next((getattr(ffn, n) for n in ("down_proj", "c_proj", "fc2", "w2") if hasattr(ffn, n)), None)
