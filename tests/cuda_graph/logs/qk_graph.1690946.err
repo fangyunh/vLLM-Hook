@@ -1,35 +1,0 @@
-/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
-  import pynvml  # type: ignore[import]
-/u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
-  import pynvml  # type: ignore[import]
-(EngineCore pid=3529345) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-(EngineCore pid=3529345) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:35<00:00, 35.15s/it]
-(EngineCore pid=3529345) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:35<00:00, 35.15s/it]
-(EngineCore pid=3529345) 
-(EngineCore pid=3529345) /u/yunhuafang/miniconda3/envs/vllm_hook_env/lib/python3.11/site-packages/torch/_inductor/compile_fx.py:322: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
-(EngineCore pid=3529345)   warnings.warn(
-(EngineCore pid=3529345) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   2%|▏         | 1/51 [00:00<00:07,  6.74it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   4%|▍         | 2/51 [00:00<00:06,  7.22it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   6%|▌         | 3/51 [00:00<00:06,  7.73it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   8%|▊         | 4/51 [00:00<00:05,  8.21it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  10%|▉         | 5/51 [00:00<00:05,  8.62it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  12%|█▏        | 6/51 [00:01<00:09,  4.55it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  14%|█▎        | 7/51 [00:01<00:08,  5.32it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  16%|█▌        | 8/51 [00:01<00:06,  6.18it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  20%|█▉        | 10/51 [00:01<00:05,  7.63it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  24%|██▎       | 12/51 [00:01<00:04,  8.66it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  27%|██▋       | 14/51 [00:01<00:03,  9.38it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  31%|███▏      | 16/51 [00:02<00:03,  9.78it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  35%|███▌      | 18/51 [00:02<00:03, 10.45it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  39%|███▉      | 20/51 [00:02<00:02, 10.93it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  43%|████▎     | 22/51 [00:02<00:02, 10.33it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  47%|████▋     | 24/51 [00:02<00:02, 11.13it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████     | 26/51 [00:02<00:02, 11.74it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  55%|█████▍    | 28/51 [00:03<00:01, 11.92it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  59%|█████▉    | 30/51 [00:03<00:01, 12.73it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  63%|██████▎   | 32/51 [00:03<00:01, 13.21it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  67%|██████▋   | 34/51 [00:03<00:01, 12.15it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  71%|███████   | 36/51 [00:03<00:01, 13.23it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  75%|███████▍  | 38/51 [00:03<00:00, 13.81it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  78%|███████▊  | 40/51 [00:03<00:00, 12.81it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  82%|████████▏ | 42/51 [00:04<00:00, 13.93it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  86%|████████▋ | 44/51 [00:04<00:00, 15.23it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  90%|█████████ | 46/51 [00:04<00:00, 13.97it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  94%|█████████▍| 48/51 [00:04<00:00, 14.99it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  98%|█████████▊| 50/51 [00:04<00:00, 16.17it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:04<00:00, 10.57it/s]
-Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 68.38it/s]
-Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:02<00:00,  2.90s/it, est. speed input: 12.43 toks/s, output: 2.42 toks/s]Processed prompts: 100%|██████████| 1/1 [00:02<00:00,  2.90s/it, est. speed input: 12.43 toks/s, output: 2.42 toks/s]Processed prompts: 100%|██████████| 1/1 [00:02<00:00,  2.90s/it, est. speed input: 12.43 toks/s, output: 2.42 toks/s]
-Traceback (most recent call last):
-  File "/u/yunhuafang/vLLM-Hook/tests/cuda_graph/tests/qk_graph/test_qk_graph_capture.py", line 364, in <module>
-    main()
-  File "/u/yunhuafang/vLLM-Hook/tests/cuda_graph/tests/qk_graph/test_qk_graph_capture.py", line 226, in main
-    stats = llm.analyze(
-            ^^^^^^^^^^^^
-  File "/u/yunhuafang/vLLM-Hook/vllm_hook_plugins/vllm_hook_plugins/hook_llm.py", line 229, in analyze
-    return dispatch_disk_analyze(self.analyzer, analyzer_spec,
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/u/yunhuafang/vLLM-Hook/vllm_hook_plugins/vllm_hook_plugins/run_utils.py", line 464, in dispatch_disk_analyze
-    return analyzer.analyze(**kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/u/yunhuafang/vLLM-Hook/vllm_hook_plugins/vllm_hook_plugins/analyzers/attention_tracker_analyzer.py", line 24, in analyze
-    attention_weights = self.compute_attention_from_qk(run_id, probes=probes)
-                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/u/yunhuafang/vLLM-Hook/vllm_hook_plugins/vllm_hook_plugins/analyzers/attention_tracker_analyzer.py", line 40, in compute_attention_from_qk
-    cache = load_and_merge_qk_cache(self.hook_dir, run_id)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/u/yunhuafang/vLLM-Hook/vllm_hook_plugins/vllm_hook_plugins/run_utils.py", line 357, in load_and_merge_qk_cache
-    raise FileNotFoundError(
-FileNotFoundError: No safetensors artifacts found for run_id=c0e50e16-5ab8-450d-9bc5-486dc302ec77 under /dev/shm/vllm_hook
-[rank0]:[W608 12:48:58.516809515 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
