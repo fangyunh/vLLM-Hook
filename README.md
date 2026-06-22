@@ -29,7 +29,7 @@ This includes dynamic analysis of:
 
 ## 📊 Performance Analysis
 
-For a detailed benchmark comparing **vLLM-Hook** against **Native vLLM Eagle** (`ExampleHiddenStatesConnector`) for hidden state extraction, see [`Numerical_Analysis/`](Numerical_Analysis/README.md).
+For a detailed benchmark comparing **vLLM-Hook** against **Native vLLM Eagle** (`ExampleHiddenStatesConnector`) for hidden state extraction, see [`docs/numerical_analysis/`](docs/numerical_analysis/README.md).
 
 Key takeaways:
 - vLLM-Hook (`last_token`) offers significantly lower and prompt-length-invariant latency when only the final-position representation is needed
@@ -40,7 +40,7 @@ Key takeaways:
 
 ## 🧩 Supported Configurations
 
-Each use case (e.g. attention tracker, activation steering, hidden states extraction, etc) runs across a Cartesian product of configuration axes — execution path (`offline` / `vllm serve`), storage (`rpc` / `disk` / `shm`), disk format (`pt` / `safetensors`), and save mode (`sync` / `async`). See [`configs.md`](configs.md) for code snippets showing how to select each config.
+Each use case (e.g. attention tracker, activation steering, hidden states extraction, etc) runs across a Cartesian product of configuration axes — execution path (`offline` / `vllm serve`), storage (`rpc` / `disk` / `shm`), disk format (`pt` / `safetensors`), and save mode (`sync` / `async`). See [`docs/configs.md`](docs/configs.md) for code snippets showing how to select each config.
 
 ---
 
@@ -49,13 +49,13 @@ Each use case (e.g. attention tracker, activation steering, hidden states extrac
 
 ```bash
 git clone https://github.com/IBM/vLLM-Hook.git
-cd vLLm.hook
+cd vLLM-Hook
 ```
 
 ### 2. (Optional) Create an environment 
 
 ```bash
-conda create -n vllm_hook_env
+conda create -n vllm_hook_env python=3.12 pip
 conda activate vllm_hook_env
 ```
 
@@ -87,7 +87,7 @@ Kernel → Change Kernel → vllm_hook_env
 
 ## 👉 Usage Examples (Notebook / CLI)
 
-You can also use the included **`examples/`** and/or **`notebooks/`** directories to explore different functionalities.
+You can also use the included **`examples/`** and/or **`notebooks/`** directories to explore different functionalities. For the full list of use cases, see [`docs/use_cases/`](docs/use_cases/README.md).
 
 ### 1. Attention Tracker (In-Model Safety Guardrail)
 
@@ -102,7 +102,7 @@ python examples/demo_attntracker.py
 Notebook 📓: `notebooks/demo_corer.ipynb` <br />
 CLI 🧰 : 
 ```bash
-python examples/demo_actsteer.py
+python examples/demo_corer.py
 ```
 
 ### 3. Activation Steering (Enhanced instruction following via activation steering)
@@ -110,7 +110,7 @@ python examples/demo_actsteer.py
 Notebook 📓: `notebooks/demo_actsteer.ipynb` <br />
 CLI 🧰 : 
 ```bash
-python examples/demo_corer.py
+python examples/demo_actsteer.py
 ```
 
 You can customize model configurations in the `model_configs/` folder, e.g.:
@@ -161,7 +161,7 @@ We welcome contributions from the community!
 ### Guidelines:
 - Users are encouraged to define new worker/analyzer, but should not touch hook_llm
 - Include examples and documentation for new features  
-- The registry will be updated by the admin
+- New use cases must be added to [`docs/use_cases/README.md`](docs/use_cases/README.md) with the contributor's GitHub handle
 
 ---
 

@@ -4,8 +4,7 @@ import torch
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from vllm_hook_plugins._profiler import PROF
-from vllm_hook_plugins.workers._common import iter_matched_modules
-from vllm_hook_plugins.workers.probe_hidden_states_worker import match_layer
+from vllm_hook_plugins.workers._common import iter_matched_modules, match_layer
 
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig

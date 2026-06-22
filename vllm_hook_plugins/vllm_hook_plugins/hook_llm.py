@@ -9,6 +9,7 @@ from vllm import LLM, SamplingParams
 from vllm_hook_plugins.registry import PluginRegistry
 from vllm_hook_plugins.run_utils import dispatch_disk_analyze
 from vllm_hook_plugins._profiler import PROF
+from vllm_hook_plugins.shm_utils import teardown_shm
 
 class HookLLM:
     def __init__(
@@ -141,7 +142,7 @@ class HookLLM:
     def generate(
         self,
         prompts: List[str],
-        sampling_params: Optional[SamplingParams] = None,
+        sampling_params=None,
         use_hook: Optional[bool] = None,
         save_to_disk: bool = False,
         run_id: Optional[str] = None,
@@ -155,22 +156,60 @@ class HookLLM:
         if sampling_params is None:
             sampling_params = SamplingParams(**kwargs)
 
+        if isinstance(sampling_params, list):
+            # list[SamplingParams] allows different hook params within requests
+            if len(sampling_params) != len(prompts):
+                raise ValueError(
+                    f"sampling_params list length ({len(sampling_params)}) "
+                    f"must match prompts length ({len(prompts)})"
+                )
+            sp_list = list(sampling_params)
+        else:
+            sp_list = [sampling_params] * len(prompts)
+
         if hook and self.worker_name:
             if run_id is None:
                 run_id = str(uuid.uuid4())
             with PROF.timed("hookllm.build_extra"):
-                sampling_params = copy.copy(sampling_params)
-                extra = dict(sampling_params.extra_args or {})
-                extra.update(self._build_extra_args(save_to_disk, run_id, request_extra_args=extra))
-                sampling_params.extra_args = extra
+                new_sp_list = []
+                for sp in sp_list:
+                    sp = copy.copy(sp)
+                    extra = dict(sp.extra_args or {})
+                    # Build per-request so _build_extra_args can merge any
+                    # per-request "steer" override (e.g. {"coefficient": C})
+                    # into the instance-default steer config.
+                    defaults = self._build_extra_args(save_to_disk, run_id,
+                                                       request_extra_args=extra)
+                    for k, v in defaults.items():
+                        extra.setdefault(k, v)  # per-request args win for other keys
+                    if "steer" in defaults:
+                        # _build_extra_args already merged the per-request override
+                        # into the default; overwrite the raw partial with the result.
+                        extra["steer"] = defaults["steer"]
+                    sp.extra_args = extra
+                    new_sp_list.append(sp)
+                sp_list = new_sp_list
             # Store last run_id so analyze() can find the artifact without
             # the caller needing to track it.
             self._last_run_id = run_id
+        else:
+            # clear extra_args when use_hook=False
+            new_sp_list = []
+            for sp in sp_list:
+                if sp.extra_args:
+                    sp = copy.copy(sp)
+                    sp.extra_args = None
+                new_sp_list.append(sp)
+            sp_list = new_sp_list
 
         PROF.incr("hookllm.generate.calls")
         PROF.gauge("hookllm.prompts", len(prompts))
         with PROF.timed("hookllm.generate"):
-            outputs = self.llm.generate(prompts, sampling_params)
+            if all(sp is sp_list[0] for sp in sp_list):
+                # collapse to a single sp if they are all the same
+                outputs = self.llm.generate(prompts, sp_list[0])
+            else:
+                outputs = self.llm.generate(prompts, sp_list)
 
         if hook and self.worker_name and not save_to_disk and len(outputs) > 1 and getattr(outputs[0], "probes", None) is not None:
             with PROF.timed("hookllm.merge_probes"):
@@ -186,8 +225,8 @@ class HookLLM:
                     merged[cache_key] = {}
                     for layer in all_probes[0][cache_key]:
                         first = all_probes[0][cache_key][layer]
-                        entry = {k: v for k, v in first.items() if k not in ("q", "k_all", "hs")}
-                        for tensor_key in ("q", "k_all", "hs"):
+                        entry = {k: v for k, v in first.items() if k not in ("q", "k_all", "hidden_states")}
+                        for tensor_key in ("q", "k_all", "hidden_states"):
                             if tensor_key not in first:
                                 continue
                             entry[tensor_key] = [p[cache_key][layer][tensor_key][0] for p in all_probes]
@@ -229,13 +268,17 @@ class HookLLM:
             return dispatch_disk_analyze(self.analyzer, analyzer_spec,
                                          run_id=effective_run_id, run_ids=run_ids)
 
-    def __del__(self):
+    def close(self):
+        """Release resources owned by this wrapper."""
         # Profile dump is handled by atexit in _profiler.py — see _atexit_dump.
-        # Calling PROF.dump() here is unreliable: __del__ fires during
+        # Calling PROF.dump() in __del__ is unreliable: __del__ fires during
         # interpreter shutdown when sys.meta_path is None and silent
         # ImportErrors swallow the dump entirely.
+        teardown_shm(getattr(self, "_hook_shm", None))
+        self._hook_shm = None
+
+    def __del__(self):
         try:
-            from vllm_hook_plugins.shm_utils import teardown_shm
-            teardown_shm(getattr(self, "_hook_shm", None))
-        except ImportError:
+            self.close()
+        except Exception:
             pass
