@@ -55,6 +55,11 @@ def graph_mode_enabled() -> bool:
 # Per-class originals → wrap is idempotent and reversible. One wrapped class
 # serves every layer; an instance with no host/layer attr falls straight through.
 _WRAPPED_ATTN_CLASSES: Dict[type, Any] = {}
+# Seam mode: backend-impl classes whose .forward we wrapped (e.g. FlashAttentionImpl).
+# Wrapping the impl (not the Attention module) puts capture INSIDE the opaque
+# unified_attention[_with_output] op — the eager seam vLLM already pays for — so no
+# extra splitting op / FX split point is added. Per-class originals → idempotent.
+_WRAPPED_IMPL_CLASSES: Dict[type, Any] = {}
 _HOST_ATTR = "_vllm_hook_qk_host"          # per-instance QKHookHost (buffer mode)
 _REG_ATTR = "_vllm_hook_qk_registry"       # per-instance HostRegistry back-ref
 # Op mode: a plain int layer-index attr + a module-global keep-alive sink. This
@@ -72,6 +77,8 @@ _PREFIXK_STASH = os.environ.get("VLLM_HOOK_QK_PREFIXK_STASH") == "1"
 # mid-forward — works for prefill under PIECEWISE (forward not replayed) and
 # sidesteps the input_batch staleness that made the buffer path capture nothing.
 # "buffer": static-buffer + device-routing, for the decode-under-cudagraph milestone.
+# "seam" (prototype): capture inside the attention backend impl's eager seam, sharing
+# the unified_attention split — NO extra splitting op. See docs/qk_seam_capture_prototype.md.
 _CAPTURE_MODE = os.environ.get("VLLM_HOOK_QK_CAPTURE", "op")
 
 # Set at install for the op-mode capture body.
@@ -369,6 +376,72 @@ def _wrap_attn_class(cls: type) -> None:
     cls.forward = make_wrapped(orig_forward)
 
 
+# ---------------------------------------------------------------------------
+# Seam mode (prototype): capture inside the attention backend impl's eager seam
+# ---------------------------------------------------------------------------
+
+
+def _seam_capture(q: torch.Tensor, k: torch.Tensor, layer_idx: int) -> None:
+    """Run the shared capture body from inside the attention impl's eager seam.
+
+    Called by the ``type(module.impl).forward`` wrap (``_wrap_impl_class``), which
+    executes inside the opaque ``unified_attention[_with_output]`` op — untraced and
+    re-run eagerly every step (prefill AND decode replay). q/k arrive in kernel layout
+    ``[num_tokens, heads, head_dim]``; reshape to the flat ``[num_tokens, heads*head_dim]``
+    the eager artifact / ``_capture_body`` expects (a pure view-flatten, identical data).
+
+    Bails while ``is_current_stream_capturing`` (warmup/capture forwards), mirroring the
+    qk_probe op. Best-effort: a capture bug must never crash attention.
+    """
+    capturing = False
+    try:
+        capturing = torch.cuda.is_current_stream_capturing()
+    except Exception:  # noqa: BLE001
+        pass
+    if capturing:
+        return
+    try:
+        q2d = q.reshape(q.shape[0], -1) if q.dim() > 2 else q
+        k2d = k.reshape(k.shape[0], -1) if k.dim() > 2 else k
+        _capture_body(q2d, k2d, int(layer_idx))
+    except Exception as e:  # noqa: BLE001
+        n = _capture_dbg.get("seam_err", 0)
+        if _DEBUG and n < 8:
+            _capture_dbg["seam_err"] = n + 1
+            print(f"[graph/dbg] seam capture raised: {e!r}", flush=True)
+
+
+def _wrap_impl_class(cls: type) -> None:
+    """Class-wrap an attention backend impl's ``forward`` (e.g. FlashAttentionImpl).
+
+    Idempotent per class. The impl's forward is invoked as
+    ``impl.forward(layer, query, key, value, kv_cache, attn_metadata, output, ...)`` from
+    inside the opaque attention op, so in the wrap: ``args[0]=layer`` (carries _LAYER_ATTR),
+    ``args[1]=query``, ``args[2]=key``. Capture runs BEFORE the real attention reads q/k;
+    it only clones, never mutates. An impl with no tagged layer (layer_idx<0) falls straight
+    through, so wrapping the class is harmless on non-capture ranks.
+    """
+    if cls in _WRAPPED_IMPL_CLASSES:
+        return
+    orig_forward = cls.forward
+    _WRAPPED_IMPL_CLASSES[cls] = orig_forward
+
+    def make_wrapped(orig_fwd):
+        def wrapped(self, *args, **kwargs):
+            # args[0]=layer, args[1]=query, args[2]=key (positional in every v1 impl
+            # forward; guard length defensively for signature drift across backends).
+            if len(args) >= 3:
+                layer = args[0]
+                layer_idx = getattr(layer, _LAYER_ATTR, -1)
+                if layer_idx >= 0:
+                    _seam_capture(args[1], args[2], layer_idx)
+            return orig_fwd(self, *args, **kwargs)
+
+        return wrapped
+
+    cls.forward = make_wrapped(orig_forward)
+
+
 def _resolve_max_num_batched_tokens(worker) -> int:
     """Return max_num_batched_tokens for the buffer cap, version-robustly: probe
     model_runner.scheduler_config then worker.vllm_config.scheduler_config. Raises
@@ -413,8 +486,10 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
     # Register the capture op(s) once per process, BEFORE any wrap can fire.
     register_graph_ops()
 
-    # Op mode: wire the capture body + the worker it writes into.
-    if _CAPTURE_MODE == "op":
+    # Op + seam modes: wire the SAME capture body + the worker it writes into.
+    # (Seam mode calls _capture_body directly via the impl wrap; set_capture_fn is
+    # harmless there — the qk_probe op it feeds is never emitted in seam mode.)
+    if _CAPTURE_MODE in ("op", "seam"):
         from vllm_hook_plugins.graph.ops import set_capture_fn
         global _ACTIVE_WORKER
         _ACTIVE_WORKER = worker
@@ -514,6 +589,35 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
         print(f"[graph/install] op-mode QK capture wired: {n_wired} layer(s); "
               f"should_capture={should_capture}; q_dim={q_dim} k_dim={k_dim}; "
               f"hooks_on={getattr(worker, '_default_hooks_on', 'prefill')}")
+        return None
+
+    # ---- seam mode (prototype): capture inside the attention impl's eager seam.
+    # Tag each attn instance with its layer index and class-wrap its BACKEND impl
+    # (type(module.impl)) so the shared _capture_body runs inside the opaque
+    # unified_attention op — the seam vLLM already pays for. NO splitting op is added
+    # (_hook_plugin's create-engine-config declaration is gated on capture=="op", and
+    # we skip the qk_probe append here), so the attention break count is unchanged.
+    # See docs/qk_seam_capture_prototype.md. ----
+    if _CAPTURE_MODE == "seam":
+        n_wired = 0
+        wrapped_impls: set = set()
+        if should_capture:
+            for name, module, layer_num in matched:
+                setattr(module, _LAYER_ATTR, layer_num)
+                _LAYER_TO_NAME[layer_num] = name
+                impl = getattr(module, "impl", None)
+                if impl is not None:
+                    _wrap_impl_class(type(impl))
+                    wrapped_impls.add(type(impl).__name__)
+                else:
+                    print(f"[graph/install] seam: no .impl on {name}; "
+                          f"layer {layer_num} will not capture")
+                n_wired += 1
+        worker._graph_registry = None
+        print(f"[graph/install] seam-mode QK capture wired: {n_wired} layer(s); "
+              f"should_capture={should_capture}; impls={sorted(wrapped_impls)}; "
+              f"q_dim={q_dim} k_dim={k_dim}; NO splitting op added "
+              f"(rides unified_attention seam)")
         return None
 
     # ---- buffer mode (decode-under-cudagraph milestone): static buffers ----
@@ -917,10 +1021,11 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     if getattr(model_runner, "_vllm_hook_qk_wrapped", False):
         return
 
-    # Op mode captures inside the op, so it needs no wrapper — skip it.
-    if _CAPTURE_MODE == "op":
-        print("[graph/install] capture mode=op — execute_model wrapper skipped "
-              "(capture runs inside qk_probe)")
+    # Op and seam modes capture inside the forward (qk_probe op / attention impl
+    # seam respectively), so neither needs the routing+egress wrapper — skip it.
+    if _CAPTURE_MODE in ("op", "seam"):
+        print(f"[graph/install] capture mode={_CAPTURE_MODE} — execute_model wrapper "
+              f"skipped (capture runs inside the forward)")
         return
 
     model_runner._vllm_hook_qk_wrapped = True
