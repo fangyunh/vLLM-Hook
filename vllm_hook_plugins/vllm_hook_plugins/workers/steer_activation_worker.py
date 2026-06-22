@@ -91,7 +91,8 @@ class SteerHookActWorker:
                 resolved = _resolve_steer_config(steer_arg, self._env_config_path)
                 if resolved is None:
                     continue
-                if int(resolved.get("optimal_layer", -1)) != this_layer:
+                _ol = resolved.get("optimal_layer", -1)
+                if _ol != "all" and int(_ol) != this_layer:
                     continue
                 cfg = resolved
                 break
@@ -160,3 +161,22 @@ class SteerHookActWorker:
             matched.append(name)
 
         print(f"Installed {len(self._hooks)} steering hooks on layers: {matched}")
+
+    # ------------------------------------------------------------------
+    # v0.3.0 CUDA-graph steering install (graph mode only)
+    # ------------------------------------------------------------------
+
+    def graph_install(self):
+        """Install the CUDA-graph steering path (Hybrid/op mode).
+
+        Thin delegating entry called by the Worker.load_model monkey-patch
+        (graph/install.py:patch_worker_load_model) AFTER the model is built but
+        BEFORE warm-up/compile/capture. Only reached when graph mode is armed;
+        the eager v0.2.0 register_forward_hook path is untouched.
+
+        Unlike the QK/HS capture workers (which seed egress buckets here), steering
+        produces no artifacts — it only mutates the residual — so this just wires
+        the steer_residual op via graph.install_steer.
+        """
+        from vllm_hook_plugins.graph.install_steer import install_steer_hosts
+        install_steer_hosts(self)

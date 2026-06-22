@@ -37,6 +37,31 @@ _WORKER_EXT_HS = "vllm_hook_plugins.workers.probe_hidden_states_worker.ProbeHidd
 _WORKER_EXT_QK = "vllm_hook_plugins.workers.probe_hookqk_worker.ProbeHookQKWorker"
 _WORKER_EXT_STEER = "vllm_hook_plugins.workers.steer_activation_worker.SteerHookActWorker"
 
+# Each hook worker emits exactly one custom op into the traced graph; this maps the
+# worker extension class to that op so create_engine_config can declare ONLY the
+# active worker's splitting op (see _patched_create_engine_config for why this is
+# load-bearing under VLLM_USE_AOT_COMPILE). Matched by substring so a fully-qualified
+# class path, a bare class name, or a subclass path all resolve.
+_WORKER_OP_MARKERS = (
+    ("ProbeHookQK", "vllm_hook::qk_probe"),
+    ("probe_hookqk", "vllm_hook::qk_probe"),
+    ("ProbeHiddenStates", "vllm_hook::hs_probe"),
+    ("probe_hidden_states", "vllm_hook::hs_probe"),
+    ("SteerHookAct", "vllm_hook::steer_residual"),
+    ("steer_activation", "vllm_hook::steer_residual"),
+)
+
+
+def _splitting_op_for_worker(worker_extension_cls) -> str | None:
+    """Return the single ``vllm_hook::*`` splitting op the given worker emits, or
+    None if the class is not one of our hook workers (then no op is declared)."""
+    name = worker_extension_cls if isinstance(worker_extension_cls, str) else \
+        getattr(worker_extension_cls, "__name__", "") or str(worker_extension_cls or "")
+    for marker, op in _WORKER_OP_MARKERS:
+        if marker in name:
+            return op
+    return None
+
 # Default hook_dir for save_to_disk requests when extra_args["hook_dir"] is not
 # set. /dev/shm/vllm_hook is a RAM tmpfs on Linux — fast and ephemeral, matching
 # HookClient's default.
@@ -132,21 +157,32 @@ def _patched_create_engine_config(self, *args, **kwargs):
         try:
             cc = config.compilation_config
             ops = list(getattr(cc, "splitting_ops", None) or [])
-            # Register both capture ops as splitting ops so whichever worker is
-            # active (QK or HS) runs its op as an eager seam. An op that never
-            # appears in the traced graph is simply ignored, so adding both is
-            # safe regardless of which worker_extension_cls is in use.
-            added = []
-            for _op in ("vllm_hook::qk_probe", "vllm_hook::hs_probe"):
-                if _op not in ops:
-                    ops.append(_op)
-                    added.append(_op)
-            if added:
+            # Add ONLY the splitting op for the active worker — not all three.
+            #
+            # Why per-worker (load-bearing for VLLM_USE_AOT_COMPILE=1): the AOT
+            # compile cache key is derived from vllm_config.compute_hash(), which
+            # hashes compilation_config.splitting_ops. If every worker advertised the
+            # same three ops, all three produce the SAME cache key, so worker B loads
+            # worker A's serialized graph (proven on GPU: the HS/steer engines loaded
+            # the QK artifact and ran the wrong eager seam → crash / silent miss).
+            # One op per worker keeps the keys — and thus the artifacts — distinct.
+            #
+            # The op the worker actually emits is also (idempotently) re-added by its
+            # own graph_install at load_model, so this is just the early, hash-time
+            # declaration. An op that never appears in the traced graph would be
+            # ignored anyway, but excluding it is what makes the AOT key correct.
+            _op = _splitting_op_for_worker(self.worker_extension_cls)
+            if _op is not None and _op not in ops:
+                ops.append(_op)
                 cc.splitting_ops = ops
-                print(f"[vllm-hook] added {added} to "
-                      f"compilation_config.splitting_ops ({len(ops)} total)")
+                print(f"[vllm-hook] added {_op} to "
+                      f"compilation_config.splitting_ops ({len(ops)} total) "
+                      f"for worker {self.worker_extension_cls}")
+            elif _op is None:
+                print(f"[vllm-hook] no known splitting op for worker "
+                      f"{self.worker_extension_cls}; none added")
         except Exception as e:  # noqa: BLE001
-            print(f"[vllm-hook] could not add capture ops to splitting_ops: {e}")
+            print(f"[vllm-hook] could not add capture op to splitting_ops: {e}")
 
     return config
 

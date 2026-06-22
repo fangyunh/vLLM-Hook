@@ -1,0 +1,52 @@
+#!/bin/bash
+# vLLM-Hook HYBRID (CUDA-graph) profiling — ONE campaign, ALL three tiers, via OUR
+# harness (vllm-hook-profile). Same v0.2.x plugin as v020 but every tier (baseline
+# included) builds PIECEWISE cudagraphs. Parametrized by the run.yaml path.
+#
+# Submit (the -gpu override drops any A100 pin -> H100; -G is mandatory):
+#   cd ~/vLLM-Hook-Profiling
+#   bsub -G grp_exploratory -gpu "num=1:mode=exclusive_process" \
+#        -env "all, VHP_RUN_YAML=results/hybrid/<campaign>/run.yaml, VHP_REPS=16" \
+#        < ../vLLM-Hook/examples/hybrid/run_hybrid_profile.bsub
+#
+#BSUB -J vhp_hybrid
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 8
+#BSUB -R "rusage[ngpus=1,mem=64GB]"
+#BSUB -o ../vLLM-Hook/examples/hybrid/logs/hybrid.%J.out
+#BSUB -e ../vLLM-Hook/examples/hybrid/logs/hybrid.%J.err
+set -euo pipefail
+
+# Same env as v020 (the standard vllm_hook_env). _env.sh sets V1/spawn/safetensors/async.
+source "${LS_SUBCWD:-$PWD}/examples/lsf/_env.sh"
+
+# --- Hybrid-specific environment (set AFTER _env.sh) -----------------------
+# Arm the plugin's CUDA-graph install path for EVERY tier (baseline included):
+# the plugin forces enforce_eager=True unless this is set, which would override the
+# campaign's enforce_eager=false + compilation_config and silently fall back to
+# eager. Exported globally so the plugin-less baseline tier picks it up too.
+export VLLM_HOOK_ALLOW_CUDAGRAPH=1
+
+# vLLM 0.21 defaults VLLM_USE_AOT_COMPILE=1 on torch>=2.10, but torch 2.11.0+cu130's
+# compiled function has no .aot_compile() method (that API lands in torch 2.12+), so
+# the PIECEWISE compile path raises "aot_compile is not supported". Force the standard
+# (JIT) torch.compile path — the captured PIECEWISE cudagraphs (and the measurement)
+# are identical; only HOW the graph is compiled (JIT vs AOT-cached) changes.
+# Overridable at submit time (`-env "..., VLLM_USE_AOT_COMPILE=1"`) to test AOT on a
+# torch>=2.12 build; on torch 2.11 it crashes engine init (no .aot_compile() method).
+export VLLM_USE_AOT_COMPILE="${VLLM_USE_AOT_COMPILE:-0}"
+
+RUN_YAML="${VHP_RUN_YAML:?set VHP_RUN_YAML=results/hybrid/<campaign>/run.yaml}"
+[ -f "$RUN_YAML" ] || { echo "ERROR: run.yaml not found: $RUN_YAML" >&2; exit 1; }
+
+echo "[hybrid] env=$CONDA_DEFAULT_ENV  VLLM_HOOK_ALLOW_CUDAGRAPH=$VLLM_HOOK_ALLOW_CUDAGRAPH"
+echo "[hybrid] run.yaml=$RUN_YAML  reps=${VHP_REPS:-<default>}  engine=PIECEWISE cudagraph (all tiers)"
+
+echo "=== 1/2  validate: $RUN_YAML ==="
+vllm-hook-profile validate "$RUN_YAML"
+
+echo "=== 2/2  run all tiers (baseline -> idle_hook -> active), PIECEWISE cudagraph: $RUN_YAML ==="
+vllm-hook-profile run "$RUN_YAML"
+
+echo "=== done -> results.csv / REPORT.md / provenance.yaml under $(dirname "$RUN_YAML") ==="

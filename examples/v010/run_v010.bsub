@@ -1,0 +1,48 @@
+#!/bin/bash
+# vLLM-Hook v0.1.0 profiling — ONE campaign, ALL three tiers, via OUR harness
+# (vllm-hook-profile) with the ported offline_v010 driver. Parametrized by the
+# run.yaml path so one runner serves all 5 workloads.
+#
+# Submit (the -gpu override drops any A100 pin -> H100; -G is mandatory):
+#   cd ~/vLLM-Hook-Profiling
+#   bsub -G grp_exploratory -gpu "num=1:mode=exclusive_process" \
+#        -env "all, VHP_RUN_YAML=results/v010/<campaign>/run.yaml, VHP_REPS=16" \
+#        < ../vLLM-Hook/examples/v010/run_v010.bsub
+#
+#BSUB -J vhp_v010
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 8
+#BSUB -R "rusage[ngpus=1,mem=64GB]"
+#BSUB -o ../vLLM-Hook/examples/v010/logs/v010.%J.out
+#BSUB -e ../vLLM-Hook/examples/v010/logs/v010.%J.err
+set -euo pipefail
+
+# Use the prebuilt v0.1.0 env (clone of vllm_hook_env + the fork's vllm_hook_plugins).
+export VHP_CONDA_ENV="${VHP_CONDA_ENV:-vllm_hook_env_v010}"
+source "${LS_SUBCWD:-$PWD}/examples/lsf/_env.sh"
+
+# --- v0.1.0-specific environment (set AFTER _env.sh) -----------------------
+# 1) Make the v0.1.0 peer paradigm importable in the driver AND the spawned worker
+#    subprocess: `profiling.peers.v010...` lives under the local fork.
+export PYTHONPATH="$VHP_REPO/vendor/vLLM-Hook-v010:${PYTHONPATH:-}"
+# 2) Disable the fork's vllm.general_plugins entry point for EVERY tier (baseline
+#    included): it would otherwise inject a v0.2.x worker_extension_cls (whenever
+#    the field is falsy) and force enforce_eager=True, contaminating the baseline
+#    and colliding with the v0.1.0 worker_cls. With it off, worker_cls is honored
+#    verbatim and the baseline stays a clean, plugin-free vLLM.
+export VLLM_PLUGINS=""
+
+RUN_YAML="${VHP_RUN_YAML:?set VHP_RUN_YAML=results/v010/<campaign>/run.yaml}"
+[ -f "$RUN_YAML" ] || { echo "ERROR: run.yaml not found: $RUN_YAML" >&2; exit 1; }
+
+echo "[v010] env=$CONDA_DEFAULT_ENV  PYTHONPATH=$PYTHONPATH  VLLM_PLUGINS='$VLLM_PLUGINS'"
+echo "[v010] run.yaml=$RUN_YAML  reps=${VHP_REPS:-<default>}"
+
+echo "=== 1/2  validate: $RUN_YAML ==="
+vllm-hook-profile validate "$RUN_YAML"
+
+echo "=== 2/2  run all tiers (baseline -> idle_hook -> active): $RUN_YAML ==="
+vllm-hook-profile run "$RUN_YAML"
+
+echo "=== done -> results.csv / REPORT.md / provenance.yaml under $(dirname "$RUN_YAML") ==="

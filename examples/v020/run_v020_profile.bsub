@@ -1,0 +1,41 @@
+#!/bin/bash
+# vLLM-Hook v0.2.x EAGER profiling — ONE campaign, ALL three tiers, via OUR harness
+# (vllm-hook-profile). This is the eager reference variant (results/v020/): the plugin
+# attaches via worker_extension_cls and every tier is built with enforce_eager=True.
+# Parametrized by the run.yaml path so one runner serves every workload / batch size.
+#
+# Submit (the -gpu override drops any A100 pin -> H100; -G is mandatory):
+#   cd ~/vLLM-Hook-Profiling
+#   bsub -G grp_exploratory -gpu "num=1:mode=exclusive_process" -W 04:00 \
+#        -env "all, VHP_RUN_YAML=results/v020/bs16/<campaign>/run.yaml, VHP_REPS=16" \
+#        < ../vLLM-Hook/examples/v020/run_v020_profile.bsub
+#
+#BSUB -J vhp_v020
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 8
+#BSUB -R "rusage[ngpus=1,mem=64GB]"
+#BSUB -o ../vLLM-Hook/examples/v020/logs/v020.%J.out
+#BSUB -e ../vLLM-Hook/examples/v020/logs/v020.%J.err
+set -euo pipefail
+
+# Same env as the v020 batch-1 reference (the standard vllm_hook_env). _env.sh sets
+# V1/spawn/safetensors/async and the heat-soak + reps knobs.
+source "${LS_SUBCWD:-$PWD}/examples/lsf/_env.sh"
+
+# v0.2.x eager: NO cudagraph env. The plugin forces enforce_eager=True by default
+# (VLLM_HOOK_ALLOW_CUDAGRAPH unset), and the run.yaml carries modes.enforce_eager=[true],
+# so every tier (baseline included) builds a plain eager engine.
+
+RUN_YAML="${VHP_RUN_YAML:?set VHP_RUN_YAML=results/v020/<bs>/<campaign>/run.yaml}"
+[ -f "$RUN_YAML" ] || { echo "ERROR: run.yaml not found: $RUN_YAML" >&2; exit 1; }
+
+echo "[v020] env=$CONDA_DEFAULT_ENV  run.yaml=$RUN_YAML  reps=${VHP_REPS:-<default>}  engine=eager (all tiers)"
+
+echo "=== 1/2  validate: $RUN_YAML ==="
+vllm-hook-profile validate "$RUN_YAML"
+
+echo "=== 2/2  run all tiers (baseline -> idle_hook -> active), eager: $RUN_YAML ==="
+vllm-hook-profile run "$RUN_YAML"
+
+echo "=== done -> results.csv / REPORT.md / provenance.yaml under $(dirname "$RUN_YAML") ==="

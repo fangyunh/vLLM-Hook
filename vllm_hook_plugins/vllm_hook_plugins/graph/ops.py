@@ -36,6 +36,23 @@ def set_capture_fn(fn) -> None:
     _CAPTURE_FN = fn
 
 
+def _bump_sink(sink) -> None:
+    """Increment the DCE keep-alive sink, tolerating ``sink is None``.
+
+    The sink only exists to survive dead-code elimination at COMPILE time (the
+    ``mutates_args=["sink"]`` contract marks the op side-effecting so the piecewise
+    compiler keeps it). Under ``VLLM_USE_AOT_COMPILE=1`` the compiled graph is
+    serialized and RELOADED; the sink — a Python-global tensor baked as a graph
+    constant — comes back as ``None`` across that boundary (torch's aot_compile does
+    not round-trip eager-seam tensor consts that originate from module globals). By
+    reload time DCE is already done and the op IS in the executed graph (we're in
+    its impl), so the sink is vestigial: skipping the bump is correct and avoids the
+    ``'NoneType' object has no attribute 'add_'`` crash.
+    """
+    if sink is not None:
+        sink.add_(1)
+
+
 def _qk_probe_impl(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
                    layer_idx: int) -> None:
     """Run the eager capture body, keeping the op alive via ``sink``.
@@ -43,7 +60,7 @@ def _qk_probe_impl(q: torch.Tensor, k: torch.Tensor, sink: torch.Tensor,
     Bails while ``is_current_stream_capturing`` (capture/warmup forwards) so they
     don't pollute the buckets; real prefill forwards capture.
     """
-    sink.add_(1)
+    _bump_sink(sink)
     _FIRE_COUNT[0] += 1
     fn = _CAPTURE_FN
     capturing = False
@@ -94,7 +111,7 @@ def _hs_probe_impl(hidden: torch.Tensor, residual: torch.Tensor,
 
     Bails while capturing (warmup/capture forwards); real forwards capture.
     """
-    sink.add_(1)
+    _bump_sink(sink)  # None-tolerant: sink is vestigial on AOT reload (see _bump_sink)
     _FIRE_COUNT[0] += 1
     fn = _HS_CAPTURE_FN
     capturing = False
@@ -122,8 +139,78 @@ def _hs_probe_fake(hidden: torch.Tensor, residual: torch.Tensor,
     return None
 
 
+# steer_residual: the MUTATING analogue of qk_probe/hs_probe. The capture probes
+# are read-only (return None, mutate only `sink`); steering must CHANGE the
+# residual stream so the modification propagates into the downstream layers.
+#
+# It mutates the residual IN PLACE and declares ``mutates_args=["residual"]`` —
+# the same in-graph data-plane primitive ``capture_qk`` uses to write its static
+# buffers. This is the load-bearing contract: it tells the piecewise compiler the
+# op writes ``residual``, so downstream reads are re-threaded to the mutated value
+# and the static-buffer copy into the next cudagraph segment picks up the change.
+# (A functional variant that RETURNED a new residual was proven on GPU to fire but
+# have its return value DROPPED across the segment seam — the mutation never
+# reached downstream layers. In-place + mutates_args is the path that propagates.)
+#
+# The eager steering math runs in the impl on real (non-replayed) prefill forwards;
+# on cudagraph replay (decode) the impl is skipped, so decode-phase steering is out
+# of scope for this milestone (mirrors the capture path's prefill-only proof).
+_STEER_FN = None  # set by install_steer.set_steer_fn; (hidden, residual, layer_idx, has_residual) -> None
+
+
+def set_steer_fn(fn) -> None:
+    """Register the runtime steering callback ``steer_residual``'s impl invokes.
+
+    ``fn(hidden, residual, layer_idx, has_residual)`` mutates ``residual`` IN PLACE
+    (e.g. ``residual[start:end].add_(delta)``) and returns None.
+    """
+    global _STEER_FN
+    _STEER_FN = fn
+
+
+def _steer_residual_impl(hidden: torch.Tensor, residual: torch.Tensor,
+                         sink: torch.Tensor, layer_idx: int,
+                         has_residual: int) -> None:
+    """Apply activation steering to ``residual`` IN PLACE mid-forward.
+
+    Bumps ``sink`` (keep-alive). Bails while ``is_current_stream_capturing``
+    (warmup/capture forwards) and when no callback is set, leaving ``residual``
+    untouched so a steering-off step is a true no-op. On a real forward it
+    delegates to the steering body, which mutates ``residual`` in place.
+    """
+    _bump_sink(sink)  # None-tolerant: sink is vestigial on AOT reload (see _bump_sink)
+    _FIRE_COUNT[0] += 1
+    fn = _STEER_FN
+    capturing = False
+    try:
+        capturing = torch.cuda.is_current_stream_capturing()
+    except Exception:  # noqa: BLE001
+        pass
+    if _DBG and not capturing and residual.shape[0] <= 2048 and _DBG_NONCAP[0] < 30:
+        _DBG_NONCAP[0] += 1
+        print(f"[graph/dbg] steer_residual impl REAL fire #{_DBG_NONCAP[0]} "
+              f"layer={int(layer_idx)} capturing={capturing} "
+              f"r={tuple(residual.shape)} has_resid={int(has_residual)}", flush=True)
+    if fn is None or capturing:
+        return None
+    try:
+        fn(hidden, residual, int(layer_idx), int(has_residual))
+    except Exception as e:  # noqa: BLE001
+        if _DBG and _DBG_NONCAP[0] < 12:
+            print(f"[graph/dbg] steer_residual body raised: {e!r}", flush=True)
+    return None
+
+
+def _steer_residual_fake(hidden: torch.Tensor, residual: torch.Tensor,
+                         sink: torch.Tensor, layer_idx: int,
+                         has_residual: int) -> None:
+    """Meta/fake impl: in-place mutation, no new tensor under tracing."""
+    return None
+
+
 QK_PROBE_OP_NAME = "qk_probe"
 HS_PROBE_OP_NAME = "hs_probe"
+STEER_RESIDUAL_OP_NAME = "steer_residual"
 
 # Constants so downstream files import rather than hard-code op names.
 LIB_NAMESPACE = "vllm_hook"
@@ -178,6 +265,12 @@ def _capture_qk_impl(
     """
     del active  # unused: sentinel-row routing supersedes the multiplicative gate
     _FIRE_COUNT[0] += 1  # diagnostic only
+    # Buffer-mode static buffers are Python-global tensors baked as graph consts;
+    # like the probe sinks they can deserialize to None on an AOT-compile reload.
+    # Skip the scatter rather than crash (buffer mode is not AOT-validated; this is
+    # defensive — op mode is the default capture path).
+    if q_buf is None or k_buf is None or index is None:
+        return None
     n = q.shape[0]
     idx = index[:n].to(torch.long)
     q_src = q if q.dtype == q_buf.dtype else q.to(q_buf.dtype)
@@ -260,12 +353,30 @@ def register_graph_ops() -> None:
         if "already" not in str(e).lower() and "exist" not in str(e).lower():
             raise
 
+    # The steering op RETURNS a Tensor (the steered residual) — unlike the
+    # read-only probes above. mutates_args=["sink"] keeps it side-effecting; the
+    # returned value carries the actual steering into the next graph segment.
+    try:
+        direct_register_custom_op(
+            op_name=STEER_RESIDUAL_OP_NAME,
+            op_func=_steer_residual_impl,
+            mutates_args=["sink", "residual"],
+            fake_impl=_steer_residual_fake,
+            target_lib=_LIB,
+            dispatch_key="CUDA",
+        )
+    except Exception as e:  # noqa: BLE001
+        if "already" not in str(e).lower() and "exist" not in str(e).lower():
+            raise
+
     # Mark registered only once the handles resolve, so a partial failure surfaces
     # here rather than as a confusing AttributeError at capture time.
     ns = getattr(torch.ops, LIB_NAMESPACE, None)
     if ns is None or not hasattr(ns, CAPTURE_QK_OP_NAME) or not hasattr(
         ns, QK_PROBE_OP_NAME
-    ) or not hasattr(ns, HS_PROBE_OP_NAME):
+    ) or not hasattr(ns, HS_PROBE_OP_NAME) or not hasattr(
+        ns, STEER_RESIDUAL_OP_NAME
+    ):
         raise RuntimeError(
             f"register_graph_ops: ops under torch.ops.{LIB_NAMESPACE} "
             "did not resolve after registration"
