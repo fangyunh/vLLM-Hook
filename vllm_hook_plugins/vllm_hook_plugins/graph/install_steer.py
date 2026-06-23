@@ -301,12 +301,12 @@ class SteerRegistry:
     """Per-worker owner of the steering routing slabs + the resident vector table.
 
     Mirrors ``HostRegistry`` (so it plugs into ``install_prepare_inputs_routing``),
-    but its slabs are the steering data plane: ``coeff_all (num_layers, cap)`` float
-    and ``vec_id_all (num_layers, cap)`` int — per-(layer, token) coefficient and
-    vector index. ``vec_table (V_max, hidden)`` is the LoRA-style vector library,
-    pre-allocated so its ``data_ptr`` is fixed across replays; vectors are written
-    into pre-allocated rows in place (so adding one never moves the table). All ranks
-    steer, so ``should_capture`` is always True.
+    but its slabs are the steering data plane: per-(layer, token) ``coeff_all`` float,
+    ``vec_id_all`` int (which vector), and ``mode_all`` int (0=add_vector, 1=adjust_rs).
+    ``vec_table (V_max, hidden)`` is the LoRA-style vector library and ``avg_proj_table
+    (V_max,)`` holds each adjust_rs vector's target projection; both are pre-allocated so
+    their ``data_ptr`` is fixed across replays (rows written in place). All ranks steer,
+    so ``should_capture`` is always True.
     """
 
     def __init__(self, num_layers, cap, hidden, v_max, device, dtype):
@@ -319,16 +319,20 @@ class SteerRegistry:
 
         self.coeff_all = torch.zeros(num_layers, cap, dtype=torch.float32, device=device)
         self.vec_id_all = torch.zeros(num_layers, cap, dtype=torch.int64, device=device)
-        # The resident vector library (fixed data_ptr; rows written in place).
+        self.mode_all = torch.zeros(num_layers, cap, dtype=torch.int64, device=device)
+        # The resident vector library + per-vector adjust_rs target (fixed data_ptr).
         self.vec_table = torch.zeros(v_max, hidden, dtype=dtype, device=device)
+        self.avg_proj_table = torch.zeros(v_max, dtype=torch.float32, device=device)
 
         pin = self.device.type == "cuda"
         self.coeff_pinned = torch.zeros(num_layers, cap, dtype=torch.float32, pin_memory=pin)
         self.vec_id_pinned = torch.zeros(num_layers, cap, dtype=torch.int64, pin_memory=pin)
+        self.mode_pinned = torch.zeros(num_layers, cap, dtype=torch.int64, pin_memory=pin)
         self._upload_event = torch.cuda.Event() if self.device.type == "cuda" else None
 
         self.hosts: Dict[int, SteerHost] = {}
         self.vec_paths: Dict[str, int] = {}  # vector_path -> row in vec_table
+        self.vec_has_avgproj: set = set()    # vids whose avg_proj_table row is loaded
         self._next_vec_id = 0
         self._pending_plans: list = []
 
@@ -338,7 +342,8 @@ class SteerRegistry:
     def assign_views(self) -> None:
         for layer_num, host in self.hosts.items():
             host.bind_views(self.coeff_all[layer_num], self.vec_id_all[layer_num],
-                            self.vec_table)
+                            self.mode_all[layer_num], self.vec_table,
+                            self.avg_proj_table)
 
     def begin_step(self) -> None:
         pass  # steering keeps no forward-context stash
@@ -348,19 +353,23 @@ class SteerRegistry:
             self._upload_event.synchronize()
         self.coeff_pinned.zero_()
         self.vec_id_pinned.zero_()
+        self.mode_pinned.zero_()
 
     def upload(self) -> None:
         self.coeff_all.copy_(self.coeff_pinned, non_blocking=True)
         self.vec_id_all.copy_(self.vec_id_pinned, non_blocking=True)
+        self.mode_all.copy_(self.mode_pinned, non_blocking=True)
         if self._upload_event is not None:
             self._upload_event.record()
 
     def vec_id_for_path(self, path: str, worker) -> Optional[int]:
         """Resolve ``vector_path`` to a vec_table row, loading + caching on first use.
 
-        The vector is loaded into a PRE-ALLOCATED row in place (data_ptr fixed), so
-        a never-before-seen vector can be admitted without moving the table — graph
-        safe. Returns None if the path can't be loaded or the table is full.
+        The vector's ``dir`` is written into a PRE-ALLOCATED ``vec_table`` row in place
+        (data_ptr fixed), and its ``avg_proj`` (adjust_rs vectors carry it) into the
+        matching ``avg_proj_table`` row, so a never-before-seen vector is admitted
+        without moving either table — graph safe. Returns None if the path can't be
+        loaded or the table is full.
         """
         vid = self.vec_paths.get(path)
         if vid is not None:
@@ -376,6 +385,9 @@ class SteerRegistry:
                 return None
             d = raw["dir"]
             data = {"dir": d if torch.is_tensor(d) else torch.tensor(d)}
+            if "avg_proj" in raw:  # adjust_rs vectors carry the target projection
+                ap = raw["avg_proj"]
+                data["avg_proj"] = float(ap.item()) if torch.is_tensor(ap) else float(ap)
             if cache is not None:
                 cache[path] = data
         if self._next_vec_id >= self.v_max:
@@ -384,6 +396,9 @@ class SteerRegistry:
         self._next_vec_id += 1
         self.vec_table[vid].copy_(
             data["dir"].to(self.vec_table.device, dtype=self.vec_table.dtype).view(-1))
+        if "avg_proj" in data:
+            self.avg_proj_table[vid] = float(data["avg_proj"])
+            self.vec_has_avgproj.add(vid)
         self.vec_paths[path] = vid
         return vid
 
@@ -433,12 +448,15 @@ def _install_steer_buffer(worker, model, matched, device) -> SteerRegistry:
 
 
 def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -> list:
-    """Fill the pinned coeff/vec_id mirrors from each request's steer config.
+    """Fill the pinned coeff/vec_id/mode mirrors from each request's steer config.
 
-    For every request whose resolved config targets layer L with ``add_vector``,
-    write ``coeff`` and the vector's ``vec_id`` across the request's token span at
-    row L; unsteered (layer, token) entries stay 0 (an exact no-op in the op). Uses
-    flat positions (steering modifies the current step's residual; no accumulation).
+    For every request whose resolved config targets layer L, write the vector's
+    ``vec_id`` and the per-token ``mode`` across the request's token span at row L:
+      * ``add_vector`` → ``mode=0`` + ``coeff=coefficient`` (host-supplied delta).
+      * ``adjust_rs``  → ``mode=1`` + ``coeff=0`` (the op computes the coefficient in
+        kernel from the live residual; the vector must carry ``avg_proj``).
+    Unsteered (layer, token) entries stay 0 (an exact no-op). Uses flat positions
+    (steering modifies the current step's residual; no accumulation).
     """
     if qsl_cpu is None:
         return []
@@ -451,6 +469,7 @@ def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -
     bs = len(qsl_cpu) - 1
     coeff_pinned = registry.coeff_pinned
     vecid_pinned = registry.vec_id_pinned
+    mode_pinned = registry.mode_pinned
     cap = registry.cap
     env_path = getattr(worker, "_env_config_path", None) if worker else None
 
@@ -471,12 +490,9 @@ def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -
         if not (0 <= layer < registry.num_layers):
             continue
         method = cfg.get("method", "adjust_rs")
-        if method != "add_vector":
-            # Buffer mode implements add_vector only; adjust_rs (per-token in-kernel
-            # matmul) stays op-mode/PIECEWISE for now.
+        if method not in ("add_vector", "adjust_rs"):
             dbg.append(f"r{i}:method={method}_unsupported")
             continue
-        coefficient = float(cfg.get("coefficient", 0.0))
         vector_path = cfg.get("vector_path")
         if not vector_path:
             continue
@@ -484,6 +500,13 @@ def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -
         if vid is None:
             dbg.append(f"r{i}:vec_load_failed")
             continue
+        if method == "adjust_rs" and vid not in registry.vec_has_avgproj:
+            # adjust_rs needs the vector's avg_proj target; without it the in-kernel
+            # coefficient would be wrong, so skip rather than steer incorrectly.
+            dbg.append(f"r{i}:adjust_rs_no_avg_proj")
+            continue
+        mode_val = 1 if method == "adjust_rs" else 0
+        coefficient = 0.0 if method == "adjust_rs" else float(cfg.get("coefficient", 0.0))
 
         start = int(qsl_cpu[i])
         end = min(int(qsl_cpu[i + 1]), cap)
@@ -491,8 +514,9 @@ def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -
             continue
         coeff_pinned[layer, start:end] = coefficient
         vecid_pinned[layer, start:end] = vid
-        plans.append({"req_idx": i, "layer": layer, "coeff": coefficient, "vid": vid})
-        dbg.append(f"r{i}:L{layer},coeff={coefficient},vid={vid},rows={start}:{end}")
+        mode_pinned[layer, start:end] = mode_val
+        plans.append({"req_idx": i, "layer": layer, "method": method, "vid": vid})
+        dbg.append(f"r{i}:L{layer},{method},coeff={coefficient},vid={vid},rows={start}:{end}")
 
     if _DEBUG and _dbg_steer_call_n[0] <= _DBG_STEER_MAX_CALLS:
         _dbg_steer_call_n[0] += 1

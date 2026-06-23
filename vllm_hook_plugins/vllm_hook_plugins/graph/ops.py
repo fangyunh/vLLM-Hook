@@ -226,14 +226,26 @@ def _steer_buffer_impl(
     coeff: torch.Tensor,
     vec_id: torch.Tensor,
     vec_table: torch.Tensor,
+    avg_proj: torch.Tensor,
+    steer_mode: torch.Tensor,
 ) -> None:
-    """Masked in-place `residual[t] += coeff[t] * vec_table[vec_id[t]]` (add_vector).
+    """Masked in-place steering add — unified ``add_vector`` + ``adjust_rs``.
 
-    Vectorised, graph-safe (no host sync). ``coeff``/``vec_id`` are length CAP but
-    ``residual`` has only ``n = residual.shape[0]`` rows this step; the leading ``n``
-    routing entries align row-for-row. ``coeff == 0`` rows are exact no-ops (the add
-    contributes zero), so an unsteered layer/token costs only a masked add. The dtype
-    casts are defensive (vec_table/coeff should already match the residual dtype).
+    Per token ``t`` (``unit = vec_table[vec_id[t]]``):
+      * ``steer_mode[t] == 0`` (add_vector / no-op): ``c = coeff[t]`` (host-supplied;
+        0 = no-op).
+      * ``steer_mode[t] == 1`` (adjust_rs): ``c = avg_proj[vec_id[t]] - (residual[t]·unit)``
+        — the per-token coefficient is computed IN-KERNEL from the live residual (the
+        projection ``residual·unit`` only exists at replay), so adjust_rs cannot be a
+        static host coefficient like add_vector.
+    Then ``residual[t] += c · unit``. Vectorised + graph-safe (gather + reduction +
+    ``where`` + scaled add, no host sync); the routing tensors are length CAP and the
+    leading ``n = residual.shape[0]`` rows align with this step's tokens.
+
+    (The arg is ``steer_mode``, not ``mode``: ``mode`` collides with a reserved
+    parameter of torch's ``auto_functionalized`` HOP — the wrapper for mutating ops
+    under torch.compile — and raises ``auto_functionalized_fake() got multiple values
+    for argument 'mode'`` at compile time.)
     """
     # Buffer-mode static buffers are Python-global tensors baked as graph consts; like
     # the probe sinks they can deserialize to None on an AOT-compile reload. Skip the
@@ -242,10 +254,16 @@ def _steer_buffer_impl(
         return None
     _FIRE_COUNT[0] += 1  # diagnostic only
     n = residual.shape[0]
-    c = coeff[:n].to(residual.dtype)              # (n,)
-    vids = vec_id[:n].to(torch.long)              # (n,)
-    vecs = vec_table.index_select(0, vids).to(residual.dtype)  # (n, hidden)
-    residual[:n].add_(c.unsqueeze(-1) * vecs)     # in-place — mutates_args contract
+    vids = vec_id[:n].to(torch.long)                            # (n,)
+    units = vec_table.index_select(0, vids).to(residual.dtype)  # (n, hidden)
+    c_add = coeff[:n].to(residual.dtype)                        # (n,) host coeff
+    # adjust_rs coefficient, computed for every row but selected only where mode==1.
+    proj = (residual[:n] * units).sum(dim=-1)                   # (n,) residual·unit
+    avg = avg_proj.index_select(0, vids).to(residual.dtype)     # (n,) per-vector target
+    c_adj = avg - proj                                         # (n,)
+    is_adj = steer_mode[:n].to(torch.bool)                     # (n,)
+    c = torch.where(is_adj, c_adj, c_add)                      # (n,)
+    residual[:n].add_(c.unsqueeze(-1) * units)                 # in-place — mutates contract
     return None
 
 
@@ -254,6 +272,8 @@ def _steer_buffer_fake(
     coeff: torch.Tensor,
     vec_id: torch.Tensor,
     vec_table: torch.Tensor,
+    avg_proj: torch.Tensor,
+    steer_mode: torch.Tensor,
 ) -> None:
     """Meta/fake impl: in-place mutation, no new tensor under tracing."""
     return None
@@ -557,6 +577,9 @@ def steer_buffer(
     coeff: torch.Tensor,
     vec_id: torch.Tensor,
     vec_table: torch.Tensor,
+    avg_proj: torch.Tensor,
+    steer_mode: torch.Tensor,
 ) -> None:
     """Thin wrapper over ``torch.ops.vllm_hook.steer_buffer`` (resolved at call time)."""
-    return torch.ops.vllm_hook.steer_buffer(residual, coeff, vec_id, vec_table)
+    return torch.ops.vllm_hook.steer_buffer(
+        residual, coeff, vec_id, vec_table, avg_proj, steer_mode)

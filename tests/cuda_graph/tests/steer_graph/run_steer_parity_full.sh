@@ -41,16 +41,30 @@ export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
 
 WORK="/dev/shm/vllm_hook_${USER}/steer_parity_full_${LSB_JOBID:-manual}"
 mkdir -p "$WORK"
-GRAPH_PKL="$WORK/graph.pkl"
-EAGER_PKL="$WORK/eager.pkl"
 PY=tests/cuda_graph/tests/steer_graph/steer_parity_decode.py
 
 echo "[run_steer_full] cudagraph_mode=FULL_DECODE_ONLY steer=buffer max_tokens=$VLLM_HOOK_PARITY_MAX_TOKENS coeff=$VLLM_STEER_COEFF"
-echo "[run_steer_full] === 1/3 graph capture (FULL_DECODE_ONLY, buffer steering) ==="
-VLLM_HOOK_STEER_MODE=buffer python -u "$PY" capture --mode graph --out "$GRAPH_PKL"
 
-echo "[run_steer_full] === 2/3 eager capture (ground truth, register_forward_hook) ==="
-VLLM_HOOK_STEER_MODE=op python -u "$PY" capture --mode eager --out "$EAGER_PKL"
+run_leg () {
+  local name="$1" cfg="$2"
+  local g="$WORK/${name}_graph.pkl" e="$WORK/${name}_eager.pkl"
+  echo "============================================================"
+  echo "[run_steer_full] LEG=$name config=$cfg"
+  echo "============================================================"
+  echo "[run_steer_full] === ${name} 1/3 graph capture (FULL_DECODE_ONLY, buffer) ==="
+  VLLM_HOOK_CONFIG_FILE="$cfg" VLLM_HOOK_STEER_MODE=buffer \
+    python -u "$PY" capture --mode graph --out "$g"
+  echo "[run_steer_full] === ${name} 2/3 eager capture (ground truth) ==="
+  VLLM_HOOK_CONFIG_FILE="$cfg" VLLM_HOOK_STEER_MODE=op \
+    python -u "$PY" capture --mode eager --out "$e"
+  echo "[run_steer_full] === ${name} 3/3 compare (token-for-token, prefill+decode) ==="
+  python -u "$PY" compare --graph "$g" --eager "$e" || echo "[run_steer_full] LEG $name FAILED"
+}
 
-echo "[run_steer_full] === 3/3 compare (token-for-token, prefill+decode) ==="
-python -u "$PY" compare --graph "$GRAPH_PKL" --eager "$EAGER_PKL"
+# Leg A: add_vector (host-supplied coefficient * fixed vector).
+run_leg add_vector "model_configs/activation_steer/Qwen2-1.5B-Instruct.json"
+
+# Leg B: adjust_rs (in-kernel coefficient = avg_proj - residual.unit, computed at replay).
+run_leg adjust_rs "model_configs/activation_steer/Qwen2-1.5B-Instruct_adjust_rs.json"
+
+echo "[run_steer_full] DONE — see VERDICT lines above per leg."

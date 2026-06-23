@@ -182,12 +182,13 @@ class SteerHost(nn.Module):
 
     Owns NO per-layer sink buffer — steering writes the residual in place, so the
     only static GPU state is the per-(layer, token) routing views (``coeff``,
-    ``vec_id``, registry-owned) and the shared ``vec_table`` (the vector library).
-    ``steer()`` calls the ``steer_buffer`` op, which does a masked in-place
-    ``residual += coeff * vec_table[vec_id]`` (add_vector); ``coeff == 0`` rows are
-    no-ops, so a layer no request steers costs one masked add. ``do_steer`` is an
-    install-time gate. ``layer_num`` is 0-based (matches the eager worker's
-    ``this_layer`` compared against config ``optimal_layer``).
+    ``vec_id``, ``mode``, registry-owned) and the shared ``vec_table`` + ``avg_proj``
+    tables. ``steer()`` calls the ``steer_buffer`` op (masked in-place add); ``mode``
+    selects add_vector (host ``coeff``) vs adjust_rs (in-kernel ``avg_proj - proj``)
+    per token, and ``coeff == 0`` / ``mode == 0`` rows are no-ops, so a layer no
+    request steers costs one masked add. ``do_steer`` is an install-time gate.
+    ``layer_num`` is 0-based (matches the eager worker's ``this_layer`` compared
+    against config ``optimal_layer``).
     """
 
     def __init__(
@@ -203,20 +204,26 @@ class SteerHost(nn.Module):
         self.cap = int(cap)
         self.do_steer = bool(do_steer)
 
-        # Routing views + shared vector table, bound later by the registry.
+        # Routing views + shared tables, bound later by the registry.
         self.coeff: torch.Tensor | None = None
         self.vec_id: torch.Tensor | None = None
+        self.mode: torch.Tensor | None = None
         self.vec_table: torch.Tensor | None = None
+        self.avg_proj: torch.Tensor | None = None
 
     def bind_views(self, coeff: torch.Tensor, vec_id: torch.Tensor,
-                   vec_table: torch.Tensor) -> None:
-        """Attach this layer's ``coeff``/``vec_id`` row-views + the shared table."""
+                   mode: torch.Tensor, vec_table: torch.Tensor,
+                   avg_proj: torch.Tensor) -> None:
+        """Attach this layer's coeff/vec_id/mode row-views + the shared tables."""
         self.coeff = coeff
         self.vec_id = vec_id
+        self.mode = mode
         self.vec_table = vec_table
+        self.avg_proj = avg_proj
 
     def steer(self, residual: torch.Tensor) -> None:
         """Apply the masked in-place steering add (single ``steer_buffer`` op)."""
         torch.ops.vllm_hook.steer_buffer(
-            residual, self.coeff, self.vec_id, self.vec_table
+            residual, self.coeff, self.vec_id, self.vec_table,
+            self.avg_proj, self.mode,
         )
