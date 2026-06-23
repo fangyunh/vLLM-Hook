@@ -1,7 +1,7 @@
 """Per-worker device routing slabs for CUDA-graph QK capture."""
 from __future__ import annotations
 
-from typing import Dict, Iterator, Tuple
+from typing import Dict, Iterator, Optional, Tuple
 
 import torch
 
@@ -104,28 +104,42 @@ class HostRegistry:
     # Per-step upload (fan-out by view) — called from the execute_model wrapper.
     # ------------------------------------------------------------------
 
-    def upload(self) -> None:
+    def upload(self, width: Optional[int] = None) -> None:
         """Push the pinned mirrors to the device slabs: one copy each per step.
 
-        Two non-blocking copies regardless of layer count; the hosts' views see
-        the new routing on the next replay.
+        ``width`` (when given) copies only the ``[:, :width]`` column prefix of the
+        capture_index slab — the prefix the cudagraph-padded forward actually reads
+        (a 2D strided async copy, much smaller than the full ``cap`` width on decode).
+        Columns beyond ``width`` are never read by the op, so the stale device tail is
+        harmless. ``any_active`` is tiny (num_layers,) so it always copies in full.
         """
-        self.capture_index_all.copy_(self.capture_index_pinned, non_blocking=True)
+        if width is None:
+            self.capture_index_all.copy_(self.capture_index_pinned, non_blocking=True)
+        else:
+            w = max(1, min(int(width), self.cap))
+            self.capture_index_all[:, :w].copy_(
+                self.capture_index_pinned[:, :w], non_blocking=True)
         self.any_active.copy_(self.any_active_pinned, non_blocking=True)
         # So the next reset_pinned() can wait before reusing the mirror.
         if self._upload_event is not None:
             self._upload_event.record()
 
-    def reset_pinned(self) -> None:
+    def reset_pinned(self, width: Optional[int] = None) -> None:
         """Zero the pinned mirrors to the sentinel no-op, before each step's writes.
 
-        Defaults any unrequested (layer, token) to row 0 + inactive. Waits on the
-        prior upload first: zeroing the still-in-flight mirror would race the copy
-        and latch zeros (silent capture loss); the event wait avoids a full sync.
+        Defaults any unrequested (layer, token) to row 0 + inactive. ``width`` zeros
+        only the ``[:, :width]`` prefix (the part this step writes + uploads); the op
+        never reads beyond ``width``, so the tail need not be re-zeroed. Waits on the
+        prior upload first: zeroing the still-in-flight mirror would race the copy and
+        latch zeros (silent capture loss); the event wait avoids a full sync.
         """
         if self._upload_event is not None:
             self._upload_event.synchronize()
-        self.capture_index_pinned.zero_()
+        if width is None:
+            self.capture_index_pinned.zero_()
+        else:
+            w = max(1, min(int(width), self.cap))
+            self.capture_index_pinned[:, :w].zero_()
         self.any_active_pinned.zero_()
 
     # ------------------------------------------------------------------

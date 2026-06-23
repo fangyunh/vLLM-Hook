@@ -348,17 +348,31 @@ class SteerRegistry:
     def begin_step(self) -> None:
         pass  # steering keeps no forward-context stash
 
-    def reset_pinned(self) -> None:
+    def reset_pinned(self, width: Optional[int] = None) -> None:
         if self._upload_event is not None:
             self._upload_event.synchronize()
-        self.coeff_pinned.zero_()
-        self.vec_id_pinned.zero_()
-        self.mode_pinned.zero_()
+        if width is None:
+            self.coeff_pinned.zero_()
+            self.vec_id_pinned.zero_()
+            self.mode_pinned.zero_()
+        else:
+            w = max(1, min(int(width), self.cap))
+            self.coeff_pinned[:, :w].zero_()
+            self.vec_id_pinned[:, :w].zero_()
+            self.mode_pinned[:, :w].zero_()
 
-    def upload(self) -> None:
-        self.coeff_all.copy_(self.coeff_pinned, non_blocking=True)
-        self.vec_id_all.copy_(self.vec_id_pinned, non_blocking=True)
-        self.mode_all.copy_(self.mode_pinned, non_blocking=True)
+    def upload(self, width: Optional[int] = None) -> None:
+        # Only the [:, :width] column prefix the cudagraph-padded forward reads (see
+        # install._upload_width); the stale tail beyond width is never read by the op.
+        if width is None:
+            self.coeff_all.copy_(self.coeff_pinned, non_blocking=True)
+            self.vec_id_all.copy_(self.vec_id_pinned, non_blocking=True)
+            self.mode_all.copy_(self.mode_pinned, non_blocking=True)
+        else:
+            w = max(1, min(int(width), self.cap))
+            self.coeff_all[:, :w].copy_(self.coeff_pinned[:, :w], non_blocking=True)
+            self.vec_id_all[:, :w].copy_(self.vec_id_pinned[:, :w], non_blocking=True)
+            self.mode_all[:, :w].copy_(self.mode_pinned[:, :w], non_blocking=True)
         if self._upload_event is not None:
             self._upload_event.record()
 

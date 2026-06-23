@@ -1022,6 +1022,33 @@ def _runner_qsl(model_runner) -> Optional[list]:
     return None
 
 
+def _upload_width(model_runner, qsl_cpu, cap: int) -> int:
+    """Smallest contiguous column prefix the routing upload must cover this step.
+
+    The capture/steer ops read ``index[:n]`` where ``n = q.shape[0]`` is the PADDED
+    token count — a cudagraph decode batch is padded up to a captured size — so the
+    upload must cover ``[0, padded_n)`` with ``[real_tokens, padded_n)`` left at the
+    sentinel (0). We bound ``padded_n`` above by ``max(cudagraph_batch_sizes)`` (the
+    largest captured decode graph) and the real token count (eager prefill is not
+    padded). Uploading only ``[:, :real_tokens]`` would be WRONG: the cudagraph
+    padding rows would read stale routing and scatter dummy tokens into real buffer
+    rows. ``max(real_n, max_graph_batch)`` is a safe upper bound on ``padded_n`` in
+    every case: decode pads up to a captured size (≤ max_graph_batch); a prefill that
+    fits a captured size pads up to it (≤ max_graph_batch); a prefill too big to
+    cudagraph runs eager (``padded_n == real_n``). Returns a width in ``[1, cap]``;
+    ``cap`` = no shrink (always safe), used as the fallback when ``qsl_cpu`` is absent.
+    """
+    if not qsl_cpu:
+        return int(cap)  # can't bound padded_n this step → full width (always safe)
+    real_n = int(qsl_cpu[-1])
+    try:
+        sizes = getattr(model_runner, "cudagraph_batch_sizes", None)
+        maxbs = max(sizes) if sizes else cap
+    except Exception:  # noqa: BLE001
+        maxbs = cap
+    return max(1, min(int(cap), max(real_n, int(maxbs))))
+
+
 def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
                                    label: str = "qk") -> None:
     """Wrap ``model_runner._prepare_inputs`` to build + upload the capture routing
@@ -1059,10 +1086,14 @@ def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
             registry.begin_step()
             qsl_cpu = _runner_qsl(model_runner)
             with PROF.timed("graph.route"):
-                registry.reset_pinned()
+                # Only reset+upload the column prefix the (cudagraph-padded) forward
+                # actually reads — for decode that is ~max_graph_batch, not the full
+                # max_num_batched_tokens slab (a much smaller H2D copy per step).
+                width = _upload_width(model_runner, qsl_cpu, registry.cap)
+                registry.reset_pinned(width)
                 plans = build_routing_fn(model_runner, registry, qsl_cpu) \
                     if qsl_cpu is not None else []
-                registry.upload()
+                registry.upload(width)
             registry._pending_plans = plans
         except Exception as e:  # noqa: BLE001
             registry._pending_plans = []
