@@ -104,3 +104,119 @@ class QKHookHost(nn.Module):
         static buffers/routing — capture happens inside the op impl.
         """
         torch.ops.vllm_hook.qk_probe(q, k, self.sink, self.layer_num)
+
+
+class HSHookHost(nn.Module):
+    """Static-buffer host for a single decoder layer's hidden-state capture.
+
+    The HS analogue of :class:`QKHookHost`. Owns a static ``hs_buf`` sized
+    ``(cap + 1, hidden)`` with row 0 a write-only discard sentinel. The
+    ``capture_hs`` op forms the residual stream (``hidden + residual`` for
+    fused-residual layers) and scatters its rows into ``hs_buf`` by the routed
+    ``capture_index`` — a graph-recorded kernel that replays under FULL decode.
+
+    Unlike QK there is no key history to reconstruct: the residual stream is
+    per-token, so the scattered rows ARE the artifact (no prefix-K plane).
+
+    ``layer_num`` is the 0-based registry-slab row (matched-module order);
+    ``egress_layer_num`` is the 1-based number stored in the worker bucket so the
+    artifact matches the eager hidden-states path. ``has_residual`` records the
+    layer's output structure (fused (hidden, residual) tuple vs single tensor),
+    determined at install time so the op call site bakes a constant.
+    """
+
+    def __init__(
+        self,
+        module_name: str,
+        layer_num: int,
+        egress_layer_num: int,
+        cap: int,
+        hidden: int,
+        dtype: torch.dtype,
+        device: torch.device | str,
+        has_residual: int = 1,
+        do_capture: bool = True,
+    ) -> None:
+        super().__init__()
+        self.module_name = module_name
+        self.layer_num = int(layer_num)
+        self.egress_layer_num = int(egress_layer_num)
+        self.cap = int(cap)
+        self.hidden = int(hidden)
+        self.has_residual = int(has_residual)
+        self.do_capture = bool(do_capture)
+
+        # Row 0 = discard sentinel (never read by egress). register_buffer pins
+        # data_ptr across replays, but only if built BEFORE vLLM's cudagraph pool
+        # is allocated — the load_model patch guarantees that. persistent=False
+        # keeps it out of the state_dict.
+        self.register_buffer(
+            "hs_buf",
+            torch.zeros(self.cap + 1, self.hidden, dtype=dtype, device=device),
+            persistent=False,
+        )
+
+        # Routing views, bound later by the registry (it owns the backing slabs).
+        self.capture_index: torch.Tensor | None = None
+        self.any_active: torch.Tensor | None = None
+
+    def bind_views(self, capture_index: torch.Tensor, any_active: torch.Tensor) -> None:
+        """Attach this layer's row-views into the registry's global slabs."""
+        self.capture_index = capture_index
+        self.any_active = any_active
+
+    def capture(self, hidden: torch.Tensor, residual: torch.Tensor) -> None:
+        """Scatter the residual stream rows into the static buffer.
+
+        Single ``vllm_hook::capture_hs`` op call (graph-legal). ``has_residual``
+        is baked at install time, so the op site carries no data-dependent branch.
+        """
+        torch.ops.vllm_hook.capture_hs(
+            hidden, residual, self.hs_buf, self.capture_index, self.has_residual
+        )
+
+
+class SteerHost(nn.Module):
+    """Per-decoder-layer host for buffer-mode activation steering (the MUTATING
+    counterpart of QKHookHost/HSHookHost).
+
+    Owns NO per-layer sink buffer — steering writes the residual in place, so the
+    only static GPU state is the per-(layer, token) routing views (``coeff``,
+    ``vec_id``, registry-owned) and the shared ``vec_table`` (the vector library).
+    ``steer()`` calls the ``steer_buffer`` op, which does a masked in-place
+    ``residual += coeff * vec_table[vec_id]`` (add_vector); ``coeff == 0`` rows are
+    no-ops, so a layer no request steers costs one masked add. ``do_steer`` is an
+    install-time gate. ``layer_num`` is 0-based (matches the eager worker's
+    ``this_layer`` compared against config ``optimal_layer``).
+    """
+
+    def __init__(
+        self,
+        module_name: str,
+        layer_num: int,
+        cap: int,
+        do_steer: bool = True,
+    ) -> None:
+        super().__init__()
+        self.module_name = module_name
+        self.layer_num = int(layer_num)
+        self.cap = int(cap)
+        self.do_steer = bool(do_steer)
+
+        # Routing views + shared vector table, bound later by the registry.
+        self.coeff: torch.Tensor | None = None
+        self.vec_id: torch.Tensor | None = None
+        self.vec_table: torch.Tensor | None = None
+
+    def bind_views(self, coeff: torch.Tensor, vec_id: torch.Tensor,
+                   vec_table: torch.Tensor) -> None:
+        """Attach this layer's ``coeff``/``vec_id`` row-views + the shared table."""
+        self.coeff = coeff
+        self.vec_id = vec_id
+        self.vec_table = vec_table
+
+    def steer(self, residual: torch.Tensor) -> None:
+        """Apply the masked in-place steering add (single ``steer_buffer`` op)."""
+        torch.ops.vllm_hook.steer_buffer(
+            residual, self.coeff, self.vec_id, self.vec_table
+        )

@@ -279,8 +279,15 @@ class ProbeHiddenStatesWorker:
             self._captured_states = {}
         if not getattr(self, "_disk_states", None):
             self._disk_states = {}
-        from vllm_hook_plugins.graph.install_hs import install_hs_hosts
+        from vllm_hook_plugins.graph.install_hs import (
+            install_execute_model_wrapper_hs,
+            install_hs_hosts,
+        )
+        # Buffer mode returns a HostRegistry and needs the routing+egress wrapper
+        # (per-request Python outside the compiled region); op mode returns None
+        # and captures inside the hs_probe eager seam (wrapper is a no-op there).
         install_hs_hosts(self)
+        install_execute_model_wrapper_hs(self.model_runner, self)
 
     # ------------------------------------------------------------------
     # API serving: collective_rpc-callable artifact retrieval

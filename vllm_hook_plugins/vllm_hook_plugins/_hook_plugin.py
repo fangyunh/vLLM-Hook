@@ -153,36 +153,52 @@ def _patched_create_engine_config(self, *args, **kwargs):
     # replay (proven on GPU: the op only fired on non-replayed warmup forwards,
     # never during real generation). As a splitting op it runs every step, so the
     # capture body executes mid-forward with the live request state.
-    if graph_mode and os.environ.get("VLLM_HOOK_QK_CAPTURE", "op") == "op":
-        try:
-            cc = config.compilation_config
-            ops = list(getattr(cc, "splitting_ops", None) or [])
-            # Add ONLY the splitting op for the active worker — not all three.
-            #
-            # Why per-worker (load-bearing for VLLM_USE_AOT_COMPILE=1): the AOT
-            # compile cache key is derived from vllm_config.compute_hash(), which
-            # hashes compilation_config.splitting_ops. If every worker advertised the
-            # same three ops, all three produce the SAME cache key, so worker B loads
-            # worker A's serialized graph (proven on GPU: the HS/steer engines loaded
-            # the QK artifact and ran the wrong eager seam → crash / silent miss).
-            # One op per worker keeps the keys — and thus the artifacts — distinct.
-            #
-            # The op the worker actually emits is also (idempotently) re-added by its
-            # own graph_install at load_model, so this is just the early, hash-time
-            # declaration. An op that never appears in the traced graph would be
-            # ignored anyway, but excluding it is what makes the AOT key correct.
-            _op = _splitting_op_for_worker(self.worker_extension_cls)
-            if _op is not None and _op not in ops:
-                ops.append(_op)
-                cc.splitting_ops = ops
-                print(f"[vllm-hook] added {_op} to "
-                      f"compilation_config.splitting_ops ({len(ops)} total) "
-                      f"for worker {self.worker_extension_cls}")
-            elif _op is None:
-                print(f"[vllm-hook] no known splitting op for worker "
-                      f"{self.worker_extension_cls}; none added")
-        except Exception as e:  # noqa: BLE001
-            print(f"[vllm-hook] could not add capture op to splitting_ops: {e}")
+    # Only OP-mode capture needs the splitting-op seam. Buffer mode (QK/HS) and
+    # seam mode deliberately do NOT declare a splitting op: the capture kernel must
+    # be absorbed into the (FULL decode) cudagraph, and declaring a splitting op
+    # under FULL would force a fallback to FULL_AND_PIECEWISE (re-introducing an
+    # eager seam) — see docs/v0.4.0_full_cuda_graph_plan.md §1.2. The gate is
+    # PER-WORKER: each worker checks its own capture-mode env var.
+    if graph_mode:
+        _op = _splitting_op_for_worker(self.worker_extension_cls)
+        _declare = (
+            (_op == "vllm_hook::qk_probe"
+             and os.environ.get("VLLM_HOOK_QK_CAPTURE", "op") == "op")
+            or (_op == "vllm_hook::hs_probe"
+                and os.environ.get("VLLM_HOOK_HS_CAPTURE", "op") == "op")
+            or (_op == "vllm_hook::steer_residual"
+                and os.environ.get("VLLM_HOOK_STEER_MODE", "op") == "op")
+        )
+        if _declare:
+            try:
+                cc = config.compilation_config
+                ops = list(getattr(cc, "splitting_ops", None) or [])
+                # Add ONLY the splitting op for the active worker — not all three.
+                #
+                # Why per-worker (load-bearing for VLLM_USE_AOT_COMPILE=1): the AOT
+                # compile cache key is derived from vllm_config.compute_hash(), which
+                # hashes compilation_config.splitting_ops. If every worker advertised
+                # the same three ops, all three produce the SAME cache key, so worker
+                # B loads worker A's serialized graph (proven on GPU: the HS/steer
+                # engines loaded the QK artifact and ran the wrong eager seam → crash
+                # / silent miss). One op per worker keeps the keys — and thus the
+                # artifacts — distinct.
+                #
+                # The op the worker actually emits is also (idempotently) re-added by
+                # its own graph_install at load_model, so this is just the early,
+                # hash-time declaration.
+                if _op is not None and _op not in ops:
+                    ops.append(_op)
+                    cc.splitting_ops = ops
+                    print(f"[vllm-hook] added {_op} to "
+                          f"compilation_config.splitting_ops ({len(ops)} total) "
+                          f"for worker {self.worker_extension_cls}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[vllm-hook] could not add capture op to splitting_ops: {e}")
+        else:
+            print(f"[vllm-hook] buffer/seam capture for worker "
+                  f"{self.worker_extension_cls}: no splitting op declared "
+                  f"(op absorbed into the cudagraph)")
 
     return config
 

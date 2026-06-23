@@ -208,6 +208,57 @@ def _steer_residual_fake(hidden: torch.Tensor, residual: torch.Tensor,
     return None
 
 
+# steer_buffer: the FULL-mode (buffer) analogue of steer_residual — the MUTATING
+# counterpart of capture_qk/capture_hs. A real CUDA kernel (NOT a splitting op) that
+# reads static routing buffers and does a masked, in-place `residual += coeff * vec`
+# (the `add_vector` method). It is absorbed into the decode cudagraph and replays
+# every step; the in-place mutation under the `mutates_args=["residual"]` contract is
+# what threads the steered residual into the downstream layers (same primitive the
+# op-mode steer_residual relies on, but with no Python on the replay path).
+#
+# This is the LoRA-slot model: a fixed `vec_table[V_max, hidden]` library, a per-row
+# `token → vec_id` map, and a per-row `coeff` that gates no-steer rows to 0. Different
+# requests pick different (layer, vector, coefficient) purely as buffer contents.
+
+
+def _steer_buffer_impl(
+    residual: torch.Tensor,
+    coeff: torch.Tensor,
+    vec_id: torch.Tensor,
+    vec_table: torch.Tensor,
+) -> None:
+    """Masked in-place `residual[t] += coeff[t] * vec_table[vec_id[t]]` (add_vector).
+
+    Vectorised, graph-safe (no host sync). ``coeff``/``vec_id`` are length CAP but
+    ``residual`` has only ``n = residual.shape[0]`` rows this step; the leading ``n``
+    routing entries align row-for-row. ``coeff == 0`` rows are exact no-ops (the add
+    contributes zero), so an unsteered layer/token costs only a masked add. The dtype
+    casts are defensive (vec_table/coeff should already match the residual dtype).
+    """
+    # Buffer-mode static buffers are Python-global tensors baked as graph consts; like
+    # the probe sinks they can deserialize to None on an AOT-compile reload. Skip the
+    # add rather than crash (buffer mode is not AOT-validated; defensive only).
+    if coeff is None or vec_id is None or vec_table is None:
+        return None
+    _FIRE_COUNT[0] += 1  # diagnostic only
+    n = residual.shape[0]
+    c = coeff[:n].to(residual.dtype)              # (n,)
+    vids = vec_id[:n].to(torch.long)              # (n,)
+    vecs = vec_table.index_select(0, vids).to(residual.dtype)  # (n, hidden)
+    residual[:n].add_(c.unsqueeze(-1) * vecs)     # in-place — mutates_args contract
+    return None
+
+
+def _steer_buffer_fake(
+    residual: torch.Tensor,
+    coeff: torch.Tensor,
+    vec_id: torch.Tensor,
+    vec_table: torch.Tensor,
+) -> None:
+    """Meta/fake impl: in-place mutation, no new tensor under tracing."""
+    return None
+
+
 QK_PROBE_OP_NAME = "qk_probe"
 HS_PROBE_OP_NAME = "hs_probe"
 STEER_RESIDUAL_OP_NAME = "steer_residual"
@@ -215,6 +266,8 @@ STEER_RESIDUAL_OP_NAME = "steer_residual"
 # Constants so downstream files import rather than hard-code op names.
 LIB_NAMESPACE = "vllm_hook"
 CAPTURE_QK_OP_NAME = "capture_qk"
+CAPTURE_HS_OP_NAME = "capture_hs"
+STEER_BUFFER_OP_NAME = "steer_buffer"
 
 
 def _import_direct_register_custom_op():
@@ -293,6 +346,57 @@ def _capture_qk_fake(
 
 
 # ---------------------------------------------------------------------------
+# capture_hs: the HS analogue of capture_qk — scatter the residual stream into
+# a static per-layer sink, in place, as a graph-recorded kernel. The HS buffer
+# path (VLLM_HOOK_HS_CAPTURE=buffer) is the FULL-mode counterpart to op-mode
+# hs_probe: NOT a splitting op, so it is absorbed into the decode cudagraph and
+# replays every step (no Python on replay). Unlike QK there is no prefix-K — the
+# residual stream is per-token, so the scattered rows ARE the artifact.
+# ---------------------------------------------------------------------------
+
+
+def _capture_hs_impl(
+    hidden: torch.Tensor,
+    residual: torch.Tensor,
+    hs_buf: torch.Tensor,
+    index: torch.Tensor,
+    has_residual: int,
+) -> None:
+    """Form the residual stream and scatter its rows into ``hs_buf``, in place.
+
+    ``combined = hidden + residual`` for fused-residual layers (``has_residual``
+    truthy), else ``hidden``. ``index`` is length CAP but ``hidden`` has only
+    ``n = hidden.shape[0]`` rows this step; the leading ``n`` routing entries
+    align row-for-row, and row 0 is the discard sentinel for unrequested tokens.
+    Vectorised, no host sync — graph-legal. ``has_residual`` is a per-layer
+    constant baked at the call site, so this adds no data-dependent control flow.
+    """
+    _FIRE_COUNT[0] += 1  # diagnostic only
+    # Static buffers are Python-global tensors baked as graph consts; like the
+    # probe sinks they can deserialize to None on an AOT-compile reload. Skip the
+    # scatter rather than crash (mirrors _capture_qk_impl's defensive guard).
+    if hs_buf is None or index is None:
+        return None
+    n = hidden.shape[0]
+    idx = index[:n].to(torch.long)
+    combined = hidden + residual if has_residual else hidden
+    src = combined if combined.dtype == hs_buf.dtype else combined.to(hs_buf.dtype)
+    hs_buf.index_copy_(0, idx, src)
+    return None
+
+
+def _capture_hs_fake(
+    hidden: torch.Tensor,
+    residual: torch.Tensor,
+    hs_buf: torch.Tensor,
+    index: torch.Tensor,
+    has_residual: int,
+) -> None:
+    """Meta/fake impl: in-place mutation, no new tensor under tracing."""
+    return None
+
+
+# ---------------------------------------------------------------------------
 # registration entry point
 # ---------------------------------------------------------------------------
 
@@ -323,6 +427,19 @@ def register_graph_ops() -> None:
         )
     except Exception as e:  # noqa: BLE001
         # Already registered in this process — fine.
+        if "already" not in str(e).lower() and "exist" not in str(e).lower():
+            raise
+
+    try:
+        direct_register_custom_op(
+            op_name=CAPTURE_HS_OP_NAME,
+            op_func=_capture_hs_impl,
+            mutates_args=["hs_buf"],
+            fake_impl=_capture_hs_fake,
+            target_lib=_LIB,
+            dispatch_key="CUDA",
+        )
+    except Exception as e:  # noqa: BLE001
         if "already" not in str(e).lower() and "exist" not in str(e).lower():
             raise
 
@@ -369,13 +486,30 @@ def register_graph_ops() -> None:
         if "already" not in str(e).lower() and "exist" not in str(e).lower():
             raise
 
+    # The FULL-mode (buffer) steering op: masked in-place residual add, NOT a
+    # splitting op — absorbed into the decode cudagraph and replayed every step.
+    try:
+        direct_register_custom_op(
+            op_name=STEER_BUFFER_OP_NAME,
+            op_func=_steer_buffer_impl,
+            mutates_args=["residual"],
+            fake_impl=_steer_buffer_fake,
+            target_lib=_LIB,
+            dispatch_key="CUDA",
+        )
+    except Exception as e:  # noqa: BLE001
+        if "already" not in str(e).lower() and "exist" not in str(e).lower():
+            raise
+
     # Mark registered only once the handles resolve, so a partial failure surfaces
     # here rather than as a confusing AttributeError at capture time.
     ns = getattr(torch.ops, LIB_NAMESPACE, None)
     if ns is None or not hasattr(ns, CAPTURE_QK_OP_NAME) or not hasattr(
-        ns, QK_PROBE_OP_NAME
-    ) or not hasattr(ns, HS_PROBE_OP_NAME) or not hasattr(
-        ns, STEER_RESIDUAL_OP_NAME
+        ns, CAPTURE_HS_OP_NAME
+    ) or not hasattr(ns, QK_PROBE_OP_NAME) or not hasattr(
+        ns, HS_PROBE_OP_NAME
+    ) or not hasattr(ns, STEER_RESIDUAL_OP_NAME) or not hasattr(
+        ns, STEER_BUFFER_OP_NAME
     ):
         raise RuntimeError(
             f"register_graph_ops: ops under torch.ops.{LIB_NAMESPACE} "
@@ -405,3 +539,24 @@ def capture_qk(
     """Thin wrapper over ``torch.ops.vllm_hook.capture_qk`` (resolved at call time),
     so callers can import and call it directly; traced as the opaque graph node."""
     return torch.ops.vllm_hook.capture_qk(q, k, q_buf, k_buf, index, active)
+
+
+def capture_hs(
+    hidden: torch.Tensor,
+    residual: torch.Tensor,
+    hs_buf: torch.Tensor,
+    index: torch.Tensor,
+    has_residual: int,
+) -> None:
+    """Thin wrapper over ``torch.ops.vllm_hook.capture_hs`` (resolved at call time)."""
+    return torch.ops.vllm_hook.capture_hs(hidden, residual, hs_buf, index, has_residual)
+
+
+def steer_buffer(
+    residual: torch.Tensor,
+    coeff: torch.Tensor,
+    vec_id: torch.Tensor,
+    vec_table: torch.Tensor,
+) -> None:
+    """Thin wrapper over ``torch.ops.vllm_hook.steer_buffer`` (resolved at call time)."""
+    return torch.ops.vllm_hook.steer_buffer(residual, coeff, vec_id, vec_table)

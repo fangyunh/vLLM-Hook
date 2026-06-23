@@ -16,7 +16,7 @@ forwards; decode under cudagraph replay is out of scope for this milestone.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -24,7 +24,12 @@ from vllm.forward_context import get_forward_context
 
 from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.graph import register_graph_ops
-from vllm_hook_plugins.graph.install import _cpu_1d  # shared CPU-tensor coercion
+from vllm_hook_plugins.graph.hosts import SteerHost
+from vllm_hook_plugins.graph.install import (  # shared helpers
+    _cpu_1d,
+    _resolve_max_num_batched_tokens,
+    install_prepare_inputs_routing,
+)
 from vllm_hook_plugins.workers._common import (
     get_query_metadata,
     iter_matched_modules,
@@ -40,6 +45,7 @@ _WRAPPED_LAYER_CLASSES: Dict[type, Any] = {}
 # Per-instance 0-based layer index (matches the EAGER steer worker's `this_layer`,
 # which is compared against config `optimal_layer`); -1 = don't steer this layer.
 _STEER_LAYER_ATTR = "_vllm_hook_steer_layer"
+_STEER_HOST_ATTR = "_vllm_hook_steer_host"   # per-instance SteerHost (buffer mode)
 _GLOBAL_SINK_STEER = None                 # int64 (1,) keep-alive against DCE
 
 # Set at install so the op impl can reach the worker (vector cache, env config).
@@ -47,6 +53,15 @@ _ACTIVE_WORKER_STEER = None
 _steer_dbg = {"n": 0, "fire": 0}
 
 _DEBUG = os.environ.get("VLLM_HOOK_QK_DEBUG", "1") == "1"
+
+# Steering path, mirroring VLLM_HOOK_QK_CAPTURE / VLLM_HOOK_HS_CAPTURE:
+#   "op"     (default): steer_residual splitting op (PIECEWISE eager seam).
+#   "buffer": steer_buffer masked in-place add, NO splitting op, absorbed into the
+#             decode cudagraph — the FULL_DECODE_ONLY path (add_vector only).
+_STEER_MODE = os.environ.get("VLLM_HOOK_STEER_MODE", "op")
+
+_dbg_steer_call_n = [0]
+_DBG_STEER_MAX_CALLS = 8
 
 
 def _steer_body(hidden: torch.Tensor, residual: torch.Tensor,
@@ -172,6 +187,21 @@ def _wrap_layer_class(cls: type) -> None:
     def make_wrapped(orig_fwd):
         def wrapped(self, *args, **kwargs):
             out = orig_fwd(self, *args, **kwargs)
+
+            # ---- buffer mode: masked in-place steer_buffer add (NO splitting op →
+            # absorbed into the decode cudagraph). do_steer is an install-time
+            # constant, so this adds no data-dependent control flow. ----
+            if _STEER_MODE == "buffer":
+                host = getattr(self, _STEER_HOST_ATTR, None)
+                if host is not None and host.do_steer:
+                    if (isinstance(out, tuple) and len(out) >= 2
+                            and isinstance(out[1], torch.Tensor)):
+                        host.steer(out[1])      # mutate the residual in place
+                    elif isinstance(out, torch.Tensor):
+                        host.steer(out)
+                return out
+
+            # ---- op mode (default): steer_residual splitting op. ----
             layer_idx = getattr(self, _STEER_LAYER_ATTR, -1)
             if layer_idx < 0 or _GLOBAL_SINK_STEER is None:
                 return out
@@ -231,6 +261,13 @@ def install_steer_hosts(worker) -> None:
         return
 
     device_t = next(model.parameters()).device
+
+    # ---- buffer mode (FULL-decode milestone): steer_buffer masked add ----
+    if _STEER_MODE == "buffer":
+        _install_steer_buffer(worker, model, matched, device_t)
+        return
+
+    # ---- op mode (default): steer_residual splitting op ----
     _GLOBAL_SINK_STEER = torch.zeros(1, dtype=torch.int64, device=device_t)
     n_wired = 0
     for name, module, layer_num0 in matched:
@@ -253,6 +290,215 @@ def install_steer_hosts(worker) -> None:
         print(f"[graph/install_steer] could not set splitting_ops: {e}")
 
     print(f"[graph/install_steer] op-mode steering wired: {n_wired} layer(s)")
+
+
+# ---------------------------------------------------------------------------
+# Buffer mode (FULL decode): SteerRegistry + masked steer_buffer add
+# ---------------------------------------------------------------------------
+
+
+class SteerRegistry:
+    """Per-worker owner of the steering routing slabs + the resident vector table.
+
+    Mirrors ``HostRegistry`` (so it plugs into ``install_prepare_inputs_routing``),
+    but its slabs are the steering data plane: ``coeff_all (num_layers, cap)`` float
+    and ``vec_id_all (num_layers, cap)`` int — per-(layer, token) coefficient and
+    vector index. ``vec_table (V_max, hidden)`` is the LoRA-style vector library,
+    pre-allocated so its ``data_ptr`` is fixed across replays; vectors are written
+    into pre-allocated rows in place (so adding one never moves the table). All ranks
+    steer, so ``should_capture`` is always True.
+    """
+
+    def __init__(self, num_layers, cap, hidden, v_max, device, dtype):
+        self.num_layers = int(num_layers)
+        self.cap = int(cap)
+        self.hidden = int(hidden)
+        self.v_max = int(v_max)
+        self.device = torch.device(device)
+        self.should_capture = True  # steering is applied on EVERY TP rank
+
+        self.coeff_all = torch.zeros(num_layers, cap, dtype=torch.float32, device=device)
+        self.vec_id_all = torch.zeros(num_layers, cap, dtype=torch.int64, device=device)
+        # The resident vector library (fixed data_ptr; rows written in place).
+        self.vec_table = torch.zeros(v_max, hidden, dtype=dtype, device=device)
+
+        pin = self.device.type == "cuda"
+        self.coeff_pinned = torch.zeros(num_layers, cap, dtype=torch.float32, pin_memory=pin)
+        self.vec_id_pinned = torch.zeros(num_layers, cap, dtype=torch.int64, pin_memory=pin)
+        self._upload_event = torch.cuda.Event() if self.device.type == "cuda" else None
+
+        self.hosts: Dict[int, SteerHost] = {}
+        self.vec_paths: Dict[str, int] = {}  # vector_path -> row in vec_table
+        self._next_vec_id = 0
+        self._pending_plans: list = []
+
+    def register_host(self, host: SteerHost) -> None:
+        self.hosts[host.layer_num] = host
+
+    def assign_views(self) -> None:
+        for layer_num, host in self.hosts.items():
+            host.bind_views(self.coeff_all[layer_num], self.vec_id_all[layer_num],
+                            self.vec_table)
+
+    def begin_step(self) -> None:
+        pass  # steering keeps no forward-context stash
+
+    def reset_pinned(self) -> None:
+        if self._upload_event is not None:
+            self._upload_event.synchronize()
+        self.coeff_pinned.zero_()
+        self.vec_id_pinned.zero_()
+
+    def upload(self) -> None:
+        self.coeff_all.copy_(self.coeff_pinned, non_blocking=True)
+        self.vec_id_all.copy_(self.vec_id_pinned, non_blocking=True)
+        if self._upload_event is not None:
+            self._upload_event.record()
+
+    def vec_id_for_path(self, path: str, worker) -> Optional[int]:
+        """Resolve ``vector_path`` to a vec_table row, loading + caching on first use.
+
+        The vector is loaded into a PRE-ALLOCATED row in place (data_ptr fixed), so
+        a never-before-seen vector can be admitted without moving the table — graph
+        safe. Returns None if the path can't be loaded or the table is full.
+        """
+        vid = self.vec_paths.get(path)
+        if vid is not None:
+            return vid
+        cache = getattr(worker, "_vector_cache", None) if worker is not None else None
+        if cache is None and worker is not None:
+            worker._vector_cache = cache = {}
+        data = cache.get(path) if cache is not None else None
+        if data is None:
+            try:
+                raw = _load_steering_vector(path)
+            except Exception:  # noqa: BLE001
+                return None
+            d = raw["dir"]
+            data = {"dir": d if torch.is_tensor(d) else torch.tensor(d)}
+            if cache is not None:
+                cache[path] = data
+        if self._next_vec_id >= self.v_max:
+            return None  # table full
+        vid = self._next_vec_id
+        self._next_vec_id += 1
+        self.vec_table[vid].copy_(
+            data["dir"].to(self.vec_table.device, dtype=self.vec_table.dtype).view(-1))
+        self.vec_paths[path] = vid
+        return vid
+
+
+def _install_steer_buffer(worker, model, matched, device) -> SteerRegistry:
+    """Build the buffer-mode steering hosts + routing registry (no splitting op).
+
+    One ``SteerHost`` per matched decoder layer; a ``SteerRegistry`` owns the
+    per-(layer, token) coeff/vec_id routing slabs and the resident vector table.
+    Routing runs in the ``_prepare_inputs`` wrapper (per-request config → coeff/vec
+    buffers); the layer wrap applies ``steer_buffer`` (masked in-place add). There is
+    NO egress — steering produces no artifacts, only the residual mutation.
+    """
+    global _GLOBAL_SINK_STEER
+    _GLOBAL_SINK_STEER = None  # buffer mode doesn't use the op-mode sink
+
+    cap = _resolve_max_num_batched_tokens(worker)
+    cfg = model.config
+    text_cfg = getattr(cfg, "text_config", cfg)
+    hidden = int(getattr(text_cfg, "hidden_size"))
+    num_layers = int(getattr(text_cfg, "num_hidden_layers", 0)) or (
+        max(ln for _, _, ln in matched) + 1)
+    v_max = int(os.environ.get("VLLM_HOOK_STEER_VMAX", "16"))
+    buf_dtype = model.dtype if hasattr(model, "dtype") else next(model.parameters()).dtype
+
+    registry = SteerRegistry(num_layers, cap, hidden, v_max, device, buf_dtype)
+
+    n_wired = 0
+    for name, module, layer_num0 in matched:
+        if 0 <= layer_num0 < num_layers:
+            host = SteerHost(module_name=name, layer_num=layer_num0, cap=cap,
+                             do_steer=True)
+            setattr(module, _STEER_HOST_ATTR, host)
+            registry.register_host(host)
+            n_wired += 1
+        _wrap_layer_class(type(module))
+    registry.assign_views()
+
+    worker._graph_registry = registry
+    # Routing only — steering has no egress, so no execute_model wrapper is needed.
+    install_prepare_inputs_routing(worker.model_runner, worker, _build_routing_steer,
+                                   label="steer")
+    print(f"[graph/install_steer] buffer-mode steering wired: {n_wired} layer(s) over "
+          f"{num_layers} slots; cap={cap} hidden={hidden} V_max={v_max}; "
+          f"NO splitting op (rides decode cudagraph)")
+    return registry
+
+
+def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -> list:
+    """Fill the pinned coeff/vec_id mirrors from each request's steer config.
+
+    For every request whose resolved config targets layer L with ``add_vector``,
+    write ``coeff`` and the vector's ``vec_id`` across the request's token span at
+    row L; unsteered (layer, token) entries stay 0 (an exact no-op in the op). Uses
+    flat positions (steering modifies the current step's residual; no accumulation).
+    """
+    if qsl_cpu is None:
+        return []
+    worker = _ACTIVE_WORKER_STEER
+    try:
+        req_ids = model_runner.input_batch.req_ids
+    except Exception:
+        return []
+
+    bs = len(qsl_cpu) - 1
+    coeff_pinned = registry.coeff_pinned
+    vecid_pinned = registry.vec_id_pinned
+    cap = registry.cap
+    env_path = getattr(worker, "_env_config_path", None) if worker else None
+
+    plans: list = []
+    dbg: list = []
+    for i in range(bs):
+        if i >= len(req_ids):
+            break
+        req_id = req_ids[i]
+        req_state = model_runner.requests.get(req_id)
+        if req_state is None or req_state.sampling_params is None:
+            continue
+        steer_arg = (req_state.sampling_params.extra_args or {}).get("steer")
+        cfg = _resolve_steer_config(steer_arg, env_path)
+        if cfg is None:
+            continue
+        layer = int(cfg.get("optimal_layer", -1))
+        if not (0 <= layer < registry.num_layers):
+            continue
+        method = cfg.get("method", "adjust_rs")
+        if method != "add_vector":
+            # Buffer mode implements add_vector only; adjust_rs (per-token in-kernel
+            # matmul) stays op-mode/PIECEWISE for now.
+            dbg.append(f"r{i}:method={method}_unsupported")
+            continue
+        coefficient = float(cfg.get("coefficient", 0.0))
+        vector_path = cfg.get("vector_path")
+        if not vector_path:
+            continue
+        vid = registry.vec_id_for_path(vector_path, worker)
+        if vid is None:
+            dbg.append(f"r{i}:vec_load_failed")
+            continue
+
+        start = int(qsl_cpu[i])
+        end = min(int(qsl_cpu[i + 1]), cap)
+        if end <= start:
+            continue
+        coeff_pinned[layer, start:end] = coefficient
+        vecid_pinned[layer, start:end] = vid
+        plans.append({"req_idx": i, "layer": layer, "coeff": coefficient, "vid": vid})
+        dbg.append(f"r{i}:L{layer},coeff={coefficient},vid={vid},rows={start}:{end}")
+
+    if _DEBUG and _dbg_steer_call_n[0] <= _DBG_STEER_MAX_CALLS:
+        _dbg_steer_call_n[0] += 1
+        print(f"[graph/dbg-steer] routing bs={bs} steered={len(plans)} :: "
+              + " | ".join(dbg), flush=True)
+    return plans
 
 
 __all__ = ["install_steer_hosts"]

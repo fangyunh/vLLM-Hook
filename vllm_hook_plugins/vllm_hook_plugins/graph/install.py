@@ -756,10 +756,28 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         if end <= start:
             dbg_rows.append(f"r{i}:empty_range")
             continue
-        # Clamp to buffer capacity (highest routable position is cap-1 → row cap);
-        # over-cap tokens stay in the sentinel and are discarded.
-        end = min(end, cap)
-        if end <= start:
+        qlen = end - start  # this step's scheduled tokens for req i
+
+        # ---- ABSOLUTE-position routing (k_buf accumulation) ----
+        # Each token scatters to row = its ABSOLUTE sequence position + 1, so q_buf /
+        # k_buf accumulate across decode steps: by step t the buffer holds rows for
+        # positions 0..total-1. This is the buffer-mode analogue of the eager path's
+        # prefix-K reconstruction — egress reads the full key history from the buffer
+        # (k_buf[1 : abs_end+1]) instead of re-reading the paged KV cache. With flat
+        # (per-step) rows a decode token would overwrite row 1 (the first prompt key),
+        # so accumulation REQUIRES absolute rows. num_computed_tokens_cpu[i] is the
+        # host-side count of tokens already processed = the absolute position of this
+        # step's first token (pre-step value; the scheduler advances it post-forward).
+        try:
+            abs_start = int(model_runner.input_batch.num_computed_tokens_cpu[i])
+        except Exception:  # noqa: BLE001
+            abs_start = start  # fallback: flat == absolute for a single fresh prefill
+        abs_end = abs_start + qlen
+        # Clamp the routed span to buffer capacity (rows > cap → sentinel/discard).
+        abs_end_c = min(abs_end, cap)
+        n_route = abs_end_c - abs_start
+        if n_route <= 0:
+            dbg_rows.append(f"r{i}:over_cap(abs_start={abs_start})")
             continue
 
         # Determine which layers this request wants.
@@ -770,27 +788,30 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         if not req_layers:
             continue
 
-        # Route EVERY new token, for BOTH modes: q and k scatter together, and even
-        # in last_token mode k_all keeps the full window (q is reduced at egress).
-        # Vectorised: assign the [start, end) column span for all requested layers
-        # in one indexed write (O(num_requests), not a per-token double loop).
-        rows = torch.arange(start + 1, end + 1, dtype=torch.int64)
+        # Route EVERY new token, for BOTH modes: q and k scatter together (q reduced
+        # at egress in last_token mode). Flat columns [start, start+n_route) carry this
+        # step's tokens; their destination rows are the absolute positions +1.
+        rows = torch.arange(abs_start + 1, abs_end_c + 1, dtype=torch.int64)
         layer_idx = torch.tensor(req_layers, dtype=torch.long)
-        capture_index_pinned[layer_idx[:, None], start:end] = rows[None, :]
+        capture_index_pinned[layer_idx[:, None], start:start + n_route] = rows[None, :]
         any_active_pinned[layer_idx] = 1
 
-        # Stash everything egress needs so it does not re-derive the gating.
+        # Stash everything egress needs so it does not re-derive the gating. seq_start=0
+        # assumes capture began at the sequence start (fresh prefill, no prefix-cache
+        # hit) — true for the FULL milestones; a cached-prefix prefill is out of scope.
         bucket_key = "_disk_states" if extra.get("save_to_disk") else "_captured_states"
         plans.append({
             "req_idx": i,
             "req_id": req_id,
-            "start": start,
-            "end": end,
+            "abs_start": abs_start,
+            "abs_end": abs_end_c,
+            "seq_start": 0,
             "layers": req_layers,
             "hookq_mode": req_mode,
             "bucket_key": bucket_key,
             "req_state": req_state,
         })
+        dbg_rows.append(f"r{i}:qlen={qlen},abs=[{abs_start},{abs_end_c}),mode={req_mode}")
 
     if _DEBUG and _dbg_call_n[0] <= _DBG_MAX_CALLS:
         print(f"[graph/dbg]   routing bs={bs} plans={len(plans)} :: "
@@ -843,81 +864,41 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
     unchanged: bucket[req_id][module_name] = {"q":[...], "k_all":[...],
     "layer_num": L, "hookq_mode": mode}.
 
-    Per (request, layer): q is the (query_len, q_dim) slice (all_tokens) or final
-    row (last_token); k_all is the key slice with prefix keys prepended. metadata /
-    seq_lens / kv-cache come from the wrap's stashed forward context (the live one
-    is gone post-forward); absent stash → no prefix-K, matching eager.
+    Buffers are scattered by ABSOLUTE sequence position (see _build_routing), so they
+    accumulate the full history. Per (request, layer): q is this step's slice
+    ``q_buf[abs_start+1 : abs_end+1]`` (all_tokens) or its final row (last_token);
+    k_all is the ACCUMULATED full key history ``k_buf[seq_start+1 : abs_end+1]`` — the
+    buffer-mode analogue of the eager path's prefix-K reconstruction, no paged-cache
+    read needed.
     """
     if not plans:
         return
-
-    ctx = registry.fwd_ctx
-    metadata = registry.fwd_attn_metadata
-
-    # seq_lens (prefix-K total length) from the stashed current-step metadata.
-    seq_lens = None
-    if metadata is not None:
-        _, seq_lens = get_query_metadata(metadata)
-
-    # Normalise per-layer metadata (hybrid models key by layer) to one object for
-    # block_table reads.
-    meta_for_kv = metadata
-    if isinstance(metadata, dict):
-        try:
-            meta_for_kv = next(iter(metadata.values()))
-        except StopIteration:
-            meta_for_kv = None
 
     for layer_num, host in registry.iter_hosts():
         q_buf = host.q_buf  # (cap+1, q_dim)
         k_buf = host.k_buf   # (cap+1, k_dim)
         module_name = host.module_name
+        cap = host.cap
 
         for plan in plans:
             if layer_num not in plan["layers"]:
                 continue
 
-            start = plan["start"]
-            end = plan["end"]
-            query_len = end - start
+            abs_start = plan["abs_start"]
+            abs_end = plan["abs_end"]
+            seq_start = plan["seq_start"]
             req_id = plan["req_id"]
             req_mode = plan["hookq_mode"]
-            req_idx = plan["req_idx"]
 
-            # Rows are start+1 .. end (sentinel-offset). Clone so we own the data
-            # (buffers are overwritten next step); .cpu() deferred to flush. The
-            # last_token row end is populated because routing always covers the full
-            # range; clamp to cap defensively.
-            cap = host.cap
+            # Clone so we own the data (buffers are overwritten / extended next step);
+            # .cpu() is deferred to flush. Rows are absolute-position + 1 (row 0 is the
+            # sentinel). q = this step's queries; k_all = accumulated full history.
             if req_mode == "all_tokens":
-                q_tok = q_buf[start + 1:end + 1, :].detach().clone()
+                q_tok = q_buf[abs_start + 1:abs_end + 1, :].detach().clone()
             else:
-                last_row = min(end, cap)  # row (end-1)+1 == end, bounded by cap
+                last_row = min(abs_end, cap)  # last token at abs_end-1 → row abs_end
                 q_tok = q_buf[last_row, :].detach().clone()
-            k_tok = k_buf[start + 1:end + 1, :].detach().clone()
-
-            # Prefix-K: when num_cached > 0 (total seq_len minus new query_len),
-            # read the missing prefix keys from the paged KV cache and prepend.
-            # Needs the stashed ctx (live context gone post-forward).
-            if seq_lens is not None and meta_for_kv is not None and ctx is not None:
-                try:
-                    sv = seq_lens[req_idx]
-                    total_len = int(sv.item()) if hasattr(sv, "item") else int(sv)
-                    num_cached = total_len - query_len
-                    if num_cached > 0:
-                        PROF.incr("kv.prefix_recon")
-                        with PROF.timed("kv.prefix_recon"):
-                            prefix_k = _read_cached_keys_from_ctx(
-                                ctx, module_name, meta_for_kv, req_idx,
-                                num_cached, total_len,
-                            )
-                        if prefix_k is not None:
-                            k_tok = torch.cat(
-                                [prefix_k.to(k_tok.device, dtype=k_tok.dtype), k_tok],
-                                dim=0,
-                            )
-                except Exception:
-                    PROF.incr("kv.prefix_recon.errors")
+            k_tok = k_buf[seq_start + 1:abs_end + 1, :].detach().clone()
 
             PROF.incr("hook.fire.qk")
             PROF.gauge(
@@ -1009,20 +990,110 @@ def _preforward_qsl(model_runner, scheduler_output) -> Optional[list]:
 
 
 # ---------------------------------------------------------------------------
+# _prepare_inputs routing — the load-bearing integration point (plan §5)
+# ---------------------------------------------------------------------------
+
+
+def _runner_qsl(model_runner) -> Optional[list]:
+    """Host-side cumulative query_start_loc for the CURRENT step, read from the
+    model runner's OWN buffer AFTER ``_prepare_inputs`` populated it.
+
+    This is the robust qsl source: it is the same query_start_loc attention uses,
+    and it is correct for a NEW request's prefill. Pre-forward reconstruction from
+    scheduler_output (``_preforward_qsl``) is NOT — a new request is added to
+    ``input_batch`` only inside ``_update_states``, which runs after the
+    execute_model wrapper's pre-forward section, so the prefill step routed nothing
+    (observed on GPU: qsl_bs=None, plans=0 on every prefill).
+    """
+    try:
+        req_ids = model_runner.input_batch.req_ids
+        num_reqs = len(req_ids)
+        if num_reqs == 0:
+            return None
+        qsl_buf = model_runner.query_start_loc
+        np_arr = getattr(qsl_buf, "np", None)
+        if np_arr is not None:
+            return [int(x) for x in np_arr[:num_reqs + 1]]
+        cpu_t = getattr(qsl_buf, "cpu", None)
+        if cpu_t is not None:
+            return [int(x) for x in cpu_t[:num_reqs + 1].tolist()]
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
+                                   label: str = "qk") -> None:
+    """Wrap ``model_runner._prepare_inputs`` to build + upload the capture routing
+    right after vLLM finishes input prep — when ``input_batch`` and
+    ``query_start_loc`` reflect THIS step (post ``_update_states``). The routing
+    must land before the (possibly cudagraph-replayed) forward, and _prepare_inputs
+    is the legal off-graph home for it; the resulting plans are stashed on the
+    registry for the execute_model wrapper's post-forward egress.
+
+    Idempotent. Defensive: an internal vLLM surface, so any failure degrades to
+    "no capture this step" rather than crashing the forward.
+    """
+    flag = f"_vllm_hook_{label}_prep_wrapped"
+    if getattr(model_runner, flag, False):
+        return
+    orig_prepare = getattr(model_runner, "_prepare_inputs", None)
+    if orig_prepare is None or not callable(orig_prepare):
+        print(f"[graph/install] no _prepare_inputs to wrap ({label}); routing disabled")
+        return
+    setattr(model_runner, flag, True)
+
+    def wrapped_prepare_inputs(scheduler_output, *args, **kwargs):
+        result = orig_prepare(scheduler_output, *args, **kwargs)
+        registry: Optional[HostRegistry] = getattr(worker, "_graph_registry", None)
+        if registry is None or not registry.should_capture:
+            return result
+        # Skip during vLLM's cudagraph capture pass — a host sync / pinned write
+        # while capturing is illegal. Buffers are populated at replay, not capture.
+        try:
+            if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+                return result
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            registry.begin_step()
+            qsl_cpu = _runner_qsl(model_runner)
+            with PROF.timed("graph.route"):
+                registry.reset_pinned()
+                plans = build_routing_fn(model_runner, registry, qsl_cpu) \
+                    if qsl_cpu is not None else []
+                registry.upload()
+            registry._pending_plans = plans
+        except Exception as e:  # noqa: BLE001
+            registry._pending_plans = []
+            if _DEBUG:
+                print(f"[graph/dbg] _prepare_inputs routing ({label}) raised: {e!r}",
+                      flush=True)
+        return result
+
+    model_runner._prepare_inputs = wrapped_prepare_inputs
+    print(f"[graph/install] _prepare_inputs routing wrapper installed ({label})")
+
+
+# ---------------------------------------------------------------------------
 # execute_model wrapper (never compiled — all per-request Python lives here)
 # ---------------------------------------------------------------------------
 
 
 def install_execute_model_wrapper(model_runner, worker) -> None:
-    """Wrap ``model_runner.execute_model`` for routing + egress. Idempotent. An
-    instance-method replacement, outside the compiled region — the legal home for
-    per-request Python (the graph only READS the buffers we upload here).
+    """Install the QK buffer-mode routing (``_prepare_inputs`` wrapper) + egress
+    (``execute_model`` wrapper). Idempotent.
+
+    Routing runs in the ``_prepare_inputs`` wrapper (where ``input_batch`` /
+    ``query_start_loc`` are current for this step — including a NEW request's
+    prefill); egress drains the static buffers post-forward here, reading the plans
+    the routing wrapper stashed on the registry.
     """
     if getattr(model_runner, "_vllm_hook_qk_wrapped", False):
         return
 
     # Op and seam modes capture inside the forward (qk_probe op / attention impl
-    # seam respectively), so neither needs the routing+egress wrapper — skip it.
+    # seam respectively), so neither needs the routing+egress wrappers — skip them.
     if _CAPTURE_MODE in ("op", "seam"):
         print(f"[graph/install] capture mode={_CAPTURE_MODE} — execute_model wrapper "
               f"skipped (capture runs inside the forward)")
@@ -1033,85 +1104,49 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     # Surface worker fallback mode + default phase onto the runner so the routing
     # helper reads them without reaching through the worker.
     model_runner._worker_hookq_mode = getattr(worker, "hookq_mode", "all_tokens")
-    model_runner._default_hooks_on = getattr(
-        worker, "_default_hooks_on", "prefill"
-    )
+    model_runner._default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
+
+    # Routing — runs after _update_states + input prep, so prefill routes correctly.
+    install_prepare_inputs_routing(model_runner, worker, _build_routing, label="qk")
 
     orig_execute_model = model_runner.execute_model
 
     def wrapped_execute_model(scheduler_output, *args, **kwargs):
         _dbg_call_n[0] += 1
-        if _DEBUG and _dbg_call_n[0] == 1:
-            print("[graph/dbg] execute_model WRAPPER INVOKED (1st call) — the "
-                  "wrapper is on the live forward path", flush=True)
         registry: Optional[HostRegistry] = getattr(worker, "_graph_registry", None)
-
-        # Non-capture rank or no hosts: nothing to route/drain — straight through.
         if registry is None or not registry.should_capture:
             return orig_execute_model(scheduler_output, *args, **kwargs)
 
-        # Don't route during vLLM's graph capture pass — a host sync / pinned write
-        # while capturing is illegal. Buffers are populated at replay, not capture,
-        # so skipping is correct. Mirrors the eager hook's is_current_stream_capturing bail.
-        try:
-            if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-                return orig_execute_model(scheduler_output, *args, **kwargs)
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Cheap host-side gate: skip the whole routing/egress block when no request
-        # wants QK.
-        any_qk = _any_qk_requested(model_runner)
-        if not any_qk:
-            _dbg(f"call#{_dbg_call_n[0]}: wrapper live, any_qk=False -> skip")
-            return orig_execute_model(scheduler_output, *args, **kwargs)
-
-        # ---- pre-forward: build routing on the pinned mirror + upload ----
-        # qsl comes from pre-forward CPU state, not get_forward_context() (the
-        # context is only live inside execute_model). The wrap stashes the live
-        # context during the forward for egress's prefix-K.
-        plans: list = []
-        registry.begin_step()  # clear the stash so the wrap re-snapshots this step
-        # Refresh the mode/phase snapshot each step so a later worker mutation can't
-        # desync the routing helper.
+        # Refresh mode/phase each step so a later worker mutation can't desync routing.
         model_runner._worker_hookq_mode = getattr(worker, "hookq_mode", "all_tokens")
         model_runner._default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
-        qsl_cpu = _preforward_qsl(model_runner, scheduler_output)
-
-        with PROF.timed("graph.route"):
-            registry.reset_pinned()
-            if qsl_cpu is not None:
-                plans = _build_routing(model_runner, registry, qsl_cpu)
-            registry.upload()
 
         from vllm_hook_plugins.graph.ops import get_fire_count
         fire_before = get_fire_count()
 
-        # ---- forward (graph replays; capture_qk scatters inline; the wrap stashes
-        # the forward context) ----
+        # Forward: _prepare_inputs (wrapped) builds+uploads routing, then the graph
+        # replays and capture_qk scatters into the static buffers.
         result = orig_execute_model(scheduler_output, *args, **kwargs)
 
         fire_after = get_fire_count()
 
-        # ---- post-forward: drain buffers into the worker buckets (the stashed
-        # context supplies prefix-K metadata; the live one is gone). ----
+        # Post-forward: drain the buffers into the worker buckets using the plans the
+        # routing wrapper stashed this step.
+        plans = getattr(registry, "_pending_plans", None) or []
         if plans:
             with PROF.timed("graph.egress"):
                 _egress(worker, registry, plans)
+        registry._pending_plans = []  # consume
 
-        # Print on every QK step (plans>0) and the first few calls, so the decisive
-        # prefill rows show without flooding on decode.
         if _DEBUG and (plans or _dbg_call_n[0] <= _DBG_MAX_CALLS):
-            qsl_bs = (len(qsl_cpu) - 1) if qsl_cpu is not None else None
             n_disk = sum(len(v) for v in getattr(worker, "_disk_states", {}).values())
             n_rpc = sum(len(v) for v in getattr(worker, "_captured_states", {}).values())
             print(
-                f"[graph/dbg] call#{_dbg_call_n[0]}: any_qk=True qsl_bs={qsl_bs} "
-                f"plans={len(plans)} op_fired={fire_after - fire_before} "
-                f"(total={fire_after}) disk_entries={n_disk} rpc_entries={n_rpc}",
+                f"[graph/dbg] call#{_dbg_call_n[0]}: plans={len(plans)} "
+                f"op_fired={fire_after - fire_before} (total={fire_after}) "
+                f"disk_entries={n_disk} rpc_entries={n_rpc}",
                 flush=True,
             )
-
         return result
 
     model_runner.execute_model = wrapped_execute_model
@@ -1178,4 +1213,6 @@ __all__ = [
     "patch_worker_load_model",
     "install_qk_hosts",
     "install_execute_model_wrapper",
+    "install_prepare_inputs_routing",
+    "_runner_qsl",
 ]

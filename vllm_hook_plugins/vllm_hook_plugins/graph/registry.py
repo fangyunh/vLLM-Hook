@@ -55,8 +55,12 @@ class HostRegistry:
             torch.cuda.Event() if self.device.type == "cuda" else None
         )
 
-        # layer_num -> QKHookHost
+        # layer_num -> QKHookHost (or HSHookHost — duck-typed: layer_num/cap/bind_views)
         self.hosts: Dict[int, QKHookHost] = {}
+
+        # Plans built by the _prepare_inputs routing wrapper this step, consumed by
+        # the execute_model egress wrapper post-forward (the two run in one step).
+        self._pending_plans: list = []
 
         # Forward-context stash: the attention wrap snapshots the live context on
         # its first fire each step (it's only valid inside the forward), so egress
