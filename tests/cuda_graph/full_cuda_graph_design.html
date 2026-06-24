@@ -426,6 +426,28 @@
   host&harr;GPU sync — the only syncs are vLLM&rsquo;s own input-prep event and the once-per-request
   flush.</figcaption>
   </figure>
+
+  <h3>Sizing the buffers — the equation</h3>
+  <p>Every static buffer is allocated once at <code>load_model</code> (before capture, so its
+  data-ptr is fixed) and sized from model dims and a single scheduler knob. The driver is
+  <strong><code>cap = max_num_batched_tokens</code></strong> — the largest single-step token count —
+  <em>not</em> <code>max_model_len</code>: flat per-step routing only ever stages one step&rsquo;s
+  tokens, so the buffer is sized to one batch, not the whole sequence.</p>
+  <pre><code><span class="cmt"># per worker, summed over the L hooked layers · b = dtype bytes (2 fp16/bf16, 4 fp32)</span>
+QK    bytes = L · (cap + 1) · (q_dim + k_dim) · b
+HS    bytes = L · (cap + 1) · d_model · b
+route bytes = L · cap · 8           <span class="cmt"># int64 capture_index (+ tiny any_active)</span>
+steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(layer,token) coeff/vec_id slabs)</span>
+
+  cap     = max_num_batched_tokens   <span class="cmt"># the +1 row is the row-0 discard sentinel</span>
+  q_dim   = n_heads    · d_head
+  k_dim   = n_kv_heads · d_head      <span class="cmt"># grouped-query: usually &lt; q_dim</span>
+  d_model = hidden size  ·  L = hooked layers  ·  V_max = steering vector-table capacity</code></pre>
+  <p class="muted">Example — Qwen2-1.5B (<code>L=28</code>, <code>q_dim=1536</code>,
+  <code>k_dim=256</code>, fp32) at <code>cap=2048</code>:
+  28 · 2049 · (1536+256) · 4 &asymp; <strong>392 MiB</strong> of QK scratch — exactly what the worker
+  logs. It scales linearly in <code>cap</code>, so <code>cap=16384</code> is 8&times; that. Densifying
+  <code>cudagraph_capture_sizes</code> changes how many steps replay, not this footprint.</p>
 </section>
 
 <!-- 06 ----------------------------------------------------------- -->
