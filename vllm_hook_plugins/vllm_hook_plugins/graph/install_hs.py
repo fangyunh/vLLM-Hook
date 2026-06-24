@@ -511,13 +511,14 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
         if _BATCHED_EGRESS:
             # Snapshot index j == buffer row j+1 == flat column j; plan span [start, end)
             # → snap[start:end], last_token row → snap[end-1]. The snapshot is the GPU
-            # residency (views share it), so note the drain/gauge ONCE per layer.
+            # residency (views share it), so note the DRAIN budget ONCE per layer. The
+            # work metric (captured.bytes.hs) instead counts the SAVED reduced views per
+            # request below — charging the W-row snapshot here would over-report it (~Wx
+            # for last_token, which saves only the single final row).
             W = max(p["end"] for p in layer_plans)
             snap = hs_buf[1:W + 1, :].detach().clone()
-            nbytes = snap.numel() * snap.element_size()
-            PROF.gauge("captured.bytes.hs", nbytes)
             if dm is not None:
-                dm.note(nbytes)
+                dm.note(snap.numel() * snap.element_size())
 
         for plan in layer_plans:
             start = plan["start"]
@@ -536,11 +537,14 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
                 hs_tok = hs_buf[start + 1:end + 1, :].detach().clone()
 
             PROF.incr("hook.fire.hs")
-            if not _BATCHED_EGRESS:
-                nbytes = hs_tok.numel() * hs_tok.element_size()
-                PROF.gauge("captured.bytes.hs", nbytes)
-                if dm is not None:
-                    dm.note(nbytes)
+            # SAVED bytes = this reduced view/clone. .numel() on a view returns its logical
+            # (reduced) element count, so this is byte-identical to the per-request and
+            # eager paths regardless of batching.
+            nbytes = hs_tok.numel() * hs_tok.element_size()
+            PROF.gauge("captured.bytes.hs", nbytes)
+            # Batched already noted the snapshot's GPU residency once per layer above.
+            if not _BATCHED_EGRESS and dm is not None:
+                dm.note(nbytes)
 
             bucket = getattr(worker, plan["bucket_key"])
             if req_id not in bucket:

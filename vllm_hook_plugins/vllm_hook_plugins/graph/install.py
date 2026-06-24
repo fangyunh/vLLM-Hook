@@ -921,15 +921,16 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             # [start, end) maps to snapshot[start:end]. W bounds it by the furthest column
             # any capturing request used (<= cap). Sentinel-routed gaps are copied but
             # never sliced into a bucket. The snapshot IS the GPU residency (views share
-            # its storage), so the drain/byte gauge is noted ONCE per layer here.
+            # its storage), so the DRAIN budget is noted ONCE per layer here. The work
+            # metric (captured.bytes.qk) instead counts the SAVED reduced views per request
+            # below — matching the per-request + eager paths. Charging the W-row snapshot
+            # here would over-report it (~Wx for last_token, which saves only 1 q row).
             W = max(p["end"] for p in layer_plans)
             snap_k = k_buf[1:W + 1, :].detach().clone()
             snap_q = q_buf[1:W + 1, :].detach().clone()
-            nbytes = (snap_k.numel() * snap_k.element_size()
-                      + snap_q.numel() * snap_q.element_size())
-            PROF.gauge("captured.bytes.qk", nbytes)
             if dm is not None:
-                dm.note(nbytes)
+                dm.note(snap_k.numel() * snap_k.element_size()
+                        + snap_q.numel() * snap_q.element_size())
 
         for plan in layer_plans:
             start = plan["start"]
@@ -958,7 +959,10 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                     "layer_num": layer_num, "hookq_mode": req_mode,
                 }
             layer_states[module_name]["k_all"].append(k_new)
-            nbytes = 0 if _BATCHED_EGRESS else k_new.numel() * k_new.element_size()
+            # SAVED bytes = this reduced view/clone (NOT the W-row snapshot). .numel() on a
+            # view returns its logical (reduced) element count, so this is byte-identical to
+            # the per-request and eager paths regardless of batching.
+            nbytes = k_new.numel() * k_new.element_size()
 
             if emit_q:
                 # q = this step's queries (all_tokens) or its last token (last_token);
@@ -971,15 +975,14 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                         else q_buf[end, :].detach().clone()
                 layer_states[module_name]["q"].append(q_tok)
                 layer_states[module_name]["k_prefix_ends"].append(int(abs_end))
-                if not _BATCHED_EGRESS:
-                    nbytes += q_tok.numel() * q_tok.element_size()
+                nbytes += q_tok.numel() * q_tok.element_size()
 
             PROF.incr("hook.fire.qk")
-            # Batched already noted the snapshot bytes once per layer above.
-            if not _BATCHED_EGRESS:
-                PROF.gauge("captured.bytes.qk", nbytes)
-                if dm is not None:
-                    dm.note(nbytes)
+            PROF.gauge("captured.bytes.qk", nbytes)
+            # Batched already noted the snapshot's GPU residency once per layer above;
+            # the per-request path drains the reduced clone it just made.
+            if not _BATCHED_EGRESS and dm is not None:
+                dm.note(nbytes)
 
 
 # ---------------------------------------------------------------------------
