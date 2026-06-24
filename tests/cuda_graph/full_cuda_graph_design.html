@@ -98,17 +98,21 @@
   <a href="#steer"><span class="n">07</span>Steering</a>
   <div class="grp">The contract</div>
   <a href="#config"><span class="n">08</span>Per-request config</a>
-  <a href="#status"><span class="n">09</span>Status &amp; proof</a>
+  <div class="grp">The speed</div>
+  <a href="#perf"><span class="n">09</span>Performance</a>
+  <a href="#chunked"><span class="n">10</span>Chunked prefill</a>
+  <a href="#status"><span class="n">11</span>Status &amp; proof</a>
 </nav>
 
 <!-- ============ MAIN ============ -->
 <main>
 
 <header class="hero">
-  <span class="tag">v0.4.0 · Design Note</span>
+  <span class="tag">v0.5.0 · Design Note</span>
   <h1>Hooking model internals under a&nbsp;FULL CUDA graph</h1>
   <p class="lede">Capturing attention, hidden states, and steering the residual stream — when the
-  decode step is a frozen sequence of GPU kernels and <em>no Python ever runs again</em>.</p>
+  decode step is a frozen sequence of GPU kernels and <em>no Python ever runs again</em>. And
+  making it <em>faster</em> than the eager hook it replaces.</p>
 </header>
 
 <!-- 00 ----------------------------------------------------------- -->
@@ -505,10 +509,14 @@
   <figcaption><b>Routing decides everything; the kernel decides nothing.</b> Tokens 1 and 3 were
   routed to row&nbsp;0, so they vanish into the sentinel. Tokens 0 and 2 land in real rows. To
   turn a layer off for a request, route its tokens to row&nbsp;0 — no branch, no cost difference
-  on replay. <b>QK adds one wrinkle:</b> on decode, the eager <code>k_all</code> is the full key
-  history, so each token routes to row <code>absolute_position + 1</code>; <code>k_buf</code>
-  <em>accumulates</em> across steps and egress slices <code>k_buf[seq_start+1 : abs_end+1]</code>.
-  HS needs no accumulation — the per-token residual stream <em>is</em> the artifact.</figcaption>
+  on replay. <b>QK adds one wrinkle:</b> <code>k_all</code> is the full key history. Each token
+  routes to row <code>flat_position + 1</code> — its column <em>within this step</em> — so a step
+  never writes past <code>cap</code>. Egress clones only <em>this step's</em> new key rows, and the
+  growing-prefix <code>k_all</code> is rebuilt at flush from those per-step clones plus the
+  recorded prefix lengths (<code>k_prefix_ends</code>). Routing per-step rather than by absolute
+  position is what lets a sequence longer than one batch (chunked prefill, long prompts) capture in
+  full, and lets several requests share the buffer without colliding (see §10). HS needs no
+  reconstruction — the per-token residual stream <em>is</em> the artifact.</figcaption>
   </figure>
 
   <h3>The three load-bearing fixes that made FULL capture actually work</h3>
@@ -517,7 +525,7 @@
     <tbody>
       <tr><td>1</td><td><strong>No splitting op under FULL</strong>, gated per-worker on <code>VLLM_HOOK_{QK,HS}_CAPTURE</code> / <code>VLLM_HOOK_STEER_MODE</code></td><td>Declaring a splitting op forces a fallback to <code>FULL_AND_PIECEWISE</code> and re-adds an eager seam. Buffer mode (and <code>steer_buffer</code>) declares none → decode is one full graph with the scatter / steer add baked in. The gate is per-worker so each compile/AOT cache key stays distinct.</td></tr>
       <tr><td>2</td><td><strong>Routing runs in a <code>_prepare_inputs</code> wrapper</strong>, not pre-<code>execute_model</code></td><td>A new request enters <code>input_batch</code> only inside <code>execute_model</code>. Old pre-forward routing produced <code>plans=0</code> on every prefill — a silent 0-layer capture. The fix builds + uploads routing right after <code>_prepare_inputs</code>, reading the runner's own <code>query_start_loc</code>.</td></tr>
-      <tr><td>3</td><td><strong>QK <code>k_all</code> via absolute-position accumulation</strong></td><td>The per-step scatter alone gives a too-short key history on decode. Routing each token to <code>abs_position + 1</code> makes <code>k_buf</code> accumulate the full history.</td></tr>
+      <tr><td>3</td><td><strong>QK <code>k_all</code> via flat per-step routing + flush-time reconstruction</strong></td><td>The growing <code>k_all</code> artifact is rebuilt from per-step new-key clones + <code>k_prefix_ends</code>, <em>not</em> accumulated in the buffer by absolute position. Flat routing (each token → its column + 1) keeps every step within <code>cap</code>, so a sequence longer than one batch (chunked prefill / long prompt) is captured in full and concurrent requests don't collide on shared rows. <span class="muted">The earlier absolute-position scheme silently dropped any token past <code>cap</code> — see §10.</span></td></tr>
     </tbody>
   </table>
 </section>
@@ -608,7 +616,7 @@
   runs its math in a Python impl at the seam — which, per §02, FULL skips. The FULL version
   (<code>VLLM_HOOK_STEER_MODE=buffer</code>) applies the very same buffer-mode discipline to a
   <em>mutating</em> kernel: this is the LoRA-slot model made literal. It is built and parity-proven
-  for the <code>add_vector</code> method.</p>
+  for <strong>both</strong> steering methods — <code>add_vector</code> and <code>adjust_rs</code>.</p>
 
   <figure>
   <svg viewBox="0 0 900 330" role="img" aria-label="steer_buffer masked residual add">
@@ -658,10 +666,12 @@
   at layer <em>L</em> with vector <em>v</em> and strength <em>c</em>: set
   <code>coeff[L, t] = c</code> and <code>vec_id[L, t] = v</code> across request <em>r</em>'s token
   span before the replay. To stop steering, set <code>coeff = 0</code> — the masked add becomes a
-  numeric no-op with no branch. Buffer mode implements <code>add_vector</code> (a plain masked
-  add). <code>adjust_rs</code> is <b>not</b> in buffer mode yet — it needs a per-token in-kernel
-  <code>matmul(seg, unit) → (avg_proj − proj)</code>, so for now it stays on the op-mode
-  (PIECEWISE) path. Steering wires on <b>all</b> TP ranks — the residual is replicated, so
+  numeric no-op with no branch. A per-token <code>steer_mode</code> mask unifies <b>both</b>
+  methods in one kernel: <code>add_vector</code> adds <code>coeff·vec_table[vec_id]</code> (host
+  coefficient); <code>adjust_rs</code> adds <code>(avg_proj_table[vec_id] − residual·unit)·unit</code>
+  with the coefficient computed <em>in-kernel</em> from the live residual (a graph-legal
+  gather + reduction + <code>where</code>), so one batch can even mix methods.
+  Steering wires on <b>all</b> TP ranks — the residual is replicated, so
   steering only rank 0 would desync them.</figcaption>
   </figure>
 
@@ -742,8 +752,84 @@
 </section>
 
 <!-- 09 ----------------------------------------------------------- -->
+<section id="perf">
+  <h2><span class="num">09</span>Performance: hooked decode beats eager <span class="pill done">v0.5.0 · measured</span></h2>
+  <div class="rule"></div>
+  <p>Correctness was v0.4.0. v0.5.0 makes the FULL path <strong>faster than the eager
+  <code>register_forward_hook</code> it replaces</strong> — per decode step, graph-vs-eager on the
+  same node, Qwen2-1.5B, <code>FULL_DECODE_ONLY</code>:</p>
+
+  <table>
+    <thead><tr><th>Worker</th><th>graph (FULL) ms/step</th><th>eager ms/step</th><th>speedup</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Steering</strong></td><td>3.4</td><td>12.3</td><td class="good">3.6&times;</td></tr>
+      <tr><td><strong>QK capture</strong> <span class="muted">(all_tokens)</span></td><td>21.7</td><td>59.5</td><td class="good">2.75&times;</td></tr>
+      <tr><td><strong>HS capture</strong> <span class="muted">(all_tokens)</span></td><td>14.1</td><td>23.9</td><td class="good">1.7&times;</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">Per-step time is noisy (growing-memory workload); the reliable signal is the
+  within-job graph&nbsp;&lt;&nbsp;eager comparison, which holds in every re-run.</p>
+
+  <p>Five workstreams, all riding the same buffer-mode discipline (no Python on replay):</p>
+  <table>
+    <thead><tr><th>#</th><th>Optimization</th><th>What it removes / enables</th></tr></thead>
+    <tbody>
+      <tr><td>W1</td><td><strong>Invalidation routing</strong></td><td>When the batch signature (<code>req_ids</code>, <code>query_start_loc</code>) and upload width are unchanged from last step, the device slabs already hold an identical routing — <strong>skip the reset/build/upload entirely</strong>. Steady-state decode collapses to a pure graph replay with a resident buffer. Steering routes by stable flat position, so its key is bit-identical every decode step → it skips; capture takes the conservative path (rebuild every step) by default.</td></tr>
+      <tr><td>W2</td><td><strong>Double-buffered pinned mirror</strong> (<code>PinnedMirrorRing</code>)</td><td>The routing is staged in pinned host memory, then copied H2D. A single mirror forces <code>reset</code> to wait on the <em>in-flight</em> copy before zeroing — a per-step CPU&harr;GPU sync that serializes routing&rarr;forward. A depth-2 ring reuses a slot whose upload finished steps ago, so the wait is already satisfied. Device slabs stay single; only the host side rings. The wait is unconditional, so the depth is a pure perf knob with no correctness floor.</td></tr>
+      <tr><td>W3</td><td><strong>Incremental egress</strong></td><td>QK <code>all_tokens</code> decode used to re-clone the whole accumulated <code>k_all</code> every step — O(N&sup2;) GPU work and memory. Now egress clones only this step's new key rows (O(1)/step) and the growing prefix is rebuilt at flush from those clones + <code>k_prefix_ends</code> — byte-identical artifact, O(N) memory. (This is also what made flat routing viable; see §10.)</td></tr>
+      <tr><td>W4</td><td><strong>Budget-driven drains</strong></td><td>When GPU-resident capture clones exceed a memory budget, drain them GPU&rarr;pinned host on a dedicated copy stream (overlapping compute), guarded by <code>wait_stream</code> + <code>record_stream</code> + an event-gated flush barrier. Bounds GPU residency under heavy capture. <strong>Default off</strong> &rarr; zero behavior change.</td></tr>
+      <tr><td>W5</td><td><strong>FULL (mixed-step) graphing</strong></td><td>Under <code>cudagraph_mode=FULL</code> the dispatcher graphs <em>mixed</em> prefill+decode steps too (which <code>FULL_DECODE_ONLY</code> runs eager) — the real win for a continuous-batching server. Buffer mode needs <strong>no change</strong>: it declares no splitting op, so the scatter / steer is absorbed into the prefill/mixed graphs and replays. KV-cache cost measured at <strong>zero</strong> at the 512 cap on Qwen2-1.5B.</td></tr>
+    </tbody>
+  </table>
+  <div class="call key">
+    <b class="lbl">Why it ends up faster, not slower</b>
+    The eager hook pays a Python callback and a fresh GPU clone <em>every layer, every step</em>.
+    The buffer path bakes the scatter into the replay (no Python), routes once per step on the host
+    (skipped entirely on a stable batch, W1), and clones only new rows (W3). The hook stops being on
+    the critical path.
+  </div>
+</section>
+
+<!-- 10 ----------------------------------------------------------- -->
+<section id="chunked">
+  <h2><span class="num">10</span>Chunked prefill: why routing is per-step <span class="pill done">fixed · parity-proven</span></h2>
+  <div class="rule"></div>
+  <p>When a prompt is longer than <code>max_num_batched_tokens</code>, vLLM splits its prefill
+  across several steps (chunked prefill) — exactly the case a long-context server hits. The static
+  buffer is sized to one batch budget (<code>cap = max_num_batched_tokens</code>), and a single
+  sequence can be far longer than that.</p>
+
+  <div class="call bad">
+    <b class="lbl">The bug the absolute scheme had</b>
+    Routing by <em>absolute</em> sequence position meant a token at position &ge; <code>cap</code>
+    had nowhere to land — it was clamped to the discard sentinel and <strong>silently dropped</strong>.
+    A 1472-token prompt at <code>cap=512</code> captured only the first 512 keys
+    (<code>all_tokens</code>), or the wrong "final" token with a truncated history
+    (<code>last_token</code>). The eager path never had this problem: it reconstructs the full key
+    history by reading the unbounded <em>paged KV cache</em> — which the static buffer cannot do.
+  </div>
+
+  <p>The fix is the flat per-step routing of §05: each step's tokens are bounded by <code>cap</code>,
+  so they <em>always</em> fit; the growing <code>k_all</code> is rebuilt at flush from the per-step
+  new-key clones (W3) plus <code>k_prefix_ends</code>. <code>last_token</code> additionally keeps
+  accumulating K on every chunk but emits the query only on the final chunk (the eager skip-guard
+  equivalent). HS and steering were already per-step (flat) and so were never affected.</p>
+
+  <div class="call key">
+    <b class="lbl">The proof</b>
+    The graph-vs-eager oracle, forced into chunked prefill (<code>cap=512</code>, 1472-token prompt),
+    now captures the <strong>full</strong> 1472-key history (was 512) with exact shapes and entry
+    counts, both modes. A <strong>no-chunk control</strong> (same prompt, <code>cap=2048</code>,
+    single step) drifts <em>identically</em> in the late layers (max&nbsp;|&Delta;|&nbsp;&asymp;&nbsp;0.04,
+    the engine's own compiled-vs-eager TF32 matmul precision accumulating with depth) — so the
+    residual difference is numeric, <strong>not</strong> a capture error. As a bonus, flat routing
+    gives each request a disjoint column range, so it also dissolves the M5 multi-request collision.
+  </div>
+</section>
+
+<!-- 11 ----------------------------------------------------------- -->
 <section id="status">
-  <h2><span class="num">09</span>What is proven, and what is next</h2>
+  <h2><span class="num">11</span>What is proven, and what is next</h2>
   <div class="rule"></div>
   <p>Every cell is validated by the established subprocess-isolated graph-vs-eager numerical
   oracle on LSF (<code>capture → eager → compare</code>), Qwen2-1.5B, <code>rtol=atol=1e-2</code>.
@@ -751,13 +837,16 @@
   <code>exclusive_process</code>.</p>
 
   <table>
-    <thead><tr><th>Path</th><th>PIECEWISE (v0.3.0)</th><th>FULL decode</th><th>+ multi-req</th><th>+ AOT</th><th>+ TP&gt;1</th></tr></thead>
+    <thead><tr><th>Path</th><th>PIECEWISE</th><th>FULL decode</th><th>FULL mixed (W5)</th><th>chunked prefill</th><th>+ multi-req</th><th>+ AOT</th><th>+ TP&gt;1</th></tr></thead>
     <tbody>
-      <tr><td><strong>QK capture</strong></td><td class="good">✓ proven</td><td class="good">✓ proven <span class="muted">(both configs)</span></td><td class="mut">M5</td><td class="mut">M6</td><td class="mut">M6</td></tr>
-      <tr><td><strong>HS capture</strong></td><td class="good">✓ proven</td><td class="good">✓ proven <span class="muted">(both configs)</span></td><td class="mut">M5</td><td class="mut">M6</td><td class="mut">M6</td></tr>
-      <tr><td><strong>Steering</strong></td><td class="good">✓ proven</td><td class="good">✓ proven <span class="muted">(add_vector)</span></td><td class="mut">M5</td><td class="mut">M6</td><td class="mut">M6</td></tr>
+      <tr><td><strong>QK capture</strong></td><td class="good">✓</td><td class="good">✓ <span class="muted">(both cfg)</span></td><td class="good">✓</td><td class="good">✓ <span class="muted">(§10)</span></td><td class="mut">M5*</td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>HS capture</strong></td><td class="good">✓</td><td class="good">✓ <span class="muted">(both cfg)</span></td><td class="good">✓</td><td class="good">✓</td><td class="good">✓ <span class="muted">(flat)</span></td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>Steering</strong></td><td class="good">✓</td><td class="good">✓ <span class="muted">(both methods)</span></td><td class="good">✓</td><td class="good">n/a</td><td class="good">✓ <span class="muted">(selectivity+churn)</span></td><td class="good">✓</td><td class="mut">M6</td></tr>
     </tbody>
   </table>
+  <p class="muted">*QK multi-request: flat routing (§10) gives each request a disjoint column range
+  and structurally dissolves the old shared-row collision, but a chunked multi-request QK batch is
+  not yet separately parity-proven — that is M5's remaining surface.</p>
 
   <div class="legend" style="margin:14px 0 22px;">
     <span><i style="background:var(--good)"></i>shipped &amp; parity-proven</span>
@@ -767,42 +856,52 @@
   <p><strong>Done (v0.4.0 — capture <em>and</em> steering under FULL):</strong></p>
   <ul>
     <li><strong>QK + HS buffer-mode capture</strong> under <code>FULL_DECODE_ONLY</code>, both
-    hook-activity configs (prefill-only and both), <code>last_token</code> + <code>all_tokens</code>.
-    Validated by LSF jobs 1563264/1563265 (HS) and 1563895/1563896 (QK) — every cell PASS under
-    PIECEWISE <em>and</em> FULL_DECODE_ONLY.</li>
+    hook-activity configs (prefill-only and both), <code>last_token</code> + <code>all_tokens</code> —
+    every cell PASS under PIECEWISE <em>and</em> FULL_DECODE_ONLY.</li>
     <li><strong>Steering via <code>steer_buffer</code></strong> (the mutating op, §07) under
-    <code>FULL_DECODE_ONLY</code> for <code>add_vector</code> — token-for-token parity vs eager
-    across a 12-step greedy decode with a non-vacuous steering effect (LSF job 1569510, VERDICT
-    PASS). <strong>This is the milestone that demonstrates per-request config on a frozen graph,
-    by data alone.</strong></li>
+    <code>FULL_DECODE_ONLY</code> for <strong>both</strong> <code>add_vector</code> and
+    <code>adjust_rs</code> — token-for-token parity vs eager across a greedy decode with a
+    non-vacuous effect. <strong>The milestone that demonstrates per-request config on a frozen
+    graph, by data alone.</strong></li>
+  </ul>
+
+  <p><strong>Done (v0.5.0 — performance &amp; chunked prefill):</strong></p>
+  <ul>
+    <li><strong>Hooked decode beats eager</strong> (§09): W1 invalidation routing, W2 pinned-mirror
+    ring, W3 incremental egress, W4 budget drains, W5 FULL mixed-step graphing. Steering 3.6&times;,
+    QK 2.75&times;, HS 1.7&times; vs the v0.2.0 eager hook.</li>
+    <li><strong>AOT compile</strong> (<code>VLLM_USE_AOT_COMPILE=1</code>) — all three workers,
+    fresh-compile <em>and</em> reload-from-cache.</li>
+    <li><strong>Multi-request steering</strong> — per-request-different config in one batch
+    (selectivity) + continuous-batching churn, graph == eager per request.</li>
+    <li><strong>Chunked-prefill capture</strong> (§10) — flat per-step routing; full-history capture
+    proven vs eager (no-chunk control isolates the residual as fp matmul drift, not a capture error).</li>
   </ul>
 
   <p><strong>Next:</strong></p>
   <ul>
-    <li><strong>Steering <code>adjust_rs</code> in buffer mode:</strong> needs the per-token
-    in-kernel <code>matmul(seg, unit) → (avg_proj − proj)</code>; stays op-mode (PIECEWISE) until
-    then.</li>
-    <li><strong>M5 — Multi-request mixed-config batches:</strong> the config plane (§08);
-    generalize the single-request <code>seq_start</code> / accumulation to per-request row ranges;
-    prove one batch where A steers L8, B steers L12, C captures QK, D does nothing — all in one
-    FULL replay. The steer slabs are already per-row but not yet exercised with a true mixed batch.</li>
-    <li><strong>M6 — Hardening:</strong> AOT + buffer mode (untested together); TP&gt;1; a real
-    model (Granite-3.1-8B); fallback dispatch + the graph-eligible-fraction metric.</li>
+    <li><strong>M5 — Multi-request QK capture:</strong> flat routing already dissolves the shared-row
+    collision; parity-prove a chunked multi-request QK batch (HS + steering multi-request are done).</li>
+    <li><strong>M6 — Hardening:</strong> TP&gt;1; AOT + buffer mode at scale; fallback dispatch +
+    the graph-eligible-fraction metric.</li>
   </ul>
 
   <div class="call">
     <b class="lbl">Reference</b>
-    Full execution plan: <code>docs/v0.4.0_full_cuda_graph_plan.md</code>.
-    Mechanism &amp; env facts: <code>tests/cuda_graph/README.md</code>.
-    Ops: <code>graph/ops.py</code> · Hosts: <code>graph/hosts.py</code> · QK install:
-    <code>graph/install.py</code> · Steer install: <code>graph/install_steer.py</code>.
-    Harnesses: <code>tests/cuda_graph/tests/{qk_graph,hs_graph,steer_graph}/</code>.
+    Plans: <code>docs/v0.4.0_full_cuda_graph_plan.md</code> ·
+    <code>docs/v0.5.0_hooked_decode_perf_plan.md</code>. Reports:
+    <code>docs/v0.4.0_full_cuda_graph_report.md</code> ·
+    <code>docs/v0.5.0_hooked_decode_perf_report.md</code>. Mechanism &amp; env facts:
+    <code>tests/cuda_graph/README.md</code>. Ops: <code>graph/ops.py</code> · Hosts:
+    <code>graph/hosts.py</code> · QK install: <code>graph/install.py</code> · Steer install:
+    <code>graph/install_steer.py</code>. Harnesses:
+    <code>tests/cuda_graph/tests/{qk_graph,hs_graph,steer_graph,capture_perf,steer_graph,chunked_prefill}/</code>.
   </div>
 </section>
 
 <p class="muted" style="font-size:12.5px; border-top:1px solid var(--line); padding-top:18px;">
-vLLM-Hook · v0.4.0 FULL CUDA-graph design note · generated 2026-06-23 · target:
-<span class="kbd">cudagraph_mode=FULL_DECODE_ONLY</span> on Qwen2-1.5B.</p>
+vLLM-Hook · v0.5.0 FULL CUDA-graph design note · generated 2026-06-24 · target:
+<span class="kbd">cudagraph_mode=FULL_DECODE_ONLY</span> / <span class="kbd">FULL</span> on Qwen2-1.5B.</p>
 
 </main>
 </div>

@@ -179,11 +179,11 @@ class HostRegistry:
     def routing_key(self, model_runner, qsl_cpu) -> Optional[tuple]:
         """Invalidation key for the routing wrapper (W1). ``None`` = never skip.
 
-        QK/HS capture routes by ABSOLUTE sequence position (the k_buf rows advance
-        +1/token every decode step), so the routing genuinely changes each step and
-        must NOT be skipped — capture returns ``None`` here. SteerRegistry overrides
-        this with a real signature (its routing is bit-identical on a stable batch).
-        Capture's own incremental routing is the v0.5.0 W3 workstream (Step 3).
+        Capture (QK/HS) returns ``None`` so the routing is rebuilt every step — the
+        conservative, latency-neutral choice. With FLAT per-step routing the index is
+        actually bit-identical on a stable decode batch (each request's column is
+        fixed), so a real signature like SteerRegistry's would let W1 collapse decode
+        to a pure replay; that is an opt-in perf follow-on, deliberately left off here.
         """
         return None
 

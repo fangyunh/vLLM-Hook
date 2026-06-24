@@ -753,32 +753,29 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
 
         start = int(qsl_cpu[i])
         end = int(qsl_cpu[i + 1])
+        if end > cap:  # invariant: a step's tokens <= max_num_batched_tokens == cap
+            dbg_rows.append(f"r{i}:end>{cap}_clamped")
+            end = cap
         if end <= start:
             dbg_rows.append(f"r{i}:empty_range")
             continue
         qlen = end - start  # this step's scheduled tokens for req i
 
-        # ---- ABSOLUTE-position routing (k_buf accumulation) ----
-        # Each token scatters to row = its ABSOLUTE sequence position + 1, so q_buf /
-        # k_buf accumulate across decode steps: by step t the buffer holds rows for
-        # positions 0..total-1. This is the buffer-mode analogue of the eager path's
-        # prefix-K reconstruction — egress reads the full key history from the buffer
-        # (k_buf[1 : abs_end+1]) instead of re-reading the paged KV cache. With flat
-        # (per-step) rows a decode token would overwrite row 1 (the first prompt key),
-        # so accumulation REQUIRES absolute rows. num_computed_tokens_cpu[i] is the
-        # host-side count of tokens already processed = the absolute position of this
-        # step's first token (pre-step value; the scheduler advances it post-forward).
+        # ---- FLAT (per-step) routing ----
+        # Each token scatters to row = its FLAT batch column + 1. A step's token count
+        # is bounded by max_num_batched_tokens == cap, so a row NEVER exceeds the buffer
+        # — the chunked-prefill / long-prompt under-capture the old absolute scheme hit
+        # (positions past cap fell off the buffer) is gone. The buffer no longer has to
+        # PERSIST the whole history: it only stages THIS step's keys, and the growing
+        # k_all artifact is rebuilt at flush from the per-step new-key clones +
+        # k_prefix_ends (W3). abs_end is the absolute key count through this step (the
+        # prefix length we record); num_computed_tokens_cpu[i] is the pre-step processed
+        # count (the scheduler advances it post-forward).
         try:
-            abs_start = int(model_runner.input_batch.num_computed_tokens_cpu[i])
+            num_computed = int(model_runner.input_batch.num_computed_tokens_cpu[i])
         except Exception:  # noqa: BLE001
-            abs_start = start  # fallback: flat == absolute for a single fresh prefill
-        abs_end = abs_start + qlen
-        # Clamp the routed span to buffer capacity (rows > cap → sentinel/discard).
-        abs_end_c = min(abs_end, cap)
-        n_route = abs_end_c - abs_start
-        if n_route <= 0:
-            dbg_rows.append(f"r{i}:over_cap(abs_start={abs_start})")
-            continue
+            num_computed = start  # single fresh prefill: flat == absolute
+        abs_end = num_computed + qlen
 
         # Determine which layers this request wants.
         if layer_filter is None:
@@ -788,30 +785,43 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         if not req_layers:
             continue
 
-        # Route EVERY new token, for BOTH modes: q and k scatter together (q reduced
-        # at egress in last_token mode). Flat columns [start, start+n_route) carry this
-        # step's tokens; their destination rows are the absolute positions +1.
-        rows = torch.arange(abs_start + 1, abs_end_c + 1, dtype=torch.int64)
+        # last_token + chunked prefill: K must still ACCUMULATE on every prefill chunk
+        # (so the final key history is complete), but the Q + prefix marker are emitted
+        # only on the FINAL chunk — the buffer-mode analogue of the eager qkv_hook skip
+        # guard. all_tokens emits Q every step; decode is always "final" (emit Q).
+        emit_q = True
+        if req_mode == "last_token" and len(req_state.output_token_ids) == 0:
+            try:
+                num_prompt = int(model_runner.input_batch.num_prompt_tokens[i])
+            except Exception:  # noqa: BLE001
+                num_prompt = abs_end  # unknown -> treat as final chunk
+            emit_q = abs_end >= num_prompt  # final prefill chunk reached
+
+        # Route EVERY new token (q + k scatter together) into flat rows [start+1, end+1)
+        # so k_buf holds this step's keys for egress to clone.
+        rows = torch.arange(start + 1, end + 1, dtype=torch.int64)
         layer_idx = torch.tensor(req_layers, dtype=torch.long)
-        capture_index_pinned[layer_idx[:, None], start:start + n_route] = rows[None, :]
+        capture_index_pinned[layer_idx[:, None], start:end] = rows[None, :]
         any_active_pinned[layer_idx] = 1
 
-        # Stash everything egress needs so it does not re-derive the gating. seq_start=0
-        # assumes capture began at the sequence start (fresh prefill, no prefix-cache
-        # hit) — true for the FULL milestones; a cached-prefix prefill is out of scope.
+        # Stash everything egress needs so it does not re-derive the gating. Capture is
+        # assumed to begin at the sequence start (fresh prefill, no prefix-cache hit) —
+        # true for the FULL milestones; a cached-prefix prefill is out of scope.
         bucket_key = "_disk_states" if extra.get("save_to_disk") else "_captured_states"
         plans.append({
             "req_idx": i,
             "req_id": req_id,
-            "abs_start": abs_start,
-            "abs_end": abs_end_c,
-            "seq_start": 0,
+            "start": start,
+            "end": end,
+            "abs_end": abs_end,
+            "emit_q": emit_q,
             "layers": req_layers,
             "hookq_mode": req_mode,
             "bucket_key": bucket_key,
             "req_state": req_state,
         })
-        dbg_rows.append(f"r{i}:qlen={qlen},abs=[{abs_start},{abs_end_c}),mode={req_mode}")
+        dbg_rows.append(f"r{i}:qlen={qlen},flat=[{start},{end}),abs_end={abs_end},"
+                        f"emit_q={emit_q},mode={req_mode}")
 
     if _DEBUG and _dbg_call_n[0] <= _DBG_MAX_CALLS:
         print(f"[graph/dbg]   routing bs={bs} plans={len(plans)} :: "
@@ -864,12 +874,15 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
     unchanged: bucket[req_id][module_name] = {"q":[...], "k_all":[...],
     "layer_num": L, "hookq_mode": mode}.
 
-    Buffers are scattered by ABSOLUTE sequence position (see _build_routing), so they
-    accumulate the full history. Per (request, layer): q is this step's slice
-    ``q_buf[abs_start+1 : abs_end+1]`` (all_tokens) or its final row (last_token);
-    k_all is the ACCUMULATED full key history ``k_buf[seq_start+1 : abs_end+1]`` — the
-    buffer-mode analogue of the eager path's prefix-K reconstruction, no paged-cache
-    read needed.
+    Buffers are scattered by FLAT (per-step) position (see _build_routing), so each
+    step's keys sit in rows ``[start+1, end+1)``. Per (request, layer): k_new is THIS
+    step's new keys, ALWAYS appended so the per-request ``k_all`` list is the complete
+    in-order key history; the growing-prefix artifact is rebuilt at flush from that
+    list + ``k_prefix_ends`` (W3). q + prefix marker are appended only when the plan's
+    ``emit_q`` is set — every step for all_tokens, but only the final prefill chunk +
+    each decode step for last_token (the eager skip-guard equivalent). q is this step's
+    slice ``q_buf[start+1:end+1]`` (all_tokens) or its last row ``q_buf[end]``
+    (last_token).
     """
     if not plans:
         return
@@ -878,44 +891,24 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
         q_buf = host.q_buf  # (cap+1, q_dim)
         k_buf = host.k_buf   # (cap+1, k_dim)
         module_name = host.module_name
-        cap = host.cap
 
         for plan in plans:
             if layer_num not in plan["layers"]:
                 continue
 
-            abs_start = plan["abs_start"]
+            start = plan["start"]
+            end = plan["end"]
             abs_end = plan["abs_end"]
-            seq_start = plan["seq_start"]
+            emit_q = plan["emit_q"]
             req_id = plan["req_id"]
             req_mode = plan["hookq_mode"]
 
-            # Clone so we own the data (buffers are overwritten / extended next step);
-            # .cpu() is deferred to flush. Rows are absolute-position + 1 (row 0 is the
-            # sentinel). q = this step's queries (already incremental).
-            if req_mode == "all_tokens":
-                q_tok = q_buf[abs_start + 1:abs_end + 1, :].detach().clone()
-            else:
-                last_row = min(abs_end, cap)  # last token at abs_end-1 → row abs_end
-                q_tok = q_buf[last_row, :].detach().clone()
-
-            # W3 incremental k_all: clone only THIS step's NEW keys
-            # (k_buf[abs_start+1:abs_end+1]) instead of the whole accumulated prefix
-            # (k_buf[seq_start+1:abs_end+1]). On decode that is O(1) rows/step instead of
-            # O(seq_len) — removing the per-step O(N^2) GPU clone (the QK decode hot spot,
-            # ~10x HS). The growing-prefix artifact eager produces is reconstructed at
-            # flush from these rows + the per-step prefix end (abs_end), so the captured
-            # k_all is byte-identical; ``k_prefix_ends`` marks the entry as incremental.
-            k_new = k_buf[abs_start + 1:abs_end + 1, :].detach().clone()
-
-            nbytes = (q_tok.numel() * q_tok.element_size()
-                      + k_new.numel() * k_new.element_size())
-            PROF.incr("hook.fire.qk")
-            PROF.gauge("captured.bytes.qk", nbytes)
-            # W4: accrue GPU-resident clone bytes for the budget-driven drain.
-            dm = getattr(worker, "_capture_drain", None)
-            if dm is not None:
-                dm.note(nbytes)
+            # W3 incremental: clone only THIS step's NEW keys (flat rows [start+1,end+1)),
+            # O(1) rows/decode step instead of the O(seq_len) full-prefix clone. ALWAYS
+            # appended (even on a last_token mid-prefill chunk that emits no q) so the
+            # k_all list is the complete in-order history; flush reconstructs the exact
+            # growing prefixes from it + k_prefix_ends, byte-identical to eager.
+            k_new = k_buf[start + 1:end + 1, :].detach().clone()
 
             bucket = getattr(worker, plan["bucket_key"])
             if req_id not in bucket:
@@ -926,9 +919,26 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                     "q": [], "k_all": [], "k_prefix_ends": [],
                     "layer_num": layer_num, "hookq_mode": req_mode,
                 }
-            layer_states[module_name]["q"].append(q_tok)
             layer_states[module_name]["k_all"].append(k_new)
-            layer_states[module_name]["k_prefix_ends"].append(int(abs_end - seq_start))
+            nbytes = k_new.numel() * k_new.element_size()
+
+            if emit_q:
+                # q = this step's queries (all_tokens) or its last token (last_token);
+                # flat row `end` is the last scattered column (end-1) + 1.
+                if req_mode == "all_tokens":
+                    q_tok = q_buf[start + 1:end + 1, :].detach().clone()
+                else:
+                    q_tok = q_buf[end, :].detach().clone()
+                layer_states[module_name]["q"].append(q_tok)
+                layer_states[module_name]["k_prefix_ends"].append(int(abs_end))
+                nbytes += q_tok.numel() * q_tok.element_size()
+
+            PROF.incr("hook.fire.qk")
+            PROF.gauge("captured.bytes.qk", nbytes)
+            # W4: accrue GPU-resident clone bytes for the budget-driven drain.
+            dm = getattr(worker, "_capture_drain", None)
+            if dm is not None:
+                dm.note(nbytes)
 
 
 # ---------------------------------------------------------------------------
