@@ -892,20 +892,30 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
 
             # Clone so we own the data (buffers are overwritten / extended next step);
             # .cpu() is deferred to flush. Rows are absolute-position + 1 (row 0 is the
-            # sentinel). q = this step's queries; k_all = accumulated full history.
+            # sentinel). q = this step's queries (already incremental).
             if req_mode == "all_tokens":
                 q_tok = q_buf[abs_start + 1:abs_end + 1, :].detach().clone()
             else:
                 last_row = min(abs_end, cap)  # last token at abs_end-1 → row abs_end
                 q_tok = q_buf[last_row, :].detach().clone()
-            k_tok = k_buf[seq_start + 1:abs_end + 1, :].detach().clone()
 
+            # W3 incremental k_all: clone only THIS step's NEW keys
+            # (k_buf[abs_start+1:abs_end+1]) instead of the whole accumulated prefix
+            # (k_buf[seq_start+1:abs_end+1]). On decode that is O(1) rows/step instead of
+            # O(seq_len) — removing the per-step O(N^2) GPU clone (the QK decode hot spot,
+            # ~10x HS). The growing-prefix artifact eager produces is reconstructed at
+            # flush from these rows + the per-step prefix end (abs_end), so the captured
+            # k_all is byte-identical; ``k_prefix_ends`` marks the entry as incremental.
+            k_new = k_buf[abs_start + 1:abs_end + 1, :].detach().clone()
+
+            nbytes = (q_tok.numel() * q_tok.element_size()
+                      + k_new.numel() * k_new.element_size())
             PROF.incr("hook.fire.qk")
-            PROF.gauge(
-                "captured.bytes.qk",
-                q_tok.numel() * q_tok.element_size()
-                + k_tok.numel() * k_tok.element_size(),
-            )
+            PROF.gauge("captured.bytes.qk", nbytes)
+            # W4: accrue GPU-resident clone bytes for the budget-driven drain.
+            dm = getattr(worker, "_capture_drain", None)
+            if dm is not None:
+                dm.note(nbytes)
 
             bucket = getattr(worker, plan["bucket_key"])
             if req_id not in bucket:
@@ -913,11 +923,12 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             layer_states = bucket[req_id]
             if module_name not in layer_states:
                 layer_states[module_name] = {
-                    "q": [], "k_all": [], "layer_num": layer_num,
-                    "hookq_mode": req_mode,
+                    "q": [], "k_all": [], "k_prefix_ends": [],
+                    "layer_num": layer_num, "hookq_mode": req_mode,
                 }
             layer_states[module_name]["q"].append(q_tok)
-            layer_states[module_name]["k_all"].append(k_tok)
+            layer_states[module_name]["k_all"].append(k_new)
+            layer_states[module_name]["k_prefix_ends"].append(int(abs_end - seq_start))
 
 
 # ---------------------------------------------------------------------------
@@ -1085,18 +1096,41 @@ def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
         try:
             registry.begin_step()
             qsl_cpu = _runner_qsl(model_runner)
+            width = _upload_width(model_runner, qsl_cpu, registry.cap)
+
+            # W1 invalidation: when the registry reports a stable routing signature
+            # (same key + upload width as last step), the device slabs already hold an
+            # identical routing — skip reset/build/upload so the step is a pure graph
+            # replay with the resident buffer. Steering returns a real key on a stable
+            # batch (its routing is bit-identical every decode step); capture returns
+            # None (its absolute-position rows advance each step) so it never skips
+            # here. A composition change (finish/admit) or prefill<->decode flip moves
+            # the key and forces a re-route. (W3 adds capture's own incremental path.)
+            key = registry.routing_key(model_runner, qsl_cpu) \
+                if qsl_cpu is not None else None
+            if (key is not None
+                    and key == getattr(registry, "_last_route_key", None)
+                    and width == getattr(registry, "_last_route_width", None)):
+                registry._pending_plans = getattr(registry, "_last_plans", [])
+                PROF.incr("graph.route.skip")
+                return result
+
             with PROF.timed("graph.route"):
                 # Only reset+upload the column prefix the (cudagraph-padded) forward
                 # actually reads — for decode that is ~max_graph_batch, not the full
                 # max_num_batched_tokens slab (a much smaller H2D copy per step).
-                width = _upload_width(model_runner, qsl_cpu, registry.cap)
                 registry.reset_pinned(width)
                 plans = build_routing_fn(model_runner, registry, qsl_cpu) \
                     if qsl_cpu is not None else []
                 registry.upload(width)
             registry._pending_plans = plans
+            registry._last_route_key = key
+            registry._last_route_width = width
+            registry._last_plans = plans
+            PROF.incr("graph.route.build")
         except Exception as e:  # noqa: BLE001
             registry._pending_plans = []
+            registry._last_route_key = None  # force a re-route after an error
             if _DEBUG:
                 print(f"[graph/dbg] _prepare_inputs routing ({label}) raised: {e!r}",
                       flush=True)
@@ -1140,6 +1174,18 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     # Routing — runs after _update_states + input prep, so prefill routes correctly.
     install_prepare_inputs_routing(model_runner, worker, _build_routing, label="qk")
 
+    # W4/W6c: budget-driven GPU->pinned drain manager (no-op unless a budget env is set).
+    from vllm_hook_plugins.graph.drain import CaptureDrainManager
+    _model = getattr(model_runner, "model", None)
+    try:
+        _dev = next(_model.parameters()).device if _model is not None else "cpu"
+    except Exception:  # noqa: BLE001
+        _dev = "cpu"
+    worker._capture_drain = CaptureDrainManager.from_env(_dev)
+    if worker._capture_drain.enabled:
+        print(f"[graph/install] capture drain enabled: budget="
+              f"{worker._capture_drain.budget_bytes} bytes")
+
     orig_execute_model = model_runner.execute_model
 
     def wrapped_execute_model(scheduler_output, *args, **kwargs):
@@ -1167,6 +1213,10 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         if plans:
             with PROF.timed("graph.egress"):
                 _egress(worker, registry, plans)
+            # W4: drain GPU-resident clones to pinned host if over the byte budget.
+            dm = getattr(worker, "_capture_drain", None)
+            if dm is not None:
+                dm.maybe_drain(worker)
         registry._pending_plans = []  # consume
 
         if _DEBUG and (plans or _dbg_call_n[0] <= _DBG_MAX_CALLS):

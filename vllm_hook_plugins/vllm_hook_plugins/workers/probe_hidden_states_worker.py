@@ -302,6 +302,8 @@ class ProbeHiddenStatesWorker:
         CPU transfer happens here (once per request, not per hook).
         Returns zstd-compressed pickle, or None if nothing was captured.
         """
+        from vllm_hook_plugins.graph.drain import drain_barrier
+        drain_barrier(self)  # wait for any pending W4 drain before reading buckets
         for req_id in iter_matching_req_ids(self._captured_states, external_req_id):
             layer_dict = self._captured_states.pop(req_id)
             cpu_dict = {}
@@ -337,6 +339,8 @@ class ProbeHiddenStatesWorker:
 
         Returns True if any artifacts were written, False if nothing captured.
         """
+        from vllm_hook_plugins.graph.drain import drain_barrier
+        drain_barrier(self)  # wait for any pending W4 drain before reading buckets
         cpu_cache: dict = {"config": self._conf, "hs_cache": {}}
         found_any = False
 

@@ -30,6 +30,7 @@ from vllm_hook_plugins.graph.install import (  # shared helpers
     _resolve_max_num_batched_tokens,
     install_prepare_inputs_routing,
 )
+from vllm_hook_plugins.graph.registry import PinnedMirrorRing
 from vllm_hook_plugins.workers._common import (
     get_query_metadata,
     iter_matched_modules,
@@ -324,11 +325,18 @@ class SteerRegistry:
         self.vec_table = torch.zeros(v_max, hidden, dtype=dtype, device=device)
         self.avg_proj_table = torch.zeros(v_max, dtype=torch.float32, device=device)
 
+        # Ring-buffered pinned mirrors (W2/W6a): coeff/vec_id/mode_pinned are
+        # properties onto the current slot, so reset_pinned never waits on the
+        # in-flight H2D copy. See PinnedMirrorRing.
         pin = self.device.type == "cuda"
-        self.coeff_pinned = torch.zeros(num_layers, cap, dtype=torch.float32, pin_memory=pin)
-        self.vec_id_pinned = torch.zeros(num_layers, cap, dtype=torch.int64, pin_memory=pin)
-        self.mode_pinned = torch.zeros(num_layers, cap, dtype=torch.int64, pin_memory=pin)
-        self._upload_event = torch.cuda.Event() if self.device.type == "cuda" else None
+        self._ring = PinnedMirrorRing(
+            [
+                ("coeff", (num_layers, cap), torch.float32),
+                ("vec_id", (num_layers, cap), torch.int64),
+                ("mode", (num_layers, cap), torch.int64),
+            ],
+            pin=pin,
+        )
 
         self.hosts: Dict[int, SteerHost] = {}
         self.vec_paths: Dict[str, int] = {}  # vector_path -> row in vec_table
@@ -348,33 +356,70 @@ class SteerRegistry:
     def begin_step(self) -> None:
         pass  # steering keeps no forward-context stash
 
+    @property
+    def coeff_pinned(self) -> torch.Tensor:
+        return self._ring.cur("coeff")
+
+    @property
+    def vec_id_pinned(self) -> torch.Tensor:
+        return self._ring.cur("vec_id")
+
+    @property
+    def mode_pinned(self) -> torch.Tensor:
+        return self._ring.cur("mode")
+
+    def routing_key(self, model_runner, qsl_cpu) -> Optional[tuple]:
+        """Invalidation signature for the routing wrapper (W1).
+
+        Steering routes by FLAT position (``qsl_cpu[i]``), and a request's resolved
+        steer config is immutable for its lifetime (fixed at admission), so on a
+        stable batch the coeff/vec_id/mode mirrors — and the device slabs already
+        holding them — are bit-identical every decode step. The signature is thus
+        ``(req_ids, qsl)``: when it (and the upload width) are unchanged, the wrapper
+        SKIPS reset/build/upload and the step is a pure graph replay with the resident
+        steering buffer. Returns ``None`` only when the batch is unreadable (force a
+        re-route). adjust_rs recomputes its coefficient in-kernel from the live
+        residual every replay, so skipping the host upload does not freeze its math.
+        """
+        try:
+            req_ids = model_runner.input_batch.req_ids
+        except Exception:  # noqa: BLE001
+            return None
+        if not req_ids or qsl_cpu is None:
+            return None
+        return (tuple(req_ids), tuple(qsl_cpu))
+
     def reset_pinned(self, width: Optional[int] = None) -> None:
-        if self._upload_event is not None:
-            self._upload_event.synchronize()
+        self._ring.wait_current()
+        coeff = self._ring.cur("coeff")
+        vec_id = self._ring.cur("vec_id")
+        mode = self._ring.cur("mode")
         if width is None:
-            self.coeff_pinned.zero_()
-            self.vec_id_pinned.zero_()
-            self.mode_pinned.zero_()
+            coeff.zero_()
+            vec_id.zero_()
+            mode.zero_()
         else:
             w = max(1, min(int(width), self.cap))
-            self.coeff_pinned[:, :w].zero_()
-            self.vec_id_pinned[:, :w].zero_()
-            self.mode_pinned[:, :w].zero_()
+            coeff[:, :w].zero_()
+            vec_id[:, :w].zero_()
+            mode[:, :w].zero_()
 
     def upload(self, width: Optional[int] = None) -> None:
         # Only the [:, :width] column prefix the cudagraph-padded forward reads (see
         # install._upload_width); the stale tail beyond width is never read by the op.
+        coeff = self._ring.cur("coeff")
+        vec_id = self._ring.cur("vec_id")
+        mode = self._ring.cur("mode")
         if width is None:
-            self.coeff_all.copy_(self.coeff_pinned, non_blocking=True)
-            self.vec_id_all.copy_(self.vec_id_pinned, non_blocking=True)
-            self.mode_all.copy_(self.mode_pinned, non_blocking=True)
+            self.coeff_all.copy_(coeff, non_blocking=True)
+            self.vec_id_all.copy_(vec_id, non_blocking=True)
+            self.mode_all.copy_(mode, non_blocking=True)
         else:
             w = max(1, min(int(width), self.cap))
-            self.coeff_all[:, :w].copy_(self.coeff_pinned[:, :w], non_blocking=True)
-            self.vec_id_all[:, :w].copy_(self.vec_id_pinned[:, :w], non_blocking=True)
-            self.mode_all[:, :w].copy_(self.mode_pinned[:, :w], non_blocking=True)
-        if self._upload_event is not None:
-            self._upload_event.record()
+            self.coeff_all[:, :w].copy_(coeff[:, :w], non_blocking=True)
+            self.vec_id_all[:, :w].copy_(vec_id[:, :w], non_blocking=True)
+            self.mode_all[:, :w].copy_(mode[:, :w], non_blocking=True)
+        self._ring.record_advance()
 
     def vec_id_for_path(self, path: str, worker) -> Optional[int]:
         """Resolve ``vector_path`` to a vec_table row, loading + caching on first use.

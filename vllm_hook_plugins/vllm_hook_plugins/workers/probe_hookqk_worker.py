@@ -114,6 +114,26 @@ def _read_cached_keys(
     except Exception:
         return None
 
+
+def _k_all_cpu_list(entry: dict) -> list:
+    """Return the per-step growing-prefix ``k_all`` as CPU tensors.
+
+    Graph buffer-mode egress (W3 incremental) stores only each step's NEW key rows in
+    ``entry["k_all"]`` plus the per-step prefix length in ``entry["k_prefix_ends"]``, so
+    the per-step GPU clone is O(1) instead of the O(seq_len) full-prefix clone. Here we
+    rebuild the growing prefixes (``full[:L]`` for each recorded ``L``) so the captured
+    artifact is byte-identical to the eager path, which stores the full prefixes directly
+    (no ``k_prefix_ends`` -> passed through unchanged). ``.cpu()`` first so a drained
+    (pinned) + GPU mix concatenates on one device; the per-step slices are CPU views, and
+    the downstream pad_sequence/stack copies them exactly as before.
+    """
+    prefix_ends = entry.get("k_prefix_ends")
+    if not prefix_ends:
+        return [t.cpu() for t in entry["k_all"]]
+    full = torch.cat([t.cpu() for t in entry["k_all"]], dim=0)
+    return [full[:int(L)] for L in prefix_ends]
+
+
 class ProbeHookQKWorker:
     """Mixin injected into vLLM's GPU Worker via worker_extension_cls.
 
@@ -380,6 +400,8 @@ class ProbeHookQKWorker:
         CPU transfer happens here (once per request, not per hook).
         Returns zstd-compressed pickle, or None if nothing was captured.
         """
+        from vllm_hook_plugins.graph.drain import drain_barrier
+        drain_barrier(self)  # wait for any pending W4 drain before reading buckets
         for req_id in iter_matching_req_ids(self._captured_states, external_req_id):
             layer_dict = self._captured_states.pop(req_id)
             cpu_dict = {}
@@ -391,7 +413,7 @@ class ProbeHookQKWorker:
                         q_stacked = pad_sequence([t.cpu() for t in entry["q"]], batch_first=True)
                     else:
                         q_stacked = torch.stack([t.cpu() for t in entry["q"]])
-                    k_stacked = pad_sequence([t.cpu() for t in entry["k_all"]], batch_first=True)
+                    k_stacked = pad_sequence(_k_all_cpu_list(entry), batch_first=True)
                     cpu_dict[mod_name] = {"q": q_stacked, "k_all": k_stacked, "layer_num": entry["layer_num"], "hookq_mode": mode}
             payload = {"qk_cache": cpu_dict, "config": self._conf}
             with PROF.timed("worker.compress.qk"):
@@ -415,6 +437,8 @@ class ProbeHookQKWorker:
 
         Returns True if any artifacts were written, False if nothing captured.
         """
+        from vllm_hook_plugins.graph.drain import drain_barrier
+        drain_barrier(self)  # wait for any pending W4 drain before reading buckets
         cpu_cache: dict = {"config": self._conf, "qk_cache": {}}
         found_any = False
 
@@ -428,7 +452,7 @@ class ProbeHookQKWorker:
                     for mod_name, entry in layer_dict.items():
                         cpu_entry = {
                             "q": [t.cpu() for t in entry["q"]],
-                            "k_all": [t.cpu() for t in entry["k_all"]],
+                            "k_all": _k_all_cpu_list(entry),
                             "layer_num": entry["layer_num"],
                             "hookq_mode": entry.get("hookq_mode", self.hookq_mode),
                         }

@@ -508,9 +508,13 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
             else:
                 hs_tok = hs_buf[start + 1:end + 1, :].detach().clone()
 
+            nbytes = hs_tok.numel() * hs_tok.element_size()
             PROF.incr("hook.fire.hs")
-            PROF.gauge("captured.bytes.hs",
-                       hs_tok.numel() * hs_tok.element_size())
+            PROF.gauge("captured.bytes.hs", nbytes)
+            # W4: accrue GPU-resident clone bytes for the budget-driven drain.
+            dm = getattr(worker, "_capture_drain", None)
+            if dm is not None:
+                dm.note(nbytes)
 
             bucket = getattr(worker, plan["bucket_key"])
             if req_id not in bucket:
@@ -546,6 +550,18 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
     # Routing — runs after _update_states + input prep, so prefill routes correctly.
     install_prepare_inputs_routing(model_runner, worker, _build_routing_hs, label="hs")
 
+    # W4/W6c: budget-driven GPU->pinned drain manager (no-op unless a budget env is set).
+    from vllm_hook_plugins.graph.drain import CaptureDrainManager
+    _model = getattr(model_runner, "model", None)
+    try:
+        _dev = next(_model.parameters()).device if _model is not None else "cpu"
+    except Exception:  # noqa: BLE001
+        _dev = "cpu"
+    worker._capture_drain = CaptureDrainManager.from_env(_dev)
+    if worker._capture_drain.enabled:
+        print(f"[graph/install_hs] capture drain enabled: budget="
+              f"{worker._capture_drain.budget_bytes} bytes")
+
     orig_execute_model = model_runner.execute_model
 
     def wrapped_execute_model(scheduler_output, *args, **kwargs):
@@ -568,6 +584,10 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
         if plans:
             with PROF.timed("graph.egress"):
                 _egress_hs(worker, registry, plans)
+            # W4: drain GPU-resident clones to pinned host if over the byte budget.
+            dm = getattr(worker, "_capture_drain", None)
+            if dm is not None:
+                dm.maybe_drain(worker)
         registry._pending_plans = []  # consume
 
         if _DEBUG and (plans or _dbg_hs_call_n[0] <= _DBG_HS_MAX_CALLS):

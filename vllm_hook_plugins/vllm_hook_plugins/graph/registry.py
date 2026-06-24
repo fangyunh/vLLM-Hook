@@ -1,11 +1,77 @@
 """Per-worker device routing slabs for CUDA-graph QK capture."""
 from __future__ import annotations
 
-from typing import Dict, Iterator, Optional, Tuple
+import os
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import torch
 
 from vllm_hook_plugins.graph.hosts import QKHookHost
+
+# Depth of the pinned-mirror ring (W2/W6a). >=2 lets reset_pinned() reuse a slot
+# whose H2D upload was enqueued >=2 steps ago — its event is already complete, so
+# the wait never stalls the decode hot path. 1 == the old single-mirror behaviour
+# (the per-step CPU<->GPU serialization the v0.5.0 plan removes). vLLM's async
+# scheduler runs the CPU at most ~1 step ahead of the GPU, so 2 is sufficient.
+RING_DEPTH = max(1, int(os.environ.get("VLLM_HOOK_PINNED_RING", "2")))
+
+
+class PinnedMirrorRing:
+    """Depth-K ring of pinned-host mirror *sets* + per-slot CUDA upload events.
+
+    The capture/steer routing is staged in pinned host memory, then copied H2D into
+    the device slabs each step. With a SINGLE mirror, ``reset_pinned`` must
+    ``event.synchronize()`` before zeroing it (zeroing a mirror whose H2D copy is
+    still in flight would latch zeros = silent capture/steer loss) — a per-step
+    CPU<->GPU serialization that breaks vLLM's async decode overlap. With K>=2 slots
+    the slot reused this step was last uploaded K steps ago, so its event is already
+    complete and the wait returns immediately (kept only as a correctness guard).
+
+    Each slot holds one pinned tensor per ``(name, shape, dtype)`` spec. The owning
+    registry exposes ``registry.<name>_pinned`` as the CURRENT slot's tensor (a
+    property), so build code writes the active mirror unchanged; ``upload`` copies the
+    current slot to the device slabs (registry-specific) and advances the cursor.
+    """
+
+    def __init__(self, specs, pin: bool, depth: int = RING_DEPTH) -> None:
+        self.depth = max(1, int(depth))
+        self.idx = 0
+        self.slots: List[Dict[str, torch.Tensor]] = [
+            {
+                name: torch.zeros(shape, dtype=dtype, pin_memory=pin)
+                for name, shape, dtype in specs
+            }
+            for _ in range(self.depth)
+        ]
+        # One event per slot; None off-CUDA (copies are synchronous there).
+        self.events: List[Optional[torch.cuda.Event]] = [
+            torch.cuda.Event() if pin else None for _ in range(self.depth)
+        ]
+
+    def cur(self, name: str) -> torch.Tensor:
+        """The current slot's tensor for ``name`` (what build code writes/upload reads)."""
+        return self.slots[self.idx][name]
+
+    def wait_current(self) -> None:
+        """Block until the current slot's last upload (K steps ago) is done.
+
+        On a warm ring this event is already complete, so this does not stall. The
+        wait is an UNCONDITIONAL synchronize, so an under-deep ring (or a CPU that
+        runs further ahead than the ring covers) only degrades to a stall — it can
+        never overwrite a mirror mid-H2D. VLLM_HOOK_PINNED_RING is thus a pure perf
+        knob with no correctness floor; a never-recorded event reports complete, so
+        the depth-2 warm-up and any never-reused slot are safe.
+        """
+        ev = self.events[self.idx]
+        if ev is not None:
+            ev.synchronize()
+
+    def record_advance(self) -> None:
+        """Record the current slot's upload event, then rotate to the next slot."""
+        ev = self.events[self.idx]
+        if ev is not None:
+            ev.record()
+        self.idx = (self.idx + 1) % self.depth
 
 
 class HostRegistry:
@@ -38,21 +104,17 @@ class HostRegistry:
             self.num_layers, dtype=torch.int32, device=self.device
         )
 
-        # Pinned-CPU mirrors for non-blocking uploads; plain CPU off-CUDA so the
-        # registry stays constructible for tests.
+        # Pinned-CPU mirrors for non-blocking uploads, ring-buffered (W2/W6a) so
+        # reset_pinned never waits on the in-flight copy; plain CPU off-CUDA so the
+        # registry stays constructible for tests. capture_index_pinned /
+        # any_active_pinned are properties onto the CURRENT ring slot.
         pin = self.device.type == "cuda"
-        self.capture_index_pinned = torch.zeros(
-            self.num_layers, self.cap, dtype=torch.int64, pin_memory=pin
-        )
-        self.any_active_pinned = torch.zeros(
-            self.num_layers, dtype=torch.int32, pin_memory=pin
-        )
-
-        # Recorded after each upload; reset_pinned() waits on it so it can't zero
-        # the mirror mid-transfer (would latch zeros = silent capture loss). CUDA
-        # only; None elsewhere, where copies are synchronous.
-        self._upload_event = (
-            torch.cuda.Event() if self.device.type == "cuda" else None
+        self._ring = PinnedMirrorRing(
+            [
+                ("capture_index", (self.num_layers, self.cap), torch.int64),
+                ("any_active", (self.num_layers,), torch.int32),
+            ],
+            pin=pin,
         )
 
         # layer_num -> QKHookHost (or HSHookHost — duck-typed: layer_num/cap/bind_views)
@@ -104,43 +166,65 @@ class HostRegistry:
     # Per-step upload (fan-out by view) — called from the execute_model wrapper.
     # ------------------------------------------------------------------
 
+    @property
+    def capture_index_pinned(self) -> torch.Tensor:
+        """The current ring slot's (num_layers, cap) int64 routing mirror."""
+        return self._ring.cur("capture_index")
+
+    @property
+    def any_active_pinned(self) -> torch.Tensor:
+        """The current ring slot's (num_layers,) int32 active-marker mirror."""
+        return self._ring.cur("any_active")
+
+    def routing_key(self, model_runner, qsl_cpu) -> Optional[tuple]:
+        """Invalidation key for the routing wrapper (W1). ``None`` = never skip.
+
+        QK/HS capture routes by ABSOLUTE sequence position (the k_buf rows advance
+        +1/token every decode step), so the routing genuinely changes each step and
+        must NOT be skipped — capture returns ``None`` here. SteerRegistry overrides
+        this with a real signature (its routing is bit-identical on a stable batch).
+        Capture's own incremental routing is the v0.5.0 W3 workstream (Step 3).
+        """
+        return None
+
     def upload(self, width: Optional[int] = None) -> None:
-        """Push the pinned mirrors to the device slabs: one copy each per step.
+        """Push the current pinned mirror slot to the device slabs: one copy per step.
 
         ``width`` (when given) copies only the ``[:, :width]`` column prefix of the
         capture_index slab — the prefix the cudagraph-padded forward actually reads
         (a 2D strided async copy, much smaller than the full ``cap`` width on decode).
         Columns beyond ``width`` are never read by the op, so the stale device tail is
         harmless. ``any_active`` is tiny (num_layers,) so it always copies in full.
+        Records the slot's upload event and rotates the ring (W2/W6a).
         """
+        ci = self._ring.cur("capture_index")
+        aa = self._ring.cur("any_active")
         if width is None:
-            self.capture_index_all.copy_(self.capture_index_pinned, non_blocking=True)
+            self.capture_index_all.copy_(ci, non_blocking=True)
         else:
             w = max(1, min(int(width), self.cap))
-            self.capture_index_all[:, :w].copy_(
-                self.capture_index_pinned[:, :w], non_blocking=True)
-        self.any_active.copy_(self.any_active_pinned, non_blocking=True)
-        # So the next reset_pinned() can wait before reusing the mirror.
-        if self._upload_event is not None:
-            self._upload_event.record()
+            self.capture_index_all[:, :w].copy_(ci[:, :w], non_blocking=True)
+        self.any_active.copy_(aa, non_blocking=True)
+        self._ring.record_advance()
 
     def reset_pinned(self, width: Optional[int] = None) -> None:
-        """Zero the pinned mirrors to the sentinel no-op, before each step's writes.
+        """Zero the current pinned mirror slot to the sentinel no-op, before writes.
 
         Defaults any unrequested (layer, token) to row 0 + inactive. ``width`` zeros
         only the ``[:, :width]`` prefix (the part this step writes + uploads); the op
-        never reads beyond ``width``, so the tail need not be re-zeroed. Waits on the
-        prior upload first: zeroing the still-in-flight mirror would race the copy and
-        latch zeros (silent capture loss); the event wait avoids a full sync.
+        never reads beyond ``width``, so the tail need not be re-zeroed. Waits on this
+        slot's own (K-steps-stale, already-complete) upload event first — a guard that
+        no longer stalls the hot path now that the ring gives a fresh slot each step.
         """
-        if self._upload_event is not None:
-            self._upload_event.synchronize()
+        self._ring.wait_current()
+        ci = self._ring.cur("capture_index")
+        aa = self._ring.cur("any_active")
         if width is None:
-            self.capture_index_pinned.zero_()
+            ci.zero_()
         else:
             w = max(1, min(int(width), self.cap))
-            self.capture_index_pinned[:, :w].zero_()
-        self.any_active_pinned.zero_()
+            ci[:, :w].zero_()
+        aa.zero_()
 
     # ------------------------------------------------------------------
     # Forward-context stash (set by the attention wrap, read by egress).
