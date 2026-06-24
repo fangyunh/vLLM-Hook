@@ -37,13 +37,13 @@
   header.hero{margin-bottom:44px;}
   header.hero .tag{display:inline-block; font-size:12px; letter-spacing:1.4px; text-transform:uppercase; color:var(--accent2); border:1px solid var(--buf-edge); padding:3px 10px; border-radius:999px; margin-bottom:16px;}
   header.hero h1{font-size:34px; line-height:1.2; margin:0 0 12px; letter-spacing:-.5px;}
-  header.hero p.lede{font-size:18px; color:var(--muted); max-width:62ch; margin:0;}
+  header.hero p.lede{font-size:18px; color:var(--muted); max-width:64ch; margin:0;}
   section{margin:0 0 56px; scroll-margin-top:24px;}
   h2{font-size:24px; margin:0 0 6px; letter-spacing:-.3px; padding-top:10px;}
   h2 .num{color:var(--accent); font-size:18px; margin-right:10px; font-variant-numeric:tabular-nums;}
   h3{font-size:17px; margin:30px 0 8px; color:var(--ink);}
   .rule{height:1px; background:linear-gradient(90deg,var(--line),transparent); margin:6px 0 22px;}
-  p{margin:12px 0; max-width:74ch;}
+  p{margin:12px 0; max-width:76ch;}
   .muted{color:var(--muted);}
   strong{color:#fff;}
   code{font-family:"SF Mono", "JetBrains Mono",Menlo,Consolas,monospace; font-size:13px; background:var(--codebg); color:var(--code); padding:2px 6px; border-radius:5px; border:1px solid var(--line);}
@@ -86,74 +86,67 @@
 <nav>
   <div class="brand">vLLM-Hook</div>
   <div class="sub">FULL CUDA-Graph Design</div>
-  <div class="grp">The problem</div>
+  <div class="grp">The setup</div>
   <a href="#tldr"><span class="n">00</span>One picture</a>
-  <a href="#modes"><span class="n">01</span>CUDA-graph modes</a>
-  <a href="#why"><span class="n">02</span>Why hooks died</a>
-  <div class="grp">The fix</div>
-  <a href="#reframe"><span class="n">03</span>Placement vs behavior</a>
-  <a href="#buffer"><span class="n">04</span>Buffer mode</a>
-  <a href="#capture"><span class="n">05</span>Capture, end-to-end</a>
-  <a href="#timeline"><span class="n">06</span>Prefill + decode</a>
-  <a href="#steer"><span class="n">07</span>Steering</a>
-  <div class="grp">The contract</div>
-  <a href="#config"><span class="n">08</span>Per-request config</a>
-  <div class="grp">The speed</div>
-  <a href="#perf"><span class="n">09</span>Performance</a>
-  <a href="#chunked"><span class="n">10</span>Chunked prefill</a>
-  <a href="#status"><span class="n">11</span>Status &amp; proof</a>
+  <a href="#full"><span class="n">01</span>FULL mode: vLLM dispatches</a>
+  <a href="#why"><span class="n">02</span>Why eager hooks die</a>
+  <div class="grp">The mechanism</div>
+  <a href="#placement"><span class="n">03</span>Placement: the baked op</a>
+  <a href="#behavior"><span class="n">04</span>Behavior: the data plane</a>
+  <a href="#memory"><span class="n">05</span>Where data lives</a>
+  <div class="grp">The workflow</div>
+  <a href="#flow"><span class="n">06</span>Prefill &amp; decode</a>
+  <a href="#capture"><span class="n">07</span>Capture data path</a>
+  <a href="#steer"><span class="n">08</span>Steering</a>
+  <div class="grp">The payoff</div>
+  <a href="#perf"><span class="n">09</span>Performance &amp; status</a>
 </nav>
 
-<!-- ============ MAIN ============ -->
 <main>
-
 <header class="hero">
   <span class="tag">v0.5.0 · Design Note</span>
   <h1>Hooking model internals under a&nbsp;FULL CUDA graph</h1>
-  <p class="lede">Capturing attention, hidden states, and steering the residual stream — when the
-  decode step is a frozen sequence of GPU kernels and <em>no Python ever runs again</em>. And
-  making it <em>faster</em> than the eager hook it replaces.</p>
+  <p class="lede">Capturing attention, hidden states, and steering the residual stream — while the
+  step is a frozen sequence of GPU kernels and <em>no Python ever runs again</em>. We turn
+  <code>cudagraph_mode=FULL</code> on and let vLLM decide, per step, whether to replay a graph or
+  run eagerly; our hook is correct either way, and faster than the eager hook it replaces.</p>
 </header>
 
 <!-- 00 ----------------------------------------------------------- -->
 <section id="tldr">
   <h2><span class="num">00</span>The whole idea, in one picture</h2>
   <div class="rule"></div>
-  <p>Every hook gets split into two halves. <strong>Placement</strong> is static — a kernel
-  baked onto candidate layers at capture time. <strong>Behavior</strong> is data — the
-  contents of pre-registered GPU buffers that we overwrite before each replay and a baked
-  kernel reads <em>during</em> replay. That single split is what lets a hook live inside a
-  graph that can never run Python again.</p>
+  <p>Every hook is split into two halves. <strong>Placement</strong> is static — a custom kernel
+  baked onto candidate layers at capture time. <strong>Behavior</strong> is data — the bytes of
+  pre-registered GPU buffers that we overwrite before each step and the baked kernel reads while it
+  runs. That single split is what lets a hook live inside a graph that can never run Python again:
+  the graph is frozen, but the bytes it reads are not.</p>
 
   <figure>
   <svg viewBox="0 0 900 250" role="img" aria-label="Placement static, behavior data">
     <defs>
       <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
     </defs>
-    <!-- placement -->
     <rect x="20" y="30" width="250" height="190" rx="12" fill="#161922" stroke="#2f6da3" stroke-width="1.5"/>
     <text x="145" y="58" text-anchor="middle" fill="#5eb1ff" font-size="13" font-weight="700" letter-spacing="1">PLACEMENT — STATIC</text>
     <text x="145" y="78" text-anchor="middle" fill="#9aa3b2" font-size="11.5">decided once, at capture</text>
     <g font-size="11.5" fill="#e6e9ef">
-      <rect x="44" y="96" width="202" height="26" rx="6" fill="#173049"/><text x="56" y="113">layer 0  · capture kernel baked</text>
-      <rect x="44" y="128" width="202" height="26" rx="6" fill="#173049"/><text x="56" y="145">layer 1  · capture kernel baked</text>
-      <rect x="44" y="160" width="202" height="26" rx="6" fill="#173049"/><text x="56" y="177">layer 2  · capture kernel baked</text>
+      <rect x="44" y="96" width="202" height="26" rx="6" fill="#173049"/><text x="56" y="113">layer 0 · hook kernel baked</text>
+      <rect x="44" y="128" width="202" height="26" rx="6" fill="#173049"/><text x="56" y="145">layer 1 · hook kernel baked</text>
+      <rect x="44" y="160" width="202" height="26" rx="6" fill="#173049"/><text x="56" y="177">layer 2 · hook kernel baked</text>
       <text x="56" y="205" fill="#6b7383">… every candidate layer</text>
     </g>
-    <!-- arrow -->
     <line x1="282" y1="125" x2="338" y2="125" stroke="#9aa3b2" stroke-width="1.6" marker-end="url(#ar)"/>
     <text x="310" y="116" text-anchor="middle" fill="#9aa3b2" font-size="10">reads</text>
-    <!-- behavior -->
     <rect x="350" y="30" width="250" height="190" rx="12" fill="#161922" stroke="#b9802f" stroke-width="1.5"/>
     <text x="475" y="58" text-anchor="middle" fill="#ffb86b" font-size="13" font-weight="700" letter-spacing="1">BEHAVIOR — DATA</text>
     <text x="475" y="78" text-anchor="middle" fill="#9aa3b2" font-size="11.5">overwritten every step</text>
     <g font-size="11.5" fill="#e6e9ef">
-      <rect x="374" y="96" width="202" height="26" rx="6" fill="#3a2c17"/><text x="386" y="113">capture_index  → which rows</text>
-      <rect x="374" y="128" width="202" height="26" rx="6" fill="#3a2c17"/><text x="386" y="145">coeff          → how much</text>
-      <rect x="374" y="160" width="202" height="26" rx="6" fill="#3a2c17"/><text x="386" y="177">vec_id         → which vector</text>
+      <rect x="374" y="96" width="202" height="26" rx="6" fill="#3a2c17"/><text x="386" y="113">capture_index → which rows</text>
+      <rect x="374" y="128" width="202" height="26" rx="6" fill="#3a2c17"/><text x="386" y="145">coeff → how much</text>
+      <rect x="374" y="160" width="202" height="26" rx="6" fill="#3a2c17"/><text x="386" y="177">vec_id → which vector</text>
       <text x="386" y="205" fill="#6b7383">0 / sentinel = no-op</text>
     </g>
-    <!-- result -->
     <line x1="612" y1="125" x2="668" y2="125" stroke="#9aa3b2" stroke-width="1.6" marker-end="url(#ar)"/>
     <rect x="680" y="62" width="200" height="126" rx="12" fill="#16302a" stroke="#2f9c7a" stroke-width="1.5"/>
     <text x="780" y="104" text-anchor="middle" fill="#7ee0c0" font-size="13" font-weight="700">per-request</text>
@@ -161,603 +154,470 @@
     <text x="780" y="150" text-anchor="middle" fill="#9aa3b2" font-size="11">inside a frozen graph,</text>
     <text x="780" y="166" text-anchor="middle" fill="#9aa3b2" font-size="11">with zero Python</text>
   </svg>
-  <figcaption><b>The thesis.</b> The only thing that may differ between two replays of the
-  same frozen graph is the <em>bytes in its buffers</em>. So we move every per-request
-  decision out of Python and into those bytes. This is exactly how vLLM already feeds fresh
-  <code>input_ids</code> and <code>block_tables</code> into a replayed decode graph — and how
-  LoRA applies per-request adapters under cudagraphs. We adopt their mechanism.</figcaption>
+  <figcaption><b>The thesis.</b> The only thing that may differ between two replays of one frozen
+  graph is the <em>bytes in its buffers</em>. So we move every per-request decision out of Python
+  and into those bytes — exactly how vLLM already feeds fresh <code>input_ids</code> and
+  <code>block_tables</code> into a replayed decode graph, and how LoRA selects per-request adapters
+  under cudagraphs. We adopt their mechanism.</figcaption>
   </figure>
 </section>
 
 <!-- 01 ----------------------------------------------------------- -->
-<section id="modes">
-  <h2><span class="num">01</span>A 30-second primer on CUDA-graph modes</h2>
+<section id="full">
+  <h2><span class="num">01</span>FULL mode: we don't choose graph-vs-eager — vLLM does</h2>
   <div class="rule"></div>
-  <p>A CUDA graph records a sequence of GPU kernels once and <em>replays</em> them with one
-  cheap launch — eliminating per-kernel Python/launch overhead. vLLM exposes several modes
-  that differ in <strong>how much</strong> of the forward pass is frozen into graphs, and
-  therefore <strong>where Python is still allowed to run</strong>.</p>
+  <p>We run with <code>cudagraph_mode=FULL</code>. At compile time vLLM captures a full CUDA graph
+  for a fixed set of batch sizes (<code>cudagraph_capture_sizes</code>). At <em>runtime</em>, every
+  step — prefill, mixed, or decode — vLLM's dispatcher pads the batch to the nearest captured size
+  and <strong>replays that graph</strong>; if the batch is larger than any captured size (a big
+  prefill chunk, an odd shape) it <strong>falls back to eager</strong>. We never make that choice
+  and we no longer hard-split &ldquo;eager prefill + graph decode&rdquo; — vLLM decides per step,
+  by size, and our hook is correct on both paths.</p>
 
   <figure>
-  <svg viewBox="0 0 900 300" role="img" aria-label="CUDA graph modes">
-    <!-- column headers -->
-    <g font-size="13" font-weight="700" text-anchor="middle">
-      <text x="135" y="28" fill="#9aa3b2">NONE</text>
-      <text x="365" y="28" fill="#5eb1ff">PIECEWISE</text>
-      <text x="595" y="28" fill="#7ee0c0">FULL_DECODE_ONLY</text>
-      <text x="825" y="28" fill="#ffb86b">FULL</text>
-    </g>
-    <g font-size="10.5" text-anchor="middle" fill="#6b7383">
-      <text x="135" y="44">all eager</text>
-      <text x="365" y="44">graph segments + eager seams</text>
-      <text x="595" y="44">eager prefill · full decode</text>
-      <text x="825" y="44">everything captured</text>
-    </g>
-    <!-- legend -->
-    <g transform="translate(0,262)" font-size="11">
-      <rect x="40" y="0" width="13" height="13" rx="3" fill="#3a2c17" stroke="#b9802f"/><text x="60" y="11" fill="#9aa3b2">eager (Python can run)</text>
-      <rect x="240" y="0" width="13" height="13" rx="3" fill="#173049" stroke="#2f6da3"/><text x="260" y="11" fill="#9aa3b2">captured graph (no Python on replay)</text>
-      <rect x="560" y="0" width="13" height="13" rx="3" fill="#3a3f4b" stroke="#5a6273"/><text x="580" y="11" fill="#9aa3b2">attention seam (always eager)</text>
-    </g>
-    <!-- four stacks; each is a vertical stack of layer blocks -->
-    <!-- helper geometry: x columns 70..200, 300..430, 530..660, 760..890 -->
-    <!-- NONE: all eager -->
-    <g>
-      <rect x="70" y="60" width="130" height="180" rx="8" fill="#3a2c17" stroke="#b9802f" stroke-width="1.3"/>
-      <text x="135" y="155" text-anchor="middle" fill="#ffb86b" font-size="11">full forward</text>
-      <text x="135" y="172" text-anchor="middle" fill="#9aa3b2" font-size="10">interpreted</text>
-    </g>
-    <!-- PIECEWISE: segment, seam, segment, seam... -->
-    <g>
-      <rect x="300" y="60" width="130" height="34" rx="6" fill="#173049" stroke="#2f6da3"/><text x="365" y="81" text-anchor="middle" fill="#bcd7f0" font-size="10">graph seg</text>
-      <rect x="300" y="98" width="130" height="20" rx="5" fill="#3a3f4b"/><text x="365" y="112" text-anchor="middle" fill="#cfd5df" font-size="9.5">attn seam</text>
-      <rect x="300" y="122" width="130" height="34" rx="6" fill="#173049" stroke="#2f6da3"/><text x="365" y="143" text-anchor="middle" fill="#bcd7f0" font-size="10">graph seg</text>
-      <rect x="300" y="160" width="130" height="20" rx="5" fill="#3a3f4b"/><text x="365" y="174" text-anchor="middle" fill="#cfd5df" font-size="9.5">attn seam</text>
-      <rect x="300" y="184" width="130" height="34" rx="6" fill="#173049" stroke="#2f6da3"/><text x="365" y="205" text-anchor="middle" fill="#bcd7f0" font-size="10">graph seg</text>
-      <rect x="300" y="222" width="130" height="18" rx="5" fill="#3a3f4b"/><text x="365" y="235" text-anchor="middle" fill="#cfd5df" font-size="9.5">attn seam</text>
-    </g>
-    <!-- FULL_DECODE_ONLY: prefill eager box + decode full box -->
-    <g>
-      <rect x="530" y="60" width="130" height="70" rx="8" fill="#3a2c17" stroke="#b9802f" stroke-width="1.3"/>
-      <text x="595" y="90" text-anchor="middle" fill="#ffb86b" font-size="10.5">PREFILL</text>
-      <text x="595" y="106" text-anchor="middle" fill="#9aa3b2" font-size="9.5">eager</text>
-      <rect x="530" y="138" width="130" height="102" rx="8" fill="#173049" stroke="#2f9c7a" stroke-width="1.8"/>
-      <text x="595" y="183" text-anchor="middle" fill="#7ee0c0" font-size="10.5">DECODE</text>
-      <text x="595" y="199" text-anchor="middle" fill="#9aa3b2" font-size="9.5">one full graph</text>
-    </g>
-    <!-- FULL: one solid captured box -->
-    <g>
-      <rect x="760" y="60" width="130" height="180" rx="8" fill="#173049" stroke="#b9802f" stroke-width="1.8"/>
-      <text x="825" y="150" text-anchor="middle" fill="#ffb86b" font-size="11">entire forward</text>
-      <text x="825" y="167" text-anchor="middle" fill="#9aa3b2" font-size="10">one graph</text>
-    </g>
+  <svg viewBox="0 0 900 300" role="img" aria-label="FULL dispatcher decides replay or eager per step">
+    <defs>
+      <marker id="ard" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
+    </defs>
+    <rect x="30" y="120" width="150" height="56" rx="10" fill="#1d212c" stroke="#2a2f3a"/>
+    <text x="105" y="144" text-anchor="middle" fill="#e6e9ef" font-size="12.5" font-weight="700">a step arrives</text>
+    <text x="105" y="162" text-anchor="middle" fill="#9aa3b2" font-size="10.5">prefill / mixed / decode</text>
+
+    <!-- decision -->
+    <path d="M250,148 L335,96 L420,148 L335,200 Z" fill="#1d212c" stroke="#5eb1ff" stroke-width="1.5"/>
+    <text x="335" y="140" text-anchor="middle" fill="#5eb1ff" font-size="11.5" font-weight="700">padded size</text>
+    <text x="335" y="156" text-anchor="middle" fill="#5eb1ff" font-size="11.5" font-weight="700">∈ captured set?</text>
+    <line x1="180" y1="148" x2="248" y2="148" stroke="#9aa3b2" stroke-width="1.5" marker-end="url(#ard)"/>
+
+    <!-- yes: replay -->
+    <line x1="420" y1="120" x2="560" y2="84" stroke="#5ddf9a" stroke-width="1.6" marker-end="url(#ard)"/>
+    <text x="485" y="92" text-anchor="middle" fill="#5ddf9a" font-size="11" font-weight="700">YES</text>
+    <rect x="566" y="56" width="304" height="62" rx="11" fill="#173049" stroke="#2f6da3" stroke-width="1.5"/>
+    <text x="718" y="80" text-anchor="middle" fill="#bcd7f0" font-size="12.5" font-weight="700">REPLAY the captured graph</text>
+    <text x="718" y="100" text-anchor="middle" fill="#9aa3b2" font-size="10.5">our op is baked inside → replays · 0 Python</text>
+
+    <!-- no: eager -->
+    <line x1="420" y1="176" x2="560" y2="214" stroke="#ffb86b" stroke-width="1.6" marker-end="url(#ard)"/>
+    <text x="485" y="210" text-anchor="middle" fill="#ffb86b" font-size="11" font-weight="700">NO</text>
+    <rect x="566" y="186" width="304" height="62" rx="11" fill="#3a2c17" stroke="#b9802f" stroke-width="1.5"/>
+    <text x="718" y="210" text-anchor="middle" fill="#ffd9a8" font-size="12.5" font-weight="700">run EAGER (fallback)</text>
+    <text x="718" y="230" text-anchor="middle" fill="#9aa3b2" font-size="10.5">our op runs its Python impl, eagerly</text>
+
+    <!-- note -->
+    <rect x="120" y="252" width="750" height="38" rx="9" fill="#161922" stroke="#2a2f3a"/>
+    <text x="138" y="276" fill="#9aa3b2" font-size="11.5">The op is <tspan fill="#7ee0c0" font-weight="700">not</tspan> a splitting op, so under FULL it is absorbed into <tspan fill="#bcd7f0">whatever graph captures it</tspan> (prefill, mixed, or decode) and replays — no eager seam is forced.</text>
   </svg>
-  <figcaption><b>The seam is the lever.</b> PIECEWISE keeps an eager <em>seam</em> at every
-  attention op — that is where v0.3.0's hooks ran their Python. FULL has no seams: the forward
-  is one captured graph. <b>Our target is <span style="color:var(--accent2)">FULL_DECODE_ONLY</span></b> —
-  prefill stays eager (uncaptured) while the uniform decode step becomes a single full graph.
-  It is the natural fit because prefill is irregular and cheap to leave eager, while decode is
-  the hot, uniform loop worth freezing.</figcaption>
+  <figcaption><b>One mode, two execution paths, one correct hook.</b> Because the capture/steer op
+  is a plain custom op (never declared a splitting op), the piecewise compiler bakes it into every
+  graph it captures and it replays; on an eager-fallback step the very same op runs its Python impl
+  instead. Densify <code>cudagraph_capture_sizes</code> to push more steps onto the replay path; the
+  measured KV-cache cost of FULL vs decode-only was zero at our scale.</figcaption>
   </figure>
 </section>
 
 <!-- 02 ----------------------------------------------------------- -->
 <section id="why">
-  <h2><span class="num">02</span>Why the v0.3.0 hooks cannot survive FULL</h2>
+  <h2><span class="num">02</span>Why the eager hook cannot survive a graph</h2>
   <div class="rule"></div>
-  <p>The shipping (PIECEWISE) hook is <strong>op mode</strong>: a custom op
-  (<code>vllm_hook::qk_probe</code>, <code>hs_probe</code>, <code>steer_residual</code>)
-  registered as a vLLM <em>splitting op</em>, which forces an eager seam around it. Its Python
-  <code>impl</code> runs mid-forward, exactly where the original eager hook lived — and it does
-  real interpreted work:</p>
-
-  <pre><code><span class="kw">def</span> <span class="fn">_qk_probe_impl</span>(q, k, sink, layer_idx):
-    _bump_sink(sink)
-    capturing = torch.cuda.is_current_stream_capturing()
-    <span class="kw">if</span> capturing:
-        <span class="kw">return</span>                  <span class="cmt"># ← bails during capture / replay</span>
-    fn(q, k, <span class="fn">int</span>(layer_idx))     <span class="cmt"># ← get_forward_context(), req_ids walk, .item(), dict lookups</span></code></pre>
-
-  <p>Under PIECEWISE this is fine: the splitting op makes the layer an eager seam that runs
-  <em>every</em> step, so the impl fires on decode too (that seam is also the source of the
-  ~6.5% wall-time tax). Under FULL there is no seam. The op is absorbed into the captured
-  graph, and on replay the kernels run with <strong>no Python at all</strong> — the entire
-  decision layer is in the one place FULL never visits.</p>
-
-  <figure>
-  <svg viewBox="0 0 900 330" role="img" aria-label="op mode under PIECEWISE vs FULL">
-    <defs>
-      <marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
-      <marker id="arbad" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ff6b6b"/></marker>
-    </defs>
-    <!-- PIECEWISE row -->
-    <text x="30" y="40" fill="#5eb1ff" font-size="13" font-weight="700">PIECEWISE replay</text>
-    <text x="30" y="58" fill="#6b7383" font-size="11">decode step</text>
-    <rect x="170" y="22" width="120" height="44" rx="7" fill="#173049" stroke="#2f6da3"/><text x="230" y="48" text-anchor="middle" fill="#bcd7f0" font-size="11">graph seg</text>
-    <rect x="306" y="22" width="150" height="44" rx="7" fill="#3a2c17" stroke="#b9802f" stroke-width="1.5"/>
-    <text x="381" y="42" text-anchor="middle" fill="#ffb86b" font-size="10.5">qk_probe seam</text>
-    <text x="381" y="57" text-anchor="middle" fill="#5ddf9a" font-size="9.5">Python RUNS ✓</text>
-    <rect x="472" y="22" width="120" height="44" rx="7" fill="#173049" stroke="#2f6da3"/><text x="532" y="48" text-anchor="middle" fill="#bcd7f0" font-size="11">graph seg</text>
-    <line x1="290" y1="44" x2="304" y2="44" stroke="#9aa3b2" stroke-width="1.4" marker-end="url(#ar2)"/>
-    <line x1="456" y1="44" x2="470" y2="44" stroke="#9aa3b2" stroke-width="1.4" marker-end="url(#ar2)"/>
-    <rect x="612" y="22" width="258" height="44" rx="7" fill="#16302a" stroke="#2f9c7a"/>
-    <text x="741" y="42" text-anchor="middle" fill="#7ee0c0" font-size="10.5">capture happens · request config read</text>
-    <text x="741" y="57" text-anchor="middle" fill="#9aa3b2" font-size="9.5">every step, at the seam</text>
-
-    <line x1="30" y1="92" x2="870" y2="92" stroke="#2a2f3a" stroke-dasharray="4 4"/>
-
-    <!-- FULL row -->
-    <text x="30" y="150" fill="#ffb86b" font-size="13" font-weight="700">FULL replay</text>
-    <text x="30" y="168" fill="#6b7383" font-size="11">decode step</text>
-    <rect x="170" y="120" width="422" height="60" rx="8" fill="#173049" stroke="#b9802f" stroke-width="1.8"/>
-    <text x="381" y="146" text-anchor="middle" fill="#cfd5df" font-size="11">one frozen graph — qk_probe absorbed inside</text>
-    <text x="381" y="166" text-anchor="middle" fill="#ff6b6b" font-size="10.5">no seam · Python NEVER runs ✗</text>
-    <line x1="592" y1="150" x2="612" y2="150" stroke="#ff6b6b" stroke-width="1.6" marker-end="url(#arbad)"/>
-    <rect x="612" y="120" width="258" height="60" rx="8" fill="#2a1417" stroke="#ff6b6b" stroke-dasharray="5 4"/>
-    <text x="741" y="146" text-anchor="middle" fill="#ff6b6b" font-size="11">impl skipped → captures NOTHING</text>
-    <text x="741" y="166" text-anchor="middle" fill="#9aa3b2" font-size="9.5">silent 0-layer capture</text>
-
-    <!-- bottom note -->
-    <rect x="30" y="214" width="840" height="92" rx="10" fill="#161922" stroke="#2a2f3a"/>
-    <text x="48" y="240" fill="#e6e9ef" font-size="12.5" font-weight="700">The trap that flips intuition:</text>
-    <text x="48" y="262" fill="#9aa3b2" font-size="12">If we declared our op as a splitting op under FULL, vLLM falls back to FULL_AND_PIECEWISE and</text>
-    <text x="48" y="280" fill="#9aa3b2" font-size="12">re-inserts an eager seam — defeating the point. For FULL, the hook op must <tspan fill="#ffb86b" font-weight="700">NOT</tspan> be a splitting op.</text>
-    <text x="48" y="298" fill="#6b7383" font-size="11">→ The FULL path is &quot;buffer mode + cudagraph_mode=FULL_DECODE_ONLY&quot;, which already skips the splitting-op declaration.</text>
-  </svg>
-  <figcaption><b>Same op, opposite fate.</b> The splitting op that <em>makes</em> PIECEWISE work
-  is precisely what <em>breaks</em> FULL. The blocker is structural, not a bug: a captured FULL
-  graph is a frozen sequence of GPU kernels over fixed buffer addresses, and there is no point
-  at which &quot;inspect this request and decide what to do&quot; can execute.</figcaption>
-  </figure>
-
+  <p>The v0.2.0 hook is a <code>register_forward_hook</code> callback — a Python function that fires
+  after a module's forward. <code>torch.compile</code> traces each forward <em>once</em> and replaces
+  it with a compiled artifact; the instance hook is never called again. And a captured CUDA graph is
+  a frozen replay of GPU kernels — <strong>no Python runs on replay at all</strong>. So the eager
+  hook silently captures nothing under a graph. By default the plugin therefore forces
+  <code>enforce_eager=True</code>; arming <code>VLLM_HOOK_ALLOW_CUDAGRAPH=1</code> selects the
+  graph-safe path below.</p>
   <div class="call bad">
-    <b class="lbl">The real blocker</b>
-    It was never &quot;FULL has no interrupts so we must hook every layer.&quot; It is deeper:
-    <strong>replay re-runs frozen kernels over whatever bytes are in their buffers, and Python
-    is gone.</strong> Any design that needs to <em>decide</em> something at decode time is
-    disqualified. The decision has to become data.
+    <b class="lbl">The constraint everything follows from</b>
+    On replay, the step is data-in &rarr; data-out through fixed kernels. Any per-request logic must
+    be expressed as <em>bytes the kernels read</em>, written before the replay — never as code that
+    runs during it.
   </div>
 </section>
 
 <!-- 03 ----------------------------------------------------------- -->
-<section id="reframe">
-  <h2><span class="num">03</span>The reframe: placement is static, behavior is data</h2>
+<section id="placement">
+  <h2><span class="num">03</span>Placement: a baked op, not a kernel patch</h2>
   <div class="rule"></div>
-  <p>Once you accept that replay reads buffers and runs no Python, the design writes itself.
-  Split every hook into the two halves from §00:</p>
-
-  <table>
-    <thead><tr><th>Half</th><th>When decided</th><th>How expressed</th><th>Example</th></tr></thead>
-    <tbody>
-      <tr><td><strong>Placement</strong></td><td>capture time (static)</td><td>which layers carry a baked op</td><td>bake <code>capture</code>/<code>steer</code> on every candidate layer</td></tr>
-      <tr><td><strong>Behavior</strong></td><td>per step (dynamic)</td><td>contents of pre-registered GPU buffers, read by the baked kernel</td><td><code>coeff=0</code> → no-op; route to sentinel row → discard</td></tr>
-    </tbody>
-  </table>
-
-  <p>This dissolves the &quot;hooking every layer is wasteful&quot; worry. In PIECEWISE the
-  expensive thing was the <em>seam</em>, not the op. In FULL there are no seams, and a
-  data-gated op on a layer nobody is using is a masked add with coefficient&nbsp;0 — a few
-  microseconds, fully hidden behind the kernels around it.</p>
-
-  <div class="call key">
-    <b class="lbl">Counter-intuitive but true</b>
-    <strong>FULL does not make hooks more expensive — it makes them static and cheap.</strong>
-    Over-provision the candidate set; you pay almost nothing for the unused entries.
-  </div>
-
-  <h3>The precedent we copy: LoRA under cudagraphs</h3>
-  <p>vLLM already does per-request, cudagraph-safe, mixed-batch intervention. It pre-registers a
-  fixed number of adapter slots at a fixed max rank, bakes the LoRA GEMM into the graph for all
-  slots, keeps a per-row <code>token → adapter-slot</code> mapping buffer, and gates no-adapter
-  rows to zero. <strong>A steering vector is literally a rank-1 additive LoRA on the residual
-  stream.</strong> The batching question is already answered in shipping code; we mirror its
-  shape.</p>
+  <p>We do <strong>not</strong> modify FlashAttention or any vLLM CUDA kernel. We register our own
+  custom ops — <code>vllm_hook::capture_qk</code>, <code>capture_hs</code> (read-only scatter) and
+  <code>steer_buffer</code> (in-place residual add) — via <code>torch.library</code>, and attach
+  them by <strong>class-wrapping the Python <code>.forward</code></strong> of the
+  <code>Attention</code> module (for QK) or the decoder layer (for HS): a reversible monkey-patch
+  that calls our op right before / after the original forward. vLLM's attention runs byte-for-byte
+  unchanged; capture only <em>reads</em> the same post-RoPE q/k it is handed, so the model's numerics
+  are identical with or without the hook.</p>
+  <ul>
+    <li><strong>Hosts</strong> (built at <code>load_model</code>, before capture, so data-ptrs are
+    fixed): one per hooked layer, owning the static buffers.</li>
+    <li><strong>The op is never a splitting op</strong> — that is what lets it be absorbed into the
+    full graph and replay (§01). The capture/steer-mode env var gates the declaration per worker, so
+    each worker keeps a distinct compile cache key.</li>
+  </ul>
 </section>
 
 <!-- 04 ----------------------------------------------------------- -->
-<section id="buffer">
-  <h2><span class="num">04</span>The fix: <em>buffer mode</em></h2>
+<section id="behavior">
+  <h2><span class="num">04</span>Behavior: the kernel reads a table we rewrite each step</h2>
   <div class="rule"></div>
-  <p>Buffer mode is the concrete realization of &quot;behavior is data.&quot; Three pieces, with
-  a hard line drawn between what is <em>inside</em> the graph and what is <em>outside</em> it.</p>
+  <p>The baked op is a fixed instruction — <em>&ldquo;read this index buffer, and for each token do
+  X to the row it names.&rdquo;</em> What it actually does on a given step is decided entirely by the
+  integers we wrote into that buffer beforehand.</p>
+
+  <h3>Capture: a routing index + a discard sentinel</h3>
+  <p>There is a <code>capture_index</code> buffer with one slot per token position. Before each step
+  the host fills it — &ldquo;token in column 3 &rarr; buffer row 5&rdquo; — and crucially
+  <strong>row 0 is a write-only discard sentinel</strong>: any token we do <em>not</em> want is
+  pointed at row 0 and harmlessly overwritten. So &ldquo;capture layer 7 for request B but not
+  request A&rdquo; is just integers: B&rsquo;s tokens get real rows, A&rsquo;s tokens get 0 — no
+  branch, same kernel, no cost difference on replay.</p>
 
   <figure>
-  <svg viewBox="0 0 900 360" role="img" aria-label="Buffer mode anatomy">
-    <defs>
-      <marker id="ar3" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
-    </defs>
-    <!-- frozen region big box -->
-    <rect x="285" y="70" width="330" height="220" rx="14" fill="#0e1f30" stroke="#2f6da3" stroke-width="2" stroke-dasharray="2 0"/>
-    <text x="450" y="58" text-anchor="middle" fill="#5eb1ff" font-size="12.5" font-weight="700" letter-spacing="1">CAPTURED REGION  ·  no Python on replay</text>
-
-    <!-- inside: model kernels + scatter op -->
-    <rect x="315" y="92" width="270" height="40" rx="7" fill="#173049" stroke="#2f6da3"/>
-    <text x="450" y="117" text-anchor="middle" fill="#bcd7f0" font-size="11">attention / MLP kernels (q, k, residual)</text>
-    <line x1="450" y1="132" x2="450" y2="158" stroke="#9aa3b2" stroke-width="1.5" marker-end="url(#ar3)"/>
-    <rect x="315" y="160" width="270" height="50" rx="8" fill="#16302a" stroke="#2f9c7a" stroke-width="1.6"/>
-    <text x="450" y="182" text-anchor="middle" fill="#7ee0c0" font-size="11.5" font-weight="700">vllm_hook::capture_qk  (index_copy_)</text>
-    <text x="450" y="199" text-anchor="middle" fill="#9aa3b2" font-size="10">a real CUDA kernel — recorded, replays every step, no host sync</text>
-    <!-- static buffers inside -->
-    <rect x="315" y="226" width="128" height="48" rx="7" fill="#16302a" stroke="#2f9c7a"/>
-    <text x="379" y="247" text-anchor="middle" fill="#7ee0c0" font-size="10.5">q_buf / k_buf</text>
-    <text x="379" y="263" text-anchor="middle" fill="#9aa3b2" font-size="9.5">static, fixed data_ptr</text>
-    <rect x="457" y="226" width="128" height="48" rx="7" fill="#3a2c17" stroke="#b9802f"/>
-    <text x="521" y="247" text-anchor="middle" fill="#ffb86b" font-size="10.5">capture_index</text>
-    <text x="521" y="263" text-anchor="middle" fill="#9aa3b2" font-size="9.5">routing — read on replay</text>
-    <line x1="521" y1="226" x2="490" y2="212" stroke="#b9802f" stroke-width="1.3" marker-end="url(#ar3)"/>
-
-    <!-- LEFT: host upload -->
-    <rect x="20" y="120" width="225" height="120" rx="12" fill="#161922" stroke="#b9802f" stroke-width="1.4"/>
-    <text x="132" y="146" text-anchor="middle" fill="#ffb86b" font-size="12" font-weight="700">① ROUTING / UPLOAD</text>
-    <text x="132" y="166" text-anchor="middle" fill="#9aa3b2" font-size="10.5">host Python · before replay</text>
-    <text x="132" y="188" text-anchor="middle" fill="#cfd5df" font-size="10.5">build token→row map from</text>
-    <text x="132" y="203" text-anchor="middle" fill="#cfd5df" font-size="10.5">this step's request configs,</text>
-    <text x="132" y="218" text-anchor="middle" fill="#cfd5df" font-size="10.5">copy_ into capture_index</text>
-    <line x1="247" y1="200" x2="313" y2="240" stroke="#b9802f" stroke-width="1.6" marker-end="url(#ar3)"/>
-
-    <!-- RIGHT: host egress -->
-    <rect x="655" y="120" width="225" height="120" rx="12" fill="#161922" stroke="#b9802f" stroke-width="1.4"/>
-    <text x="767" y="146" text-anchor="middle" fill="#ffb86b" font-size="12" font-weight="700">③ EGRESS / DRAIN</text>
-    <text x="767" y="166" text-anchor="middle" fill="#9aa3b2" font-size="10.5">host Python · after replay</text>
-    <text x="767" y="188" text-anchor="middle" fill="#cfd5df" font-size="10.5">read filled rows out of</text>
-    <text x="767" y="203" text-anchor="middle" fill="#cfd5df" font-size="10.5">q_buf/k_buf into worker</text>
-    <text x="767" y="218" text-anchor="middle" fill="#cfd5df" font-size="10.5">buckets → rpc / disk-async</text>
-    <line x1="586" y1="250" x2="653" y2="200" stroke="#b9802f" stroke-width="1.6" marker-end="url(#ar3)"/>
-
-    <text x="450" y="318" text-anchor="middle" fill="#6b7383" font-size="11">② the replay itself — between ① and ③ — touches only device buffers</text>
-    <!-- legend -->
-    <g transform="translate(255,335)" font-size="11">
-      <rect x="0" y="0" width="13" height="13" rx="3" fill="#173049" stroke="#2f6da3"/><text x="19" y="11" fill="#9aa3b2">in graph</text>
-      <rect x="110" y="0" width="13" height="13" rx="3" fill="#16302a" stroke="#2f9c7a"/><text x="129" y="11" fill="#9aa3b2">device static buffer</text>
-      <rect x="290" y="0" width="13" height="13" rx="3" fill="#3a2c17" stroke="#b9802f"/><text x="309" y="11" fill="#9aa3b2">host Python (outside graph)</text>
-    </g>
-  </svg>
-  <figcaption><b>The kernel is inside the graph; the decisions are outside it.</b>
-  <code>capture_qk</code> runs an <code>index_copy_</code> scatter — a genuine CUDA kernel with
-  no Python and no host sync — so it records into the graph and replays untouched every step.
-  All the &quot;which request, which row&quot; logic lives in host Python in the
-  <code>execute_model</code> wrapper, <em>outside</em> the captured region, where Python is still
-  legal. Replay just runs the kernel over whatever <code>capture_index</code> we uploaded.</figcaption>
-  </figure>
-
-  <div class="call key">
-    <b class="lbl">Why one mechanism covers both phases</b>
-    <strong>Buffer mode does not care whether the forward is eager or graphed.</strong> The
-    scatter kernel runs eagerly during prefill and replays during decode; routing and egress are
-    host Python in the wrapper either way. So we do <em>not</em> mix op-mode-for-prefill with
-    buffer-mode-for-decode — the same path serves both, and it declares no splitting op, so the
-    decode graph stays one full graph.
-  </div>
-
-  <h3>Two memory planes — and why SHM does not help here</h3>
-  <p>It is easy to conflate two different &quot;buffers.&quot; Keep them apart:</p>
-  <table>
-    <thead><tr><th>Plane</th><th>What it is</th><th>Memory space</th><th>Examples</th></tr></thead>
-    <tbody>
-      <tr><td><strong>In-graph data plane</strong></td><td>buffers the captured kernels read/write <em>on replay</em></td><td><strong>CUDA device memory</strong>, fixed <code>data_ptr</code></td><td><code>q_buf</code>/<code>k_buf</code>, <code>capture_index</code>, <code>coeff</code>, <code>vec_table</code></td></tr>
-      <tr><td><strong>Egress / transport plane</strong></td><td>how drained results travel worker → driver</td><td>host RAM / disk / host SHM</td><td><code>rpc</code>, <code>disk</code>, <code>shm</code></td></tr>
-    </tbody>
-  </table>
-  <p>The fixed pre-defined buffer the FULL design depends on is the <strong>in-graph data
-  plane</strong> — it <em>must</em> be device memory, because a recorded kernel scatters into it
-  by <code>data_ptr</code>. A graph kernel cannot touch host shared memory, so
-  <code>VLLM_HOOK_USE_SHM</code> simply cannot <em>be</em> that buffer. On the egress side where
-  SHM does live, it is already dominated (disk-st-async beats it on every measured cell, and it
-  is HS-only / last-token-only). The legitimate concern hiding in the SHM question — egress
-  throughput when decode capture drains <em>every step</em> — is answered not by a new transport
-  but by <strong>accumulating rows in the device buffer and draining in batches</strong>, with
-  pinned host memory for the D2H copy.</p>
-</section>
-
-<!-- 05 ----------------------------------------------------------- -->
-<section id="capture">
-  <h2><span class="num">05</span>Capture, end-to-end <span class="pill done">implemented · parity-proven</span></h2>
-  <div class="rule"></div>
-  <p>Capture is the milestone that is built and validated. Two ops, the same shape:
-  <code>capture_qk</code> (attention Q/K) and <code>capture_hs</code> (decoder-layer residual
-  stream). Each scatters live rows into a static per-layer buffer keyed by a routing index.</p>
-
-  <h3>The scatter, concretely</h3>
-  <p>The static buffer is sized <code>(cap + 1, dim)</code>. <strong>Row 0 is a write-only
-  discard sentinel</strong>: any token we do not want to capture is routed there and harmlessly
-  overwritten. That sentinel is what makes &quot;baked but inactive&quot; a true no-op with zero
-  branching.</p>
-
-  <figure>
-  <svg viewBox="0 0 900 320" role="img" aria-label="index_copy scatter into static buffer">
+  <svg viewBox="0 0 900 250" role="img" aria-label="index_copy scatter into static buffer">
     <defs>
       <marker id="ar4" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7ee0c0"/></marker>
       <marker id="ar4g" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5a6273"/></marker>
     </defs>
-    <!-- live rows (this step) -->
-    <text x="120" y="36" text-anchor="middle" fill="#9aa3b2" font-size="12" font-weight="700">live q rows (this step)</text>
+    <text x="120" y="30" text-anchor="middle" fill="#9aa3b2" font-size="12" font-weight="700">live q rows (this step)</text>
     <g font-size="11" text-anchor="middle">
-      <rect x="60" y="50" width="120" height="30" rx="5" fill="#173049" stroke="#2f6da3"/><text x="120" y="70" fill="#bcd7f0">tok 0</text>
-      <rect x="60" y="84" width="120" height="30" rx="5" fill="#173049" stroke="#2f6da3"/><text x="120" y="104" fill="#bcd7f0">tok 1</text>
-      <rect x="60" y="118" width="120" height="30" rx="5" fill="#173049" stroke="#2f6da3"/><text x="120" y="138" fill="#bcd7f0">tok 2</text>
-      <rect x="60" y="152" width="120" height="30" rx="5" fill="#173049" stroke="#2f6da3"/><text x="120" y="172" fill="#bcd7f0">tok 3</text>
+      <rect x="60" y="44" width="120" height="28" rx="5" fill="#173049" stroke="#2f6da3"/><text x="120" y="63" fill="#bcd7f0">tok 0</text>
+      <rect x="60" y="76" width="120" height="28" rx="5" fill="#173049" stroke="#2f6da3"/><text x="120" y="95" fill="#bcd7f0">tok 1</text>
+      <rect x="60" y="108" width="120" height="28" rx="5" fill="#173049" stroke="#2f6da3"/><text x="120" y="127" fill="#bcd7f0">tok 2</text>
+      <rect x="60" y="140" width="120" height="28" rx="5" fill="#173049" stroke="#2f6da3"/><text x="120" y="159" fill="#bcd7f0">tok 3</text>
     </g>
-    <!-- routing index -->
-    <text x="330" y="36" text-anchor="middle" fill="#ffb86b" font-size="12" font-weight="700">capture_index</text>
-    <text x="330" y="51" text-anchor="middle" fill="#6b7383" font-size="10">uploaded before replay</text>
+    <text x="330" y="30" text-anchor="middle" fill="#ffb86b" font-size="12" font-weight="700">capture_index</text>
+    <text x="330" y="44" text-anchor="middle" fill="#6b7383" font-size="10">uploaded before replay</text>
     <g font-size="11" text-anchor="middle">
-      <rect x="285" y="58" width="90" height="30" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="330" y="78" fill="#ffd9a8">→ 1</text>
-      <rect x="285" y="92" width="90" height="30" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="330" y="112" fill="#ffd9a8">→ 0</text>
-      <rect x="285" y="126" width="90" height="30" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="330" y="146" fill="#ffd9a8">→ 2</text>
-      <rect x="285" y="160" width="90" height="30" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="330" y="180" fill="#ffd9a8">→ 0</text>
+      <rect x="285" y="50" width="90" height="28" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="330" y="69" fill="#ffd9a8">→ 1</text>
+      <rect x="285" y="82" width="90" height="28" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="330" y="101" fill="#ffd9a8">→ 0</text>
+      <rect x="285" y="114" width="90" height="28" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="330" y="133" fill="#ffd9a8">→ 2</text>
+      <rect x="285" y="146" width="90" height="28" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="330" y="165" fill="#ffd9a8">→ 0</text>
     </g>
-    <!-- static buffer -->
-    <text x="680" y="36" text-anchor="middle" fill="#7ee0c0" font-size="12" font-weight="700">q_buf  (cap+1, dim)  — static, in-graph</text>
+    <text x="690" y="30" text-anchor="middle" fill="#7ee0c0" font-size="12" font-weight="700">q_buf (cap+1, dim) — static, in-graph</text>
     <g font-size="11" text-anchor="middle">
-      <rect x="560" y="50" width="240" height="30" rx="5" fill="#3a3f4b" stroke="#5a6273"/><text x="680" y="70" fill="#aeb5c2">row 0 · DISCARD sentinel</text>
-      <rect x="560" y="84" width="240" height="30" rx="5" fill="#16302a" stroke="#2f9c7a"/><text x="680" y="104" fill="#9ff0d4">row 1 · ← tok 0</text>
-      <rect x="560" y="118" width="240" height="30" rx="5" fill="#16302a" stroke="#2f9c7a"/><text x="680" y="138" fill="#9ff0d4">row 2 · ← tok 2</text>
-      <rect x="560" y="152" width="240" height="30" rx="5" fill="#101720" stroke="#2a2f3a"/><text x="680" y="172" fill="#6b7383">row 3 · (untouched)</text>
+      <rect x="560" y="44" width="260" height="28" rx="5" fill="#3a3f4b" stroke="#5a6273"/><text x="690" y="63" fill="#aeb5c2">row 0 · DISCARD sentinel</text>
+      <rect x="560" y="76" width="260" height="28" rx="5" fill="#16302a" stroke="#2f9c7a"/><text x="690" y="95" fill="#9ff0d4">row 1 · ← tok 0</text>
+      <rect x="560" y="108" width="260" height="28" rx="5" fill="#16302a" stroke="#2f9c7a"/><text x="690" y="127" fill="#9ff0d4">row 2 · ← tok 2</text>
+      <rect x="560" y="140" width="260" height="28" rx="5" fill="#101720" stroke="#2a2f3a"/><text x="690" y="159" fill="#6b7383">row 3 · (untouched)</text>
     </g>
-    <!-- arrows -->
-    <line x1="380" y1="73" x2="556" y2="95" stroke="#7ee0c0" stroke-width="1.5" marker-end="url(#ar4)"/>
-    <line x1="380" y1="141" x2="556" y2="129" stroke="#7ee0c0" stroke-width="1.5" marker-end="url(#ar4)"/>
-    <line x1="380" y1="107" x2="556" y2="65" stroke="#5a6273" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#ar4g)"/>
-    <line x1="380" y1="175" x2="556" y2="65" stroke="#5a6273" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#ar4g)"/>
-
-    <!-- code -->
-    <rect x="60" y="222" width="740" height="74" rx="10" fill="#11141b" stroke="#2a2f3a"/>
-    <text x="78" y="246" fill="#6b7383" font-size="11.5" font-family="monospace"># _capture_qk_impl — graph-legal, no host sync, no Python on replay</text>
-    <text x="78" y="268" fill="#cdd6f4" font-size="12.5" font-family="monospace">idx = capture_index[:n].to(long)</text>
-    <text x="78" y="287" fill="#cdd6f4" font-size="12.5" font-family="monospace">q_buf.<tspan fill="#82aaff">index_copy_</tspan>(0, idx, q_src)   <tspan fill="#6b7383" dx="6"># tokens routed to row 0 are discarded</tspan></text>
+    <line x1="380" y1="64" x2="556" y2="86" stroke="#7ee0c0" stroke-width="1.5" marker-end="url(#ar4)"/>
+    <line x1="380" y1="128" x2="556" y2="120" stroke="#7ee0c0" stroke-width="1.5" marker-end="url(#ar4)"/>
+    <line x1="380" y1="96" x2="556" y2="58" stroke="#5a6273" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#ar4g)"/>
+    <line x1="380" y1="160" x2="556" y2="58" stroke="#5a6273" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#ar4g)"/>
+    <rect x="60" y="192" width="760" height="46" rx="10" fill="#11141b" stroke="#2a2f3a"/>
+    <text x="78" y="214" fill="#6b7383" font-size="11" font-family="monospace"># baked op — no host sync, no Python on replay</text>
+    <text x="78" y="231" fill="#cdd6f4" font-size="12.5" font-family="monospace">q_buf.<tspan fill="#82aaff">index_copy_</tspan>(0, capture_index[:n], q_src)   <tspan fill="#6b7383" dx="6"># row-0 writes are discarded</tspan></text>
   </svg>
-  <figcaption><b>Routing decides everything; the kernel decides nothing.</b> Tokens 1 and 3 were
-  routed to row&nbsp;0, so they vanish into the sentinel. Tokens 0 and 2 land in real rows. To
-  turn a layer off for a request, route its tokens to row&nbsp;0 — no branch, no cost difference
-  on replay. <b>QK adds one wrinkle:</b> <code>k_all</code> is the full key history. Each token
-  routes to row <code>flat_position + 1</code> — its column <em>within this step</em> — so a step
-  never writes past <code>cap</code>. Egress clones only <em>this step's</em> new key rows, and the
-  growing-prefix <code>k_all</code> is rebuilt at flush from those per-step clones plus the
-  recorded prefix lengths (<code>k_prefix_ends</code>). Routing per-step rather than by absolute
-  position is what lets a sequence longer than one batch (chunked prefill, long prompts) capture in
-  full, and lets several requests share the buffer without colliding (see §10). HS needs no
-  reconstruction — the per-token residual stream <em>is</em> the artifact.</figcaption>
+  <figcaption><b>Routing decides everything; the kernel decides nothing.</b> Tokens 1 and 3 route to
+  row 0 and vanish; tokens 0 and 2 land in real rows. To turn a layer off for a request, point its
+  tokens at row 0. The same per-(layer, token) slabs carry <code>any_active</code> markers so an
+  entire inactive layer costs nothing.</figcaption>
   </figure>
 
-  <h3>The three load-bearing fixes that made FULL capture actually work</h3>
-  <table>
-    <thead><tr><th>#</th><th>Fix</th><th>Why it was needed</th></tr></thead>
-    <tbody>
-      <tr><td>1</td><td><strong>No splitting op under FULL</strong>, gated per-worker on <code>VLLM_HOOK_{QK,HS}_CAPTURE</code> / <code>VLLM_HOOK_STEER_MODE</code></td><td>Declaring a splitting op forces a fallback to <code>FULL_AND_PIECEWISE</code> and re-adds an eager seam. Buffer mode (and <code>steer_buffer</code>) declares none → decode is one full graph with the scatter / steer add baked in. The gate is per-worker so each compile/AOT cache key stays distinct.</td></tr>
-      <tr><td>2</td><td><strong>Routing runs in a <code>_prepare_inputs</code> wrapper</strong>, not pre-<code>execute_model</code></td><td>A new request enters <code>input_batch</code> only inside <code>execute_model</code>. Old pre-forward routing produced <code>plans=0</code> on every prefill — a silent 0-layer capture. The fix builds + uploads routing right after <code>_prepare_inputs</code>, reading the runner's own <code>query_start_loc</code>.</td></tr>
-      <tr><td>3</td><td><strong>QK <code>k_all</code> via flat per-step routing + flush-time reconstruction</strong></td><td>The growing <code>k_all</code> artifact is rebuilt from per-step new-key clones + <code>k_prefix_ends</code>, <em>not</em> accumulated in the buffer by absolute position. Flat routing (each token → its column + 1) keeps every step within <code>cap</code>, so a sequence longer than one batch (chunked prefill / long prompt) is captured in full and concurrent requests don't collide on shared rows. <span class="muted">The earlier absolute-position scheme silently dropped any token past <code>cap</code> — see §10.</span></td></tr>
-    </tbody>
-  </table>
+  <h3>Steering: a coefficient and a vector id</h3>
+  <p>The buffers are <code>coeff[layer, token]</code> and <code>vec_id[layer, token]</code> plus a
+  resident <code>vec_table[V_max, hidden]</code>; the baked kernel does
+  <code>residual += coeff · vec_table[vec_id]</code>, masked and in place. Setting
+  <code>coeff = 0</code> makes it a numeric no-op (steering off); setting <code>coeff = c,
+  vec_id = v</code> across request <em>r</em>&rsquo;s tokens steers that request by vector <em>v</em>
+  at strength <em>c</em>. A per-token <code>steer_mode</code> mask unifies both methods —
+  <code>add_vector</code> (host coefficient) and <code>adjust_rs</code> (coefficient computed
+  in-kernel from the live residual) — so one batch can mix them (full diagram in §08).</p>
+</section>
+
+<!-- 05 ----------------------------------------------------------- -->
+<section id="memory">
+  <h2><span class="num">05</span>Where the data and metadata live</h2>
+  <div class="rule"></div>
+  <p>Three planes. <strong>Routing/config metadata</strong> for the active hook layers lives in
+  device slabs, staged from a pinned host ring. <strong>Captured data</strong> lands first in static
+  GPU scratch, then is cloned into per-request host-side buckets (tensors still on GPU, the
+  <code>.cpu()</code> deferred), and finally materializes as CPU artifacts at request end. The only
+  source of per-request intent is each request&rsquo;s <code>extra_args</code> in its sampling
+  params, read on the host during routing.</p>
+
+  <figure>
+  <svg viewBox="0 0 900 430" role="img" aria-label="memory map: host, GPU, output planes">
+    <defs>
+      <marker id="am" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5ddf9a"/></marker>
+      <marker id="ams" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ff6b6b"/></marker>
+    </defs>
+
+    <!-- HOST column -->
+    <rect x="20" y="40" width="270" height="360" rx="12" fill="#120f0a" stroke="#b9802f" stroke-width="1.3"/>
+    <text x="155" y="64" text-anchor="middle" fill="#ffb86b" font-size="13" font-weight="700" letter-spacing="1">HOST (CPU)</text>
+
+    <rect x="38" y="80" width="234" height="74" rx="9" fill="#3a2c17" stroke="#b9802f"/>
+    <text x="50" y="100" fill="#ffd9a8" font-size="11.5" font-weight="700">per-request config</text>
+    <text x="50" y="118" fill="#9aa3b2" font-size="10.5">req_state.sampling_params</text>
+    <text x="50" y="133" fill="#9aa3b2" font-size="10.5">.extra_args → which layers,</text>
+    <text x="50" y="148" fill="#9aa3b2" font-size="10.5">mode, coeff, vec — read on route</text>
+
+    <rect x="38" y="166" width="234" height="74" rx="9" fill="#3a2c17" stroke="#b9802f"/>
+    <text x="50" y="186" fill="#ffd9a8" font-size="11.5" font-weight="700">pinned mirror ring (depth 2)</text>
+    <text x="50" y="204" fill="#9aa3b2" font-size="10.5">staging for capture_index /</text>
+    <text x="50" y="219" fill="#9aa3b2" font-size="10.5">coeff / vec_id — written here,</text>
+    <text x="50" y="234" fill="#9aa3b2" font-size="10.5">then copied H2D (W2)</text>
+
+    <rect x="38" y="252" width="234" height="80" rx="9" fill="#221a10" stroke="#b9802f"/>
+    <text x="50" y="272" fill="#ffd9a8" font-size="11.5" font-weight="700">per-request buckets</text>
+    <text x="50" y="290" fill="#9aa3b2" font-size="10.5">_captured_states[req][layer] =</text>
+    <text x="50" y="305" fill="#9aa3b2" font-size="10.5">{q, k_all(new rows), k_prefix_ends}</text>
+    <text x="50" y="320" fill="#7ee0c0" font-size="10">GPU-clone refs · .cpu() deferred</text>
+
+    <rect x="38" y="344" width="234" height="46" rx="9" fill="#161922" stroke="#b9802f"/>
+    <text x="50" y="364" fill="#ffd9a8" font-size="11.5" font-weight="700">final artifacts</text>
+    <text x="50" y="380" fill="#9aa3b2" font-size="10.5">probes['qk_cache'/'hs_cache'] · disk</text>
+
+    <!-- GPU column -->
+    <rect x="330" y="40" width="320" height="360" rx="12" fill="#0c1411" stroke="#2f9c7a" stroke-width="1.3"/>
+    <text x="490" y="64" text-anchor="middle" fill="#7ee0c0" font-size="13" font-weight="700" letter-spacing="1">GPU (device)</text>
+
+    <rect x="348" y="80" width="284" height="76" rx="9" fill="#16302a" stroke="#2f9c7a"/>
+    <text x="360" y="100" fill="#9ff0d4" font-size="11.5" font-weight="700">routing / config slabs</text>
+    <text x="360" y="118" fill="#9aa3b2" font-size="10.5">capture_index[num_layers, cap] · any_active[L]</text>
+    <text x="360" y="133" fill="#9aa3b2" font-size="10.5">steer: coeff/vec_id/steer_mode[L, cap]</text>
+    <text x="360" y="148" fill="#9aa3b2" font-size="10.5">resident vec_table[V_max, hidden]</text>
+
+    <rect x="348" y="168" width="284" height="74" rx="9" fill="#16302a" stroke="#2f9c7a"/>
+    <text x="360" y="188" fill="#9ff0d4" font-size="11.5" font-weight="700">static per-layer buffers (scratch)</text>
+    <text x="360" y="206" fill="#9aa3b2" font-size="10.5">q_buf / k_buf / hs_buf (cap+1, dim)</text>
+    <text x="360" y="221" fill="#9aa3b2" font-size="10.5">cap = max_num_batched_tokens</text>
+    <text x="360" y="236" fill="#ffb86b" font-size="10">overwritten EVERY step (not history)</text>
+
+    <rect x="348" y="254" width="284" height="76" rx="9" fill="#173049" stroke="#2f6da3"/>
+    <text x="360" y="274" fill="#bcd7f0" font-size="11.5" font-weight="700">the captured CUDA graph</text>
+    <text x="360" y="292" fill="#9aa3b2" font-size="10.5">baked op reads slabs →</text>
+    <text x="360" y="307" fill="#9aa3b2" font-size="10.5">scatters live q/k into buffers</text>
+    <text x="360" y="322" fill="#9aa3b2" font-size="10.5">(or steers residual in place)</text>
+
+    <text x="490" y="358" text-anchor="middle" fill="#6b7383" font-size="10">slabs are read on replay; buffers are written on replay</text>
+    <text x="490" y="376" text-anchor="middle" fill="#6b7383" font-size="10">— both pre-allocated before capture, fixed data-ptrs</text>
+
+    <!-- arrows host<->gpu -->
+    <line x1="274" y1="203" x2="346" y2="118" stroke="#5ddf9a" stroke-width="1.7" marker-end="url(#am)"/>
+    <text x="312" y="150" text-anchor="middle" fill="#5ddf9a" font-size="9.5">H2D upload</text>
+    <text x="312" y="162" text-anchor="middle" fill="#6b7383" font-size="9">async · non-blocking</text>
+
+    <line x1="346" y1="206" x2="276" y2="285" stroke="#5ddf9a" stroke-width="1.7" marker-end="url(#am)"/>
+    <text x="300" y="250" text-anchor="middle" fill="#5ddf9a" font-size="9.5">clone</text>
+    <text x="312" y="262" text-anchor="middle" fill="#6b7383" font-size="9">async issue · .cpu() deferred</text>
+
+    <!-- OUTPUT column -->
+    <rect x="690" y="40" width="190" height="360" rx="12" fill="#0d1117" stroke="#2a2f3a" stroke-width="1.3"/>
+    <text x="785" y="64" text-anchor="middle" fill="#e6e9ef" font-size="13" font-weight="700" letter-spacing="1">RETRIEVAL</text>
+    <rect x="706" y="252" width="158" height="92" rx="9" fill="#161922" stroke="#2a2f3a"/>
+    <text x="785" y="278" text-anchor="middle" fill="#e6e9ef" font-size="11.5" font-weight="700">at request end</text>
+    <text x="785" y="298" text-anchor="middle" fill="#9aa3b2" font-size="10">reconstruct k_all,</text>
+    <text x="785" y="312" text-anchor="middle" fill="#9aa3b2" font-size="10">then D2H to CPU</text>
+    <text x="785" y="330" text-anchor="middle" fill="#ff6b6b" font-size="10">sync · once / request</text>
+    <line x1="274" y1="368" x2="704" y2="300" stroke="#ff6b6b" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ams)"/>
+
+    <!-- legend -->
+    <g font-size="10.5">
+      <rect x="350" y="394" width="14" height="4" rx="2" fill="#5ddf9a"/><text x="370" y="399" fill="#9aa3b2">async (no per-step stall)</text>
+      <rect x="540" y="394" width="14" height="4" rx="2" fill="#ff6b6b"/><text x="560" y="399" fill="#9aa3b2">sync (once / request)</text>
+    </g>
+  </svg>
+  <figcaption><b>What is stored where.</b> The <em>metadata</em> for active hook layers
+  (<code>capture_index</code>, <code>any_active</code>, steer slabs) is small and lives device-side,
+  refreshed from the pinned ring. The <em>static buffers</em> are scratch — overwritten every step,
+  never the artifact. The growing artifact accumulates in per-request buckets as cheap GPU clones;
+  the expensive <code>.cpu()</code> happens once, at request end. Per step we add <b>no</b>
+  host&harr;GPU sync — the only syncs are vLLM&rsquo;s own input-prep event and the once-per-request
+  flush.</figcaption>
+  </figure>
 </section>
 
 <!-- 06 ----------------------------------------------------------- -->
-<section id="timeline">
-  <h2><span class="num">06</span>The target: eager prefill + full-graph decode</h2>
+<section id="flow">
+  <h2><span class="num">06</span>The per-step workflow: prefill &amp; decode</h2>
   <div class="rule"></div>
-  <p>Under <code>cudagraph_mode=FULL_DECODE_ONLY</code>, a request's life looks like this. Notice
-  the scatter kernel is the <em>same</em> kernel in both phases; only its execution mode differs
-  (executed eagerly vs. replayed). Routing and egress bracket every step from outside the graph.</p>
+  <p>Every step has the same four beats, bracketing the forward from <em>outside</em> the graph: a
+  host routing build, the (replayed or eager) forward where the baked op fires, and a host egress
+  drain. Routing is wired into a wrap of the model runner&rsquo;s <code>_prepare_inputs</code> —
+  vLLM calls it inside <code>synchronize_input_prep()</code>, so we read <em>this</em> step&rsquo;s
+  <code>query_start_loc</code> with no added sync. Prefill and decode differ only in <em>how much</em>
+  each beat does.</p>
 
   <figure>
-  <svg viewBox="0 0 900 340" role="img" aria-label="prefill plus decode timeline">
+  <svg viewBox="0 0 900 470" role="img" aria-label="prefill and decode per-step timelines">
     <defs>
-      <marker id="art" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
+      <marker id="at" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#9aa3b2"/></marker>
     </defs>
-    <!-- phase labels -->
-    <rect x="40" y="40" width="200" height="24" rx="6" fill="#3a2c17" stroke="#b9802f"/><text x="140" y="57" text-anchor="middle" fill="#ffb86b" font-size="11.5" font-weight="700">PREFILL — eager</text>
-    <rect x="260" y="40" width="600" height="24" rx="6" fill="#173049" stroke="#2f9c7a"/><text x="560" y="57" text-anchor="middle" fill="#7ee0c0" font-size="11.5" font-weight="700">DECODE — full graph replay (one captured graph, re-run each step)</text>
 
-    <!-- swimlane: execute_model wrapper (host) -->
-    <text x="30" y="100" fill="#6b7383" font-size="10.5">host (wrapper)</text>
-    <!-- prefill step -->
-    <g font-size="9.5" text-anchor="middle">
-      <rect x="50" y="110" width="44" height="26" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="72" y="127" fill="#ffd9a8">route</text>
-      <rect x="196" y="110" width="44" height="26" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="218" y="127" fill="#ffd9a8">drain</text>
-    </g>
-    <!-- prefill compute (eager) -->
-    <rect x="100" y="106" width="90" height="34" rx="6" fill="#3a2c17" stroke="#b9802f" stroke-width="1.3"/>
-    <text x="145" y="121" text-anchor="middle" fill="#ffb86b" font-size="9.5">forward (eager)</text>
-    <text x="145" y="133" text-anchor="middle" fill="#7ee0c0" font-size="8.5">+ capture_qk runs</text>
+    <!-- column headers -->
+    <text x="92" y="30" text-anchor="middle" fill="#9aa3b2" font-size="11" font-weight="700">1 · ROUTE (host)</text>
+    <text x="318" y="30" text-anchor="middle" fill="#9aa3b2" font-size="11" font-weight="700">2 · UPLOAD</text>
+    <text x="520" y="30" text-anchor="middle" fill="#9aa3b2" font-size="11" font-weight="700">3 · FORWARD (GPU)</text>
+    <text x="760" y="30" text-anchor="middle" fill="#9aa3b2" font-size="11" font-weight="700">4 · EGRESS (host)</text>
 
-    <!-- decode steps (repeat) -->
-    <g>
-      <!-- step pattern x at 270, 410, 550, 690 -->
-      <g transform="translate(270,0)">
-        <rect x="0" y="110" width="36" height="26" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="18" y="127" text-anchor="middle" fill="#ffd9a8" font-size="8.5">route</text>
-        <rect x="40" y="106" width="80" height="34" rx="6" fill="#173049" stroke="#2f9c7a" stroke-width="1.3"/><text x="80" y="120" text-anchor="middle" fill="#7ee0c0" font-size="9">replay</text><text x="80" y="132" text-anchor="middle" fill="#9ff0d4" font-size="8">capture_qk</text>
-        <rect x="124" y="110" width="36" height="26" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="142" y="127" text-anchor="middle" fill="#ffd9a8" font-size="8.5">drain</text>
-      </g>
-      <g transform="translate(410,0)">
-        <rect x="0" y="110" width="36" height="26" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="18" y="127" text-anchor="middle" fill="#ffd9a8" font-size="8.5">route</text>
-        <rect x="40" y="106" width="80" height="34" rx="6" fill="#173049" stroke="#2f9c7a" stroke-width="1.3"/><text x="80" y="120" text-anchor="middle" fill="#7ee0c0" font-size="9">replay</text><text x="80" y="132" text-anchor="middle" fill="#9ff0d4" font-size="8">capture_qk</text>
-        <rect x="124" y="110" width="36" height="26" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="142" y="127" text-anchor="middle" fill="#ffd9a8" font-size="8.5">drain</text>
-      </g>
-      <g transform="translate(550,0)">
-        <rect x="0" y="110" width="36" height="26" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="18" y="127" text-anchor="middle" fill="#ffd9a8" font-size="8.5">route</text>
-        <rect x="40" y="106" width="80" height="34" rx="6" fill="#173049" stroke="#2f9c7a" stroke-width="1.3"/><text x="80" y="120" text-anchor="middle" fill="#7ee0c0" font-size="9">replay</text><text x="80" y="132" text-anchor="middle" fill="#9ff0d4" font-size="8">capture_qk</text>
-        <rect x="124" y="110" width="36" height="26" rx="5" fill="#3a2c17" stroke="#b9802f"/><text x="142" y="127" text-anchor="middle" fill="#ffd9a8" font-size="8.5">drain</text>
-      </g>
-      <text x="730" y="127" fill="#6b7383" font-size="14">· · ·</text>
-    </g>
+    <!-- PREFILL lane -->
+    <rect x="20" y="44" width="120" height="150" rx="10" fill="#3a2c17" stroke="#b9802f"/>
+    <text x="80" y="64" text-anchor="middle" fill="#ffb86b" font-size="12" font-weight="700">PREFILL</text>
+    <text x="80" y="118" text-anchor="middle" fill="#ffd9a8" font-size="10.5">build index for</text>
+    <text x="80" y="133" text-anchor="middle" fill="#ffd9a8" font-size="10.5">ALL prompt tokens</text>
+    <text x="80" y="153" text-anchor="middle" fill="#9aa3b2" font-size="9.5">(this chunk, if</text>
+    <text x="80" y="166" text-anchor="middle" fill="#9aa3b2" font-size="9.5">chunked prefill)</text>
 
-    <!-- connecting arrow timeline -->
-    <line x1="50" y1="160" x2="860" y2="160" stroke="#2a2f3a" stroke-width="1.2" marker-end="url(#art)"/>
-    <text x="455" y="178" text-anchor="middle" fill="#6b7383" font-size="10.5">time →</text>
+    <line x1="142" y1="119" x2="206" y2="119" stroke="#5ddf9a" stroke-width="1.6" marker-end="url(#at)"/>
+    <rect x="210" y="80" width="170" height="78" rx="10" fill="#221a10" stroke="#b9802f"/>
+    <text x="295" y="104" text-anchor="middle" fill="#ffd9a8" font-size="10.5">reset → build → upload</text>
+    <text x="295" y="122" text-anchor="middle" fill="#9aa3b2" font-size="9.5">H2D async (W2 ring:</text>
+    <text x="295" y="136" text-anchor="middle" fill="#9aa3b2" font-size="9.5">no wait on in-flight copy)</text>
+    <text x="295" y="151" text-anchor="middle" fill="#5ddf9a" font-size="9.5">async</text>
 
-    <!-- the two hook-activity configs -->
-    <text x="40" y="216" fill="#e6e9ef" font-size="13" font-weight="700">Two hook-activity configs, both validated:</text>
-    <!-- config 1 -->
-    <rect x="40" y="228" width="395" height="92" rx="10" fill="#161922" stroke="#2a2f3a"/>
-    <text x="58" y="250" fill="#ffb86b" font-size="12" font-weight="700">prefill-only active</text>
-    <text x="58" y="270" fill="#9aa3b2" font-size="11">prefill: capture (eager) · decode: route every token</text>
-    <text x="58" y="286" fill="#9aa3b2" font-size="11">to the sentinel → decode scatter is a true no-op</text>
-    <text x="58" y="306" fill="#7ee0c0" font-size="10.5">proves: a baked-but-inactive op corrupts nothing on replay</text>
-    <!-- config 2 -->
-    <rect x="447" y="228" width="413" height="92" rx="10" fill="#161922" stroke="#2a2f3a"/>
-    <text x="465" y="250" fill="#7ee0c0" font-size="12" font-weight="700">both active</text>
-    <text x="465" y="270" fill="#9aa3b2" font-size="11">prefill: capture (eager) · decode: capture (full graph),</text>
-    <text x="465" y="286" fill="#9aa3b2" font-size="11">every step</text>
-    <text x="465" y="306" fill="#7ee0c0" font-size="10.5">proves: the full hybrid — parity vs eager for every token</text>
+    <line x1="382" y1="119" x2="430" y2="119" stroke="#9aa3b2" stroke-width="1.4" marker-end="url(#at)"/>
+    <rect x="434" y="80" width="190" height="78" rx="10" fill="#173049" stroke="#2f6da3"/>
+    <text x="529" y="104" text-anchor="middle" fill="#bcd7f0" font-size="10.5">replay OR eager (§01)</text>
+    <text x="529" y="122" text-anchor="middle" fill="#9ff0d4" font-size="9.5">capture_qk scatters the</text>
+    <text x="529" y="136" text-anchor="middle" fill="#9ff0d4" font-size="9.5">prompt's q/k into buffers</text>
+    <text x="529" y="151" text-anchor="middle" fill="#9aa3b2" font-size="9.5">big prefill → often eager</text>
+
+    <line x1="626" y1="119" x2="674" y2="119" stroke="#9aa3b2" stroke-width="1.4" marker-end="url(#at)"/>
+    <rect x="678" y="80" width="200" height="78" rx="10" fill="#221a10" stroke="#b9802f"/>
+    <text x="778" y="104" text-anchor="middle" fill="#ffd9a8" font-size="10.5">clone this chunk's new</text>
+    <text x="778" y="122" text-anchor="middle" fill="#ffd9a8" font-size="10.5">rows → bucket + record</text>
+    <text x="778" y="136" text-anchor="middle" fill="#9aa3b2" font-size="9.5">prefix length (k_prefix_ends)</text>
+    <text x="778" y="151" text-anchor="middle" fill="#5ddf9a" font-size="9.5">async clone · .cpu() deferred</text>
+
+    <!-- DECODE lane -->
+    <rect x="20" y="216" width="120" height="150" rx="10" fill="#1d2230" stroke="#2f6da3"/>
+    <text x="80" y="236" text-anchor="middle" fill="#5eb1ff" font-size="12" font-weight="700">DECODE</text>
+    <text x="80" y="286" text-anchor="middle" fill="#bcd7f0" font-size="10.5">1 token / request</text>
+    <text x="80" y="306" text-anchor="middle" fill="#7ee0c0" font-size="10">steering: SKIP</text>
+    <text x="80" y="320" text-anchor="middle" fill="#9aa3b2" font-size="9.5">(W1 — stable key)</text>
+    <text x="80" y="338" text-anchor="middle" fill="#9aa3b2" font-size="9.5">capture: tiny rebuild</text>
+
+    <line x1="142" y1="291" x2="206" y2="291" stroke="#5ddf9a" stroke-width="1.6" marker-end="url(#at)"/>
+    <rect x="210" y="252" width="170" height="78" rx="10" fill="#1a1d28" stroke="#2f6da3"/>
+    <text x="295" y="276" text-anchor="middle" fill="#bcd7f0" font-size="10.5">unchanged batch →</text>
+    <text x="295" y="294" text-anchor="middle" fill="#7ee0c0" font-size="10.5">skip reset/build/upload</text>
+    <text x="295" y="312" text-anchor="middle" fill="#9aa3b2" font-size="9.5">resident slab reused →</text>
+    <text x="295" y="325" text-anchor="middle" fill="#9aa3b2" font-size="9.5">pure replay</text>
+
+    <line x1="382" y1="291" x2="430" y2="291" stroke="#9aa3b2" stroke-width="1.4" marker-end="url(#at)"/>
+    <rect x="434" y="252" width="190" height="78" rx="10" fill="#173049" stroke="#2f6da3"/>
+    <text x="529" y="276" text-anchor="middle" fill="#bcd7f0" font-size="10.5">replay (decode sizes</text>
+    <text x="529" y="290" text-anchor="middle" fill="#bcd7f0" font-size="10.5">are captured)</text>
+    <text x="529" y="308" text-anchor="middle" fill="#9ff0d4" font-size="9.5">op scatters 1 row/req,</text>
+    <text x="529" y="322" text-anchor="middle" fill="#9ff0d4" font-size="9.5">or steers in place</text>
+
+    <line x1="626" y1="291" x2="674" y2="291" stroke="#9aa3b2" stroke-width="1.4" marker-end="url(#at)"/>
+    <rect x="678" y="252" width="200" height="78" rx="10" fill="#1a1d28" stroke="#2f6da3"/>
+    <text x="778" y="276" text-anchor="middle" fill="#bcd7f0" font-size="10.5">capture: clone 1 new</text>
+    <text x="778" y="290" text-anchor="middle" fill="#bcd7f0" font-size="10.5">row / req / layer (W3)</text>
+    <text x="778" y="308" text-anchor="middle" fill="#7ee0c0" font-size="9.5">steering: nothing</text>
+    <text x="778" y="322" text-anchor="middle" fill="#9aa3b2" font-size="9.5">(no artifact)</text>
+
+    <!-- flush row -->
+    <rect x="210" y="392" width="668" height="56" rx="10" fill="#160f14" stroke="#ff6b6b" stroke-width="1.2"/>
+    <text x="232" y="416" fill="#ff6b6b" font-size="11.5" font-weight="700">FLUSH — once per request (sync)</text>
+    <text x="232" y="434" fill="#9aa3b2" font-size="10.5">reconstruct the growing-prefix k_all from the per-step new-row clones + k_prefix_ends (§07), then a single D2H to CPU → probes / disk.</text>
+    <line x1="100" y1="366" x2="100" y2="420" stroke="#ff6b6b" stroke-width="1.3" stroke-dasharray="5 3"/>
+    <line x1="100" y1="420" x2="206" y2="420" stroke="#ff6b6b" stroke-width="1.3" stroke-dasharray="5 3" marker-end="url(#at)"/>
   </svg>
-  <figcaption><b>One mechanism, two phases, two activity modes.</b> The
-  <code>prefill-only</code> config exercises the sentinel no-op (decode output must be
-  bit-identical to a no-hook run); <code>both</code> exercises the full eager-prefill +
-  full-decode capture. Both are required for every FULL cell, and both pass on Qwen2-1.5B at
-  <code>rtol=atol=1e-2</code>.</figcaption>
+  <figcaption><b>Same four beats; prefill does them at scale, decode does them at a trickle.</b>
+  Prefill routes/captures every prompt token (and under chunked prefill spans several steps);
+  decode handles one token per request and, for steering, skips routing entirely (W1) so the step is
+  a bare replay. Steps 1, 2, 4 are host work; step 3 is the GPU. The per-step path adds no
+  host&harr;GPU sync — the single sync is the per-request flush.</figcaption>
   </figure>
 </section>
 
 <!-- 07 ----------------------------------------------------------- -->
-<section id="steer">
-  <h2><span class="num">07</span>Steering: the mutating counterpart <span class="pill done">implemented · parity-proven</span></h2>
+<section id="capture">
+  <h2><span class="num">07</span>Capture data path: flat routing &amp; the growing K history</h2>
   <div class="rule"></div>
-  <p>Capture is read-only; steering must <strong>change</strong> the residual stream so the edit
-  propagates through every downstream layer. The PIECEWISE version (<code>steer_residual</code>)
-  runs its math in a Python impl at the seam — which, per §02, FULL skips. The FULL version
-  (<code>VLLM_HOOK_STEER_MODE=buffer</code>) applies the very same buffer-mode discipline to a
-  <em>mutating</em> kernel: this is the LoRA-slot model made literal. It is built and parity-proven
-  for <strong>both</strong> steering methods — <code>add_vector</code> and <code>adjust_rs</code>.</p>
-
-  <figure>
-  <svg viewBox="0 0 900 330" role="img" aria-label="steer_buffer masked residual add">
-    <defs>
-      <marker id="ars" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#a070d8"/></marker>
-      <marker id="ars2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
-    </defs>
-    <!-- static config buffers -->
-    <text x="150" y="34" text-anchor="middle" fill="#a070d8" font-size="12" font-weight="700">static buffers (sized at capture)</text>
-    <g font-size="10.5">
-      <rect x="40" y="46" width="220" height="30" rx="6" fill="#2c1f3a" stroke="#a070d8"/><text x="52" y="65" fill="#d9c2f0">coeff[layer, token]  — 0 = no-op</text>
-      <rect x="40" y="80" width="220" height="30" rx="6" fill="#2c1f3a" stroke="#a070d8"/><text x="52" y="99" fill="#d9c2f0">vec_id[layer, token] — which vector</text>
-      <rect x="40" y="114" width="220" height="30" rx="6" fill="#2c1f3a" stroke="#a070d8"/><text x="52" y="133" fill="#d9c2f0">vec_table[V_max, hidden]</text>
-      <rect x="40" y="148" width="220" height="30" rx="6" fill="#3a2c17" stroke="#b9802f"/><text x="52" y="167" fill="#ffd9a8">coeff/vec_id ← routing wrapper</text>
-    </g>
-    <text x="150" y="200" text-anchor="middle" fill="#6b7383" font-size="10">written per step in _prepare_inputs, before replay</text>
-
-    <!-- kernel -->
-    <line x1="265" y1="112" x2="335" y2="112" stroke="#a070d8" stroke-width="1.6" marker-end="url(#ars)"/>
-    <rect x="345" y="70" width="290" height="92" rx="10" fill="#2c1f3a" stroke="#a070d8" stroke-width="1.8"/>
-    <text x="490" y="96" text-anchor="middle" fill="#cbb0ec" font-size="12" font-weight="700">vllm_hook::steer_buffer</text>
-    <text x="490" y="116" text-anchor="middle" fill="#9aa3b2" font-size="10">mutates_args=[&quot;residual&quot;] · NOT a splitting op</text>
-    <text x="490" y="138" text-anchor="middle" fill="#d9c2f0" font-size="11.5" font-family="monospace">residual += coeff_row * vec_row</text>
-    <text x="490" y="153" text-anchor="middle" fill="#6b7383" font-size="9.5">masked add · in place · graph-recorded</text>
-
-    <!-- residual flow -->
-    <line x1="490" y1="162" x2="490" y2="196" stroke="#9aa3b2" stroke-width="1.5" marker-end="url(#ars2)"/>
-    <rect x="345" y="200" width="290" height="34" rx="7" fill="#173049" stroke="#2f6da3"/>
-    <text x="490" y="222" text-anchor="middle" fill="#bcd7f0" font-size="11">steered residual → flows to every downstream layer</text>
-
-    <!-- right: LoRA analogy -->
-    <rect x="668" y="60" width="200" height="174" rx="12" fill="#161922" stroke="#2a2f3a"/>
-    <text x="768" y="86" text-anchor="middle" fill="#e6e9ef" font-size="12" font-weight="700">= rank-1 LoRA</text>
-    <text x="768" y="110" text-anchor="middle" fill="#9aa3b2" font-size="10.5">fixed adapter slots</text>
-    <text x="768" y="128" text-anchor="middle" fill="#9aa3b2" font-size="10.5">token→slot mapping</text>
-    <text x="768" y="146" text-anchor="middle" fill="#9aa3b2" font-size="10.5">no-adapter rows → 0</text>
-    <text x="768" y="170" text-anchor="middle" fill="#6b7383" font-size="10">vLLM ships this for</text>
-    <text x="768" y="186" text-anchor="middle" fill="#6b7383" font-size="10">LoRA under cudagraphs —</text>
-    <text x="768" y="202" text-anchor="middle" fill="#7ee0c0" font-size="10.5">we mirror its shape</text>
-
-    <!-- bottom note -->
-    <rect x="40" y="258" width="828" height="56" rx="10" fill="#161922" stroke="#2a2f3a"/>
-    <text x="58" y="282" fill="#e6e9ef" font-size="12" font-weight="700">Why in-place, not return:</text>
-    <text x="58" y="301" fill="#9aa3b2" font-size="11.5">a functional variant that cloned-and-returned a new residual was proven on GPU to fire but have its return value DROPPED across the segment seam. <tspan fill="#a070d8" font-weight="700">In-place + mutates_args</tspan> is the only contract that threads the edit downstream.</text>
-  </svg>
-  <figcaption><b>Per-request steering becomes a coefficient lookup.</b> To steer request <em>r</em>
-  at layer <em>L</em> with vector <em>v</em> and strength <em>c</em>: set
-  <code>coeff[L, t] = c</code> and <code>vec_id[L, t] = v</code> across request <em>r</em>'s token
-  span before the replay. To stop steering, set <code>coeff = 0</code> — the masked add becomes a
-  numeric no-op with no branch. A per-token <code>steer_mode</code> mask unifies <b>both</b>
-  methods in one kernel: <code>add_vector</code> adds <code>coeff·vec_table[vec_id]</code> (host
-  coefficient); <code>adjust_rs</code> adds <code>(avg_proj_table[vec_id] − residual·unit)·unit</code>
-  with the coefficient computed <em>in-kernel</em> from the live residual (a graph-legal
-  gather + reduction + <code>where</code>), so one batch can even mix methods.
-  Steering wires on <b>all</b> TP ranks — the residual is replicated, so
-  steering only rank 0 would desync them.</figcaption>
-  </figure>
-
+  <p>The hidden-state artifact is simple — the per-token residual stream <em>is</em> the artifact, so
+  egress just clones each step&rsquo;s rows. QK has a wrinkle: <code>k_all</code> for a token is the
+  <em>full key history</em> up to it. We do not accumulate that history in the buffer; we capture it
+  incrementally and rebuild it at flush.</p>
+  <ul>
+    <li><strong>Flat per-step routing.</strong> Each token routes to row <code>flat_column + 1</code>
+    — its position <em>within this step</em>. A step&rsquo;s token count is bounded by
+    <code>cap = max_num_batched_tokens</code>, so a step can <em>never</em> write past the buffer.</li>
+    <li><strong>Incremental egress (W3).</strong> Egress clones only <em>this step&rsquo;s</em> new
+    key rows (O(1) per decode step instead of re-cloning the whole O(N) prefix) and records the
+    absolute prefix length in <code>k_prefix_ends</code>.</li>
+    <li><strong>Flush-time reconstruction.</strong> At request end we concatenate the per-step clones
+    and slice the growing prefixes — <code>[full[:L] for L in k_prefix_ends]</code> — reproducing
+    exactly what the eager path would have stored, byte for byte.</li>
+  </ul>
   <div class="call key">
-    <b class="lbl">Why this is the milestone that answers the user's worry</b>
-    Toggling <code>coeff</code> per step and per slot and getting token-for-token parity vs eager
-    <strong>is</strong> the proof that a frozen FULL graph can honor per-request configuration —
-    by data alone, with no Python on replay.
+    <b class="lbl">Why per-step, not absolute position</b>
+    The earlier scheme routed by <em>absolute</em> sequence position and sized the buffer to one
+    batch. A prompt longer than <code>cap</code> (i.e. any chunked prefill) then dropped every token
+    past <code>cap</code> — a silent under-capture. Flat per-step routing fits every step by
+    construction, so a long / chunked prompt is captured in full; and because each request now owns a
+    disjoint column range, several requests can share the buffer without colliding. Proven against
+    eager with a forced-chunked-prefill oracle, including a no-chunk control that isolated the small
+    residual diff as the engine&rsquo;s own compiled-vs-eager fp matmul drift, not a capture error.
   </div>
 </section>
 
 <!-- 08 ----------------------------------------------------------- -->
-<section id="config">
-  <h2><span class="num">08</span>Per-request config &amp; the frozen-menu contract</h2>
+<section id="steer">
+  <h2><span class="num">08</span>Steering: the mutating counterpart <span class="pill done">both methods</span></h2>
   <div class="rule"></div>
-  <p>Continuous batching mixes requests with different hook configs in one decode graph. The
-  buffer approach handles this directly: keep a persistent <strong>CPU + GPU mirror</strong> of
-  the hook config, keyed by the stable batch slot (<code>input_batch.req_ids[i]</code> ↔ row
-  <code>i</code> — the same indexing the routing already uses).</p>
+  <p>Capture is read-only; steering must <strong>change</strong> the residual so the edit reaches
+  every downstream layer. The op declares <code>mutates_args=["residual"]</code> and edits in place —
+  a functional variant that returned a new tensor was proven on GPU to fire but have its return value
+  dropped across a segment seam; in-place + the mutates contract is what threads the edit downstream.</p>
 
   <figure>
-  <svg viewBox="0 0 900 250" role="img" aria-label="per-request config plane">
-    <defs><marker id="arc" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker></defs>
-    <!-- CPU mirror -->
-    <rect x="30" y="50" width="250" height="160" rx="12" fill="#161922" stroke="#b9802f" stroke-width="1.4"/>
-    <text x="155" y="74" text-anchor="middle" fill="#ffb86b" font-size="12" font-weight="700">CPU mirror (host)</text>
-    <g font-size="10.5" text-anchor="middle">
-      <rect x="50" y="86" width="210" height="26" rx="5" fill="#3a2c17"/><text x="155" y="103" fill="#ffd9a8">slot 0 · req A · steer L8 v=X c=4</text>
-      <rect x="50" y="116" width="210" height="26" rx="5" fill="#3a2c17"/><text x="155" y="133" fill="#ffd9a8">slot 1 · req B · capture QK {2,5}</text>
-      <rect x="50" y="146" width="210" height="26" rx="5" fill="#3a3f4b"/><text x="155" y="163" fill="#aeb5c2">slot 2 · req C · (no hook) → 0</text>
-      <rect x="50" y="176" width="210" height="26" rx="5" fill="#3a2c17"/><text x="155" y="193" fill="#ffd9a8">slot 3 · req D · steer L12 v=Y</text>
+  <svg viewBox="0 0 900 300" role="img" aria-label="steer_buffer masked residual add">
+    <defs>
+      <marker id="ars" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#a070d8"/></marker>
+      <marker id="ars2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
+    </defs>
+    <text x="150" y="32" text-anchor="middle" fill="#a070d8" font-size="12" font-weight="700">static buffers (sized at capture)</text>
+    <g font-size="10.5">
+      <rect x="40" y="44" width="220" height="28" rx="6" fill="#2c1f3a" stroke="#a070d8"/><text x="52" y="63" fill="#d9c2f0">coeff[layer, token] — 0 = no-op</text>
+      <rect x="40" y="78" width="220" height="28" rx="6" fill="#2c1f3a" stroke="#a070d8"/><text x="52" y="97" fill="#d9c2f0">vec_id[layer, token]</text>
+      <rect x="40" y="112" width="220" height="28" rx="6" fill="#2c1f3a" stroke="#a070d8"/><text x="52" y="131" fill="#d9c2f0">vec_table / avg_proj_table</text>
+      <rect x="40" y="146" width="220" height="28" rx="6" fill="#3a2c17" stroke="#b9802f"/><text x="52" y="165" fill="#ffd9a8">slabs ← routing wrapper</text>
     </g>
-    <!-- arrow: H2D dirty rows -->
-    <line x1="285" y1="130" x2="365" y2="130" stroke="#9aa3b2" stroke-width="1.6" marker-end="url(#arc)"/>
-    <text x="325" y="118" text-anchor="middle" fill="#9aa3b2" font-size="10">H2D copy</text>
-    <text x="325" y="146" text-anchor="middle" fill="#6b7383" font-size="9.5">dirty rows only</text>
-    <text x="325" y="160" text-anchor="middle" fill="#6b7383" font-size="9.5">@ _prepare_inputs</text>
+    <text x="150" y="196" text-anchor="middle" fill="#6b7383" font-size="10">written each step in _prepare_inputs, before replay</text>
 
-    <!-- GPU buffers -->
-    <rect x="375" y="50" width="240" height="160" rx="12" fill="#16302a" stroke="#2f9c7a" stroke-width="1.6"/>
-    <text x="495" y="74" text-anchor="middle" fill="#7ee0c0" font-size="12" font-weight="700">GPU static buffers</text>
-    <text x="495" y="94" text-anchor="middle" fill="#9aa3b2" font-size="10">coeff · vec_id · capture_index</text>
-    <g font-size="10.5" text-anchor="middle">
-      <rect x="395" y="108" width="200" height="22" rx="4" fill="#16302a" stroke="#2f9c7a"/><text x="495" y="123" fill="#9ff0d4">row 0 ← slot 0</text>
-      <rect x="395" y="134" width="200" height="22" rx="4" fill="#16302a" stroke="#2f9c7a"/><text x="495" y="149" fill="#9ff0d4">row 1 ← slot 1</text>
-      <rect x="395" y="160" width="200" height="22" rx="4" fill="#101720" stroke="#2a2f3a"/><text x="495" y="175" fill="#6b7383">row 2 ← 0 (no-op)</text>
-      <rect x="395" y="186" width="200" height="16" rx="4" fill="#16302a" stroke="#2f9c7a"/>
-    </g>
-    <!-- arrow to replay -->
-    <line x1="620" y1="130" x2="700" y2="130" stroke="#9aa3b2" stroke-width="1.6" marker-end="url(#arc)"/>
-    <rect x="710" y="86" width="160" height="92" rx="12" fill="#173049" stroke="#2f6da3" stroke-width="1.6"/>
-    <text x="790" y="124" text-anchor="middle" fill="#bcd7f0" font-size="12" font-weight="700">FULL replay</text>
-    <text x="790" y="146" text-anchor="middle" fill="#9aa3b2" font-size="10">baked kernels read</text>
-    <text x="790" y="160" text-anchor="middle" fill="#9aa3b2" font-size="10">the buffers · no Python</text>
+    <line x1="265" y1="110" x2="335" y2="110" stroke="#a070d8" stroke-width="1.6" marker-end="url(#ars)"/>
+    <rect x="345" y="66" width="300" height="92" rx="10" fill="#2c1f3a" stroke="#a070d8" stroke-width="1.8"/>
+    <text x="495" y="92" text-anchor="middle" fill="#cbb0ec" font-size="12" font-weight="700">vllm_hook::steer_buffer</text>
+    <text x="495" y="111" text-anchor="middle" fill="#9aa3b2" font-size="10">mutates_args=["residual"] · NOT a splitting op</text>
+    <text x="495" y="132" text-anchor="middle" fill="#d9c2f0" font-size="11" font-family="monospace">add_vector: += coeff·vec_table[vec_id]</text>
+    <text x="495" y="148" text-anchor="middle" fill="#d9c2f0" font-size="11" font-family="monospace">adjust_rs: coeff computed in-kernel</text>
+
+    <line x1="495" y1="158" x2="495" y2="192" stroke="#9aa3b2" stroke-width="1.5" marker-end="url(#ars2)"/>
+    <rect x="345" y="196" width="300" height="32" rx="7" fill="#173049" stroke="#2f6da3"/>
+    <text x="495" y="217" text-anchor="middle" fill="#bcd7f0" font-size="11">steered residual → flows to every downstream layer</text>
+
+    <rect x="668" y="60" width="200" height="168" rx="12" fill="#161922" stroke="#2a2f3a"/>
+    <text x="768" y="86" text-anchor="middle" fill="#e6e9ef" font-size="12" font-weight="700">= rank-1 LoRA</text>
+    <text x="768" y="110" text-anchor="middle" fill="#9aa3b2" font-size="10.5">fixed adapter slots</text>
+    <text x="768" y="128" text-anchor="middle" fill="#9aa3b2" font-size="10.5">token→slot mapping</text>
+    <text x="768" y="146" text-anchor="middle" fill="#9aa3b2" font-size="10.5">no-adapter rows → 0</text>
+    <text x="768" y="172" text-anchor="middle" fill="#6b7383" font-size="10">vLLM ships this for</text>
+    <text x="768" y="188" text-anchor="middle" fill="#6b7383" font-size="10">LoRA under cudagraphs —</text>
+    <text x="768" y="204" text-anchor="middle" fill="#7ee0c0" font-size="10.5">we mirror its shape</text>
+
+    <rect x="40" y="244" width="828" height="46" rx="10" fill="#161922" stroke="#2a2f3a"/>
+    <text x="58" y="264" fill="#e6e9ef" font-size="11.5" font-weight="700">A per-token steer_mode mask unifies both methods,</text>
+    <text x="58" y="281" fill="#9aa3b2" font-size="11">so one batch can mix add_vector and adjust_rs. Steering wires on ALL TP ranks — the residual is replicated, so steering only rank 0 would desync them.</text>
   </svg>
-  <figcaption><b>On admit:</b> parse <code>extra_args</code> once on the CPU, write that slot's
-  column. <b>On evict:</b> zero the column (→ numeric no-op). <b>Each step:</b> non-blocking H2D
-  of the dirty rows, issued right where the runner refreshes <code>block_tables</code>, before
-  the replay. The single integration point is a small wrap of the model runner's
-  <code>_prepare_inputs</code> — identical in spirit to how sampling params and block tables
-  already reach a replayed graph.</figcaption>
+  <figcaption><b>Per-request steering is a coefficient lookup.</b> To steer request <em>r</em> at
+  layer <em>L</em>: write <code>coeff[L, t] = c</code>, <code>vec_id[L, t] = v</code> across its token
+  span before the replay; to stop, write <code>coeff = 0</code>. This is the proof that a frozen
+  graph honors per-request configuration <strong>by data alone</strong> — token-for-token parity vs
+  eager across decode, for both methods.</figcaption>
   </figure>
-
-  <h3>The contract this imposes — state it to users up front</h3>
-  <div class="call warn">
-    <b class="lbl">Frozen menu</b>
-    The candidate hookable layers, the max concurrent request slots, the vector-table capacity
-    (<code>V_max</code>), and the worst-case capture scope are <strong>frozen at capture
-    time</strong>. <strong>Per request you may pick anything <em>within</em> the menu</strong>
-    (which menu-layer, which menu-vector, which coefficient, capture-or-not).
-    <strong>Anything <em>outside</em> the menu needs a re-capture</strong> (seconds, offline-ish).
-  </div>
-  <p>For genuinely unbounded cases, route them <em>off</em> the FULL path: <strong>in-spec</strong>
-  requests run on the FULL graph; <strong>out-of-spec</strong> requests fall back to PIECEWISE or
-  eager (vLLM already keeps an eager path for uncaptured batch sizes — we piggyback the
-  dispatch). A clean profiling metric drops out for free: the <strong>graph-eligible request
-  fraction</strong>.</p>
 </section>
 
 <!-- 09 ----------------------------------------------------------- -->
 <section id="perf">
-  <h2><span class="num">09</span>Performance: hooked decode beats eager <span class="pill done">v0.5.0 · measured</span></h2>
+  <h2><span class="num">09</span>Performance &amp; status <span class="pill done">v0.5.0 · measured</span></h2>
   <div class="rule"></div>
-  <p>Correctness was v0.4.0. v0.5.0 makes the FULL path <strong>faster than the eager
+  <p>Correctness was v0.4.0; v0.5.0 makes the FULL path <strong>faster than the eager
   <code>register_forward_hook</code> it replaces</strong> — per decode step, graph-vs-eager on the
-  same node, Qwen2-1.5B, <code>FULL_DECODE_ONLY</code>:</p>
+  same node, Qwen2-1.5B:</p>
 
   <table>
     <thead><tr><th>Worker</th><th>graph (FULL) ms/step</th><th>eager ms/step</th><th>speedup</th></tr></thead>
@@ -767,141 +627,53 @@
       <tr><td><strong>HS capture</strong> <span class="muted">(all_tokens)</span></td><td>14.1</td><td>23.9</td><td class="good">1.7&times;</td></tr>
     </tbody>
   </table>
-  <p class="muted">Per-step time is noisy (growing-memory workload); the reliable signal is the
-  within-job graph&nbsp;&lt;&nbsp;eager comparison, which holds in every re-run.</p>
 
-  <p>Five workstreams, all riding the same buffer-mode discipline (no Python on replay):</p>
+  <p>Four optimizations, all riding the buffer-mode discipline:</p>
   <table>
-    <thead><tr><th>#</th><th>Optimization</th><th>What it removes / enables</th></tr></thead>
+    <thead><tr><th>#</th><th>Optimization</th><th>What it removes</th></tr></thead>
     <tbody>
-      <tr><td>W1</td><td><strong>Invalidation routing</strong></td><td>When the batch signature (<code>req_ids</code>, <code>query_start_loc</code>) and upload width are unchanged from last step, the device slabs already hold an identical routing — <strong>skip the reset/build/upload entirely</strong>. Steady-state decode collapses to a pure graph replay with a resident buffer. Steering routes by stable flat position, so its key is bit-identical every decode step → it skips; capture takes the conservative path (rebuild every step) by default.</td></tr>
-      <tr><td>W2</td><td><strong>Double-buffered pinned mirror</strong> (<code>PinnedMirrorRing</code>)</td><td>The routing is staged in pinned host memory, then copied H2D. A single mirror forces <code>reset</code> to wait on the <em>in-flight</em> copy before zeroing — a per-step CPU&harr;GPU sync that serializes routing&rarr;forward. A depth-2 ring reuses a slot whose upload finished steps ago, so the wait is already satisfied. Device slabs stay single; only the host side rings. The wait is unconditional, so the depth is a pure perf knob with no correctness floor.</td></tr>
-      <tr><td>W3</td><td><strong>Incremental egress</strong></td><td>QK <code>all_tokens</code> decode used to re-clone the whole accumulated <code>k_all</code> every step — O(N&sup2;) GPU work and memory. Now egress clones only this step's new key rows (O(1)/step) and the growing prefix is rebuilt at flush from those clones + <code>k_prefix_ends</code> — byte-identical artifact, O(N) memory. (This is also what made flat routing viable; see §10.)</td></tr>
-      <tr><td>W4</td><td><strong>Budget-driven drains</strong></td><td>When GPU-resident capture clones exceed a memory budget, drain them GPU&rarr;pinned host on a dedicated copy stream (overlapping compute), guarded by <code>wait_stream</code> + <code>record_stream</code> + an event-gated flush barrier. Bounds GPU residency under heavy capture. <strong>Default off</strong> &rarr; zero behavior change.</td></tr>
-      <tr><td>W5</td><td><strong>FULL (mixed-step) graphing</strong></td><td>Under <code>cudagraph_mode=FULL</code> the dispatcher graphs <em>mixed</em> prefill+decode steps too (which <code>FULL_DECODE_ONLY</code> runs eager) — the real win for a continuous-batching server. Buffer mode needs <strong>no change</strong>: it declares no splitting op, so the scatter / steer is absorbed into the prefill/mixed graphs and replays. KV-cache cost measured at <strong>zero</strong> at the 512 cap on Qwen2-1.5B.</td></tr>
+      <tr><td>W1</td><td><strong>Invalidation routing</strong></td><td>When the batch signature and upload width are unchanged, the device slabs already hold an identical routing — skip reset/build/upload. Steady-state steering decode becomes a pure replay (its key is bit-identical each step).</td></tr>
+      <tr><td>W2</td><td><strong>Pinned-mirror ring</strong> (depth 2)</td><td>The per-step CPU&harr;GPU sync a single mirror would force: <code>reset</code> waits on a slot whose H2D upload finished steps ago, not the in-flight one. Routing&rarr;forward stops being serialized.</td></tr>
+      <tr><td>W3</td><td><strong>Incremental egress</strong></td><td>The O(N&sup2;) per-step re-clone of the whole <code>k_all</code> prefix — now O(1) rows/step + flush-time reconstruction (§07). O(N) memory, byte-identical artifact.</td></tr>
+      <tr><td>W4</td><td><strong>Budget-driven drains</strong></td><td>GPU residency under heavy capture: drain GPU&rarr;pinned host on a dedicated copy stream when over a byte budget (default off &rarr; zero behavior change).</td></tr>
     </tbody>
   </table>
-  <div class="call key">
-    <b class="lbl">Why it ends up faster, not slower</b>
-    The eager hook pays a Python callback and a fresh GPU clone <em>every layer, every step</em>.
-    The buffer path bakes the scatter into the replay (no Python), routes once per step on the host
-    (skipped entirely on a stable batch, W1), and clones only new rows (W3). The hook stops being on
-    the critical path.
-  </div>
-</section>
 
-<!-- 10 ----------------------------------------------------------- -->
-<section id="chunked">
-  <h2><span class="num">10</span>Chunked prefill: why routing is per-step <span class="pill done">fixed · parity-proven</span></h2>
-  <div class="rule"></div>
-  <p>When a prompt is longer than <code>max_num_batched_tokens</code>, vLLM splits its prefill
-  across several steps (chunked prefill) — exactly the case a long-context server hits. The static
-  buffer is sized to one batch budget (<code>cap = max_num_batched_tokens</code>), and a single
-  sequence can be far longer than that.</p>
-
-  <div class="call bad">
-    <b class="lbl">The bug the absolute scheme had</b>
-    Routing by <em>absolute</em> sequence position meant a token at position &ge; <code>cap</code>
-    had nowhere to land — it was clamped to the discard sentinel and <strong>silently dropped</strong>.
-    A 1472-token prompt at <code>cap=512</code> captured only the first 512 keys
-    (<code>all_tokens</code>), or the wrong "final" token with a truncated history
-    (<code>last_token</code>). The eager path never had this problem: it reconstructs the full key
-    history by reading the unbounded <em>paged KV cache</em> — which the static buffer cannot do.
-  </div>
-
-  <p>The fix is the flat per-step routing of §05: each step's tokens are bounded by <code>cap</code>,
-  so they <em>always</em> fit; the growing <code>k_all</code> is rebuilt at flush from the per-step
-  new-key clones (W3) plus <code>k_prefix_ends</code>. <code>last_token</code> additionally keeps
-  accumulating K on every chunk but emits the query only on the final chunk (the eager skip-guard
-  equivalent). HS and steering were already per-step (flat) and so were never affected.</p>
-
-  <div class="call key">
-    <b class="lbl">The proof</b>
-    The graph-vs-eager oracle, forced into chunked prefill (<code>cap=512</code>, 1472-token prompt),
-    now captures the <strong>full</strong> 1472-key history (was 512) with exact shapes and entry
-    counts, both modes. A <strong>no-chunk control</strong> (same prompt, <code>cap=2048</code>,
-    single step) drifts <em>identically</em> in the late layers (max&nbsp;|&Delta;|&nbsp;&asymp;&nbsp;0.04,
-    the engine's own compiled-vs-eager TF32 matmul precision accumulating with depth) — so the
-    residual difference is numeric, <strong>not</strong> a capture error. As a bonus, flat routing
-    gives each request a disjoint column range, so it also dissolves the M5 multi-request collision.
-  </div>
-</section>
-
-<!-- 11 ----------------------------------------------------------- -->
-<section id="status">
-  <h2><span class="num">11</span>What is proven, and what is next</h2>
-  <div class="rule"></div>
-  <p>Every cell is validated by the established subprocess-isolated graph-vs-eager numerical
-  oracle on LSF (<code>capture → eager → compare</code>), Qwen2-1.5B, <code>rtol=atol=1e-2</code>.
-  The two engines must run in separate processes because the GPU is
-  <code>exclusive_process</code>.</p>
-
+  <h3>What is proven</h3>
   <table>
-    <thead><tr><th>Path</th><th>PIECEWISE</th><th>FULL decode</th><th>FULL mixed (W5)</th><th>chunked prefill</th><th>+ multi-req</th><th>+ AOT</th><th>+ TP&gt;1</th></tr></thead>
+    <thead><tr><th>Path</th><th>FULL (graph or eager per step)</th><th>chunked prefill</th><th>multi-request</th><th>AOT</th><th>TP&gt;1</th></tr></thead>
     <tbody>
-      <tr><td><strong>QK capture</strong></td><td class="good">✓</td><td class="good">✓ <span class="muted">(both cfg)</span></td><td class="good">✓</td><td class="good">✓ <span class="muted">(§10)</span></td><td class="mut">M5*</td><td class="good">✓</td><td class="mut">M6</td></tr>
-      <tr><td><strong>HS capture</strong></td><td class="good">✓</td><td class="good">✓ <span class="muted">(both cfg)</span></td><td class="good">✓</td><td class="good">✓</td><td class="good">✓ <span class="muted">(flat)</span></td><td class="good">✓</td><td class="mut">M6</td></tr>
-      <tr><td><strong>Steering</strong></td><td class="good">✓</td><td class="good">✓ <span class="muted">(both methods)</span></td><td class="good">✓</td><td class="good">n/a</td><td class="good">✓ <span class="muted">(selectivity+churn)</span></td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>QK capture</strong></td><td class="good">✓ both configs</td><td class="good">✓ (§07)</td><td class="mut">M5*</td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>HS capture</strong></td><td class="good">✓ both configs</td><td class="good">✓</td><td class="good">✓ (flat)</td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>Steering</strong></td><td class="good">✓ both methods</td><td class="good">n/a</td><td class="good">✓ selectivity+churn</td><td class="good">✓</td><td class="mut">M6</td></tr>
     </tbody>
   </table>
-  <p class="muted">*QK multi-request: flat routing (§10) gives each request a disjoint column range
-  and structurally dissolves the old shared-row collision, but a chunked multi-request QK batch is
-  not yet separately parity-proven — that is M5's remaining surface.</p>
-
-  <div class="legend" style="margin:14px 0 22px;">
+  <div class="legend" style="margin:12px 0 18px;">
     <span><i style="background:var(--good)"></i>shipped &amp; parity-proven</span>
-    <span><i style="background:var(--warn)"></i>planned milestone</span>
+    <span><i style="background:var(--warn)"></i>open milestone</span>
   </div>
-
-  <p><strong>Done (v0.4.0 — capture <em>and</em> steering under FULL):</strong></p>
-  <ul>
-    <li><strong>QK + HS buffer-mode capture</strong> under <code>FULL_DECODE_ONLY</code>, both
-    hook-activity configs (prefill-only and both), <code>last_token</code> + <code>all_tokens</code> —
-    every cell PASS under PIECEWISE <em>and</em> FULL_DECODE_ONLY.</li>
-    <li><strong>Steering via <code>steer_buffer</code></strong> (the mutating op, §07) under
-    <code>FULL_DECODE_ONLY</code> for <strong>both</strong> <code>add_vector</code> and
-    <code>adjust_rs</code> — token-for-token parity vs eager across a greedy decode with a
-    non-vacuous effect. <strong>The milestone that demonstrates per-request config on a frozen
-    graph, by data alone.</strong></li>
-  </ul>
-
-  <p><strong>Done (v0.5.0 — performance &amp; chunked prefill):</strong></p>
-  <ul>
-    <li><strong>Hooked decode beats eager</strong> (§09): W1 invalidation routing, W2 pinned-mirror
-    ring, W3 incremental egress, W4 budget drains, W5 FULL mixed-step graphing. Steering 3.6&times;,
-    QK 2.75&times;, HS 1.7&times; vs the v0.2.0 eager hook.</li>
-    <li><strong>AOT compile</strong> (<code>VLLM_USE_AOT_COMPILE=1</code>) — all three workers,
-    fresh-compile <em>and</em> reload-from-cache.</li>
-    <li><strong>Multi-request steering</strong> — per-request-different config in one batch
-    (selectivity) + continuous-batching churn, graph == eager per request.</li>
-    <li><strong>Chunked-prefill capture</strong> (§10) — flat per-step routing; full-history capture
-    proven vs eager (no-chunk control isolates the residual as fp matmul drift, not a capture error).</li>
-  </ul>
-
-  <p><strong>Next:</strong></p>
-  <ul>
-    <li><strong>M5 — Multi-request QK capture:</strong> flat routing already dissolves the shared-row
-    collision; parity-prove a chunked multi-request QK batch (HS + steering multi-request are done).</li>
-    <li><strong>M6 — Hardening:</strong> TP&gt;1; AOT + buffer mode at scale; fallback dispatch +
-    the graph-eligible-fraction metric.</li>
-  </ul>
+  <p class="muted">*QK multi-request: flat routing gives each request a disjoint column range and
+  structurally dissolves the old shared-row collision; a chunked multi-request QK batch is not yet
+  separately parity-proven — M5&rsquo;s remaining surface. <strong>M6</strong>: TP&gt;1; and a known
+  watch item — the host-side routing+egress is O(num_layers&times;B), so at high concurrency the CPU,
+  not the GPU, can become the bound for capture; mitigations (batch the egress clone, enable QK W1
+  skip, on-device index) are scoped but unmeasured.</p>
 
   <div class="call">
     <b class="lbl">Reference</b>
-    Plans: <code>docs/v0.4.0_full_cuda_graph_plan.md</code> ·
-    <code>docs/v0.5.0_hooked_decode_perf_plan.md</code>. Reports:
-    <code>docs/v0.4.0_full_cuda_graph_report.md</code> ·
-    <code>docs/v0.5.0_hooked_decode_perf_report.md</code>. Mechanism &amp; env facts:
-    <code>tests/cuda_graph/README.md</code>. Ops: <code>graph/ops.py</code> · Hosts:
-    <code>graph/hosts.py</code> · QK install: <code>graph/install.py</code> · Steer install:
-    <code>graph/install_steer.py</code>. Harnesses:
-    <code>tests/cuda_graph/tests/{qk_graph,hs_graph,steer_graph,capture_perf,steer_graph,chunked_prefill}/</code>.
+    Validated by a subprocess-isolated graph-vs-eager numerical oracle on LSF
+    (<code>capture &rarr; eager &rarr; compare</code>), Qwen2-1.5B. Plans/reports:
+    <code>docs/v0.4.0_full_cuda_graph_*.md</code>, <code>docs/v0.5.0_hooked_decode_perf_*.md</code>.
+    Ops: <code>graph/ops.py</code> · Hosts: <code>graph/hosts.py</code> · Routing/egress:
+    <code>graph/install.py</code>, <code>graph/install_hs.py</code>, <code>graph/install_steer.py</code> ·
+    Slabs/ring: <code>graph/registry.py</code>. Harnesses:
+    <code>tests/cuda_graph/tests/{qk_graph,hs_graph,steer_graph,capture_perf,chunked_prefill}/</code>.
   </div>
 </section>
 
 <p class="muted" style="font-size:12.5px; border-top:1px solid var(--line); padding-top:18px;">
-vLLM-Hook · v0.5.0 FULL CUDA-graph design note · generated 2026-06-24 · target:
-<span class="kbd">cudagraph_mode=FULL_DECODE_ONLY</span> / <span class="kbd">FULL</span> on Qwen2-1.5B.</p>
+vLLM-Hook · v0.5.0 FULL CUDA-graph design note · generated 2026-06-24 · mode:
+<span class="kbd">cudagraph_mode=FULL</span> (vLLM dispatches graph vs eager per step) on Qwen2-1.5B.</p>
 
 </main>
 </div>
