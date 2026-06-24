@@ -1,0 +1,48 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2069023) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=2069023) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:54<00:00, 54.32s/it]
+(EngineCore pid=2069023) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:54<00:00, 54.32s/it]
+(EngineCore pid=2069023) 
+(EngineCore pid=2069023) /u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_inductor/compile_fx.py:322: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+(EngineCore pid=2069023)   warnings.warn(
+(EngineCore pid=2069023) Capturing CUDA graphs (decode, FULL):   0%|          | 0/4 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  75%|███████▌  | 3/4 [00:00<00:00, 28.08it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 4/4 [00:00<00:00,  4.48it/s]
+(EngineCore pid=2069023) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00,  8.22it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00,  8.21it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:01<00:00,  1.13s/it, est. speed input: 113.29 toks/s, output: 0.89 toks/s]Processed prompts: 100%|██████████| 1/1 [00:01<00:00,  1.13s/it, est. speed input: 113.29 toks/s, output: 0.89 toks/s]Processed prompts: 100%|██████████| 1/1 [00:01<00:00,  1.13s/it, est. speed input: 113.29 toks/s, output: 0.89 toks/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 252.21it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.24it/s, est. speed input: 4764.04 toks/s, output: 3.24 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.24it/s, est. speed input: 4764.04 toks/s, output: 3.24 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.23it/s, est. speed input: 4764.04 toks/s, output: 3.24 toks/s]
+[rank0]:[W624 15:40:16.537802475 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2070499) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2070499) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=2070499) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:19<00:00, 19.66s/it]
+(EngineCore pid=2070499) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:19<00:00, 19.67s/it]
+(EngineCore pid=2070499) 
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 32.12it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  4.41it/s, est. speed input: 565.08 toks/s, output: 4.41 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  4.41it/s, est. speed input: 565.08 toks/s, output: 4.41 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  4.30it/s, est. speed input: 565.08 toks/s, output: 4.41 toks/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 253.60it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  4.42it/s, est. speed input: 6510.78 toks/s, output: 4.42 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  4.42it/s, est. speed input: 6510.78 toks/s, output: 4.42 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  4.42it/s, est. speed input: 6510.78 toks/s, output: 4.42 toks/s]
+[rank0]:[W624 15:41:36.547218390 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2072439) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=2072439) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:16<00:00, 16.63s/it]
+(EngineCore pid=2072439) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:16<00:00, 16.63s/it]
+(EngineCore pid=2072439) 
+(EngineCore pid=2072439) Capturing CUDA graphs (decode, FULL):   0%|          | 0/4 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 4/4 [00:00<00:00, 12.35it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 4/4 [00:00<00:00, 12.35it/s]
+(EngineCore pid=2072439) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 34.65it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  8.80it/s, est. speed input: 1127.24 toks/s, output: 8.81 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  8.80it/s, est. speed input: 1127.24 toks/s, output: 8.81 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  8.79it/s, est. speed input: 1127.24 toks/s, output: 8.81 toks/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 276.52it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  1.95it/s, est. speed input: 2872.98 toks/s, output: 1.95 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  1.95it/s, est. speed input: 2872.98 toks/s, output: 1.95 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  1.95it/s, est. speed input: 2872.98 toks/s, output: 1.95 toks/s]
+[rank0]:[W624 15:44:38.125119754 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2073376) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=2073376) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:19<00:00, 19.18s/it]
+(EngineCore pid=2073376) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:19<00:00, 19.18s/it]
+(EngineCore pid=2073376) 
+(EngineCore pid=2073376) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 29.57it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  9.52it/s, est. speed input: 1219.12 toks/s, output: 9.52 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  9.52it/s, est. speed input: 1219.12 toks/s, output: 9.52 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  9.50it/s, est. speed input: 1219.12 toks/s, output: 9.52 toks/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 121.81it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  6.69it/s, est. speed input: 9847.29 toks/s, output: 6.69 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  6.69it/s, est. speed input: 9847.29 toks/s, output: 6.69 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  6.68it/s, est. speed input: 9847.29 toks/s, output: 6.69 toks/s]
+[rank0]:[W624 15:45:31.784484653 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

@@ -96,10 +96,11 @@
   <a href="#memory"><span class="n">05</span>Where data lives</a>
   <div class="grp">The workflow</div>
   <a href="#flow"><span class="n">06</span>Prefill &amp; decode</a>
-  <a href="#capture"><span class="n">07</span>Capture data path</a>
-  <a href="#steer"><span class="n">08</span>Steering</a>
+  <a href="#walkthrough"><span class="n">07</span>Walkthrough by integers</a>
+  <a href="#capture"><span class="n">08</span>Capture data path</a>
+  <a href="#steer"><span class="n">09</span>Steering</a>
   <div class="grp">The payoff</div>
-  <a href="#perf"><span class="n">09</span>Performance &amp; status</a>
+  <a href="#perf"><span class="n">10</span>Performance &amp; status</a>
 </nav>
 
 <main>
@@ -321,7 +322,7 @@
   vec_id = v</code> across request <em>r</em>&rsquo;s tokens steers that request by vector <em>v</em>
   at strength <em>c</em>. A per-token <code>steer_mode</code> mask unifies both methods —
   <code>add_vector</code> (host coefficient) and <code>adjust_rs</code> (coefficient computed
-  in-kernel from the live residual) — so one batch can mix them (full diagram in §08).</p>
+  in-kernel from the live residual) — so one batch can mix them (full diagram in §09).</p>
 </section>
 
 <!-- 05 ----------------------------------------------------------- -->
@@ -534,7 +535,7 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
     <!-- flush row -->
     <rect x="210" y="392" width="668" height="56" rx="10" fill="#160f14" stroke="#ff6b6b" stroke-width="1.2"/>
     <text x="232" y="416" fill="#ff6b6b" font-size="11.5" font-weight="700">FLUSH — once per request (sync)</text>
-    <text x="232" y="434" fill="#9aa3b2" font-size="10.5">reconstruct the growing-prefix k_all from the per-step new-row clones + k_prefix_ends (§07), then a single D2H to CPU → probes / disk.</text>
+    <text x="232" y="434" fill="#9aa3b2" font-size="10.5">reconstruct the growing-prefix k_all from the per-step new-row clones + k_prefix_ends (§08), then a single D2H to CPU → probes / disk.</text>
     <line x1="100" y1="366" x2="100" y2="420" stroke="#ff6b6b" stroke-width="1.3" stroke-dasharray="5 3"/>
     <line x1="100" y1="420" x2="206" y2="420" stroke="#ff6b6b" stroke-width="1.3" stroke-dasharray="5 3" marker-end="url(#at)"/>
   </svg>
@@ -547,8 +548,279 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
 </section>
 
 <!-- 07 ----------------------------------------------------------- -->
+<section id="walkthrough">
+  <h2><span class="num">07</span>Walkthrough: one decode step, by the integers</h2>
+  <div class="rule"></div>
+  <p>Everything so far is abstract — slabs, buffers, views, sentinels. Here is a single decode step
+  with <em>real numbers</em> flowing through every object, so the machine stops being a metaphor. We
+  shrink the model until it fits in your head and watch the same three tensors do their job.</p>
+
+  <div class="call key">
+    <b class="lbl">The toy model &amp; the scenario</b>
+    <strong>2 hooked attention layers</strong> (<code>L=2</code>), <code>q_dim=4</code>,
+    <code>k_dim=2</code>, and a scheduler cap of <code>cap = max_num_batched_tokens = 8</code>. One
+    decode step is running <strong>three requests</strong> — A, B, C — each contributing one token, so
+    their flat batch columns are <code>A→0, B→1, C→2</code> (<code>qsl_cpu = [0,1,2,3]</code>).
+    <strong>A and C asked for QK capture; B did not.</strong> Watch how "skip B" becomes nothing more
+    than an integer.
+  </div>
+
+  <h3>Phase A — built once, at <code>load_model</code></h3>
+  <p>Before vLLM ever compiles or captures a graph, the installer allocates the whole apparatus and
+  never touches its shape again — so every <code>data_ptr</code> is frozen for the lifetime of the
+  replays. Three kinds of object come into being:</p>
+
+  <figure>
+  <svg viewBox="0 0 900 330" role="img" aria-label="construction: one slab, per-layer buffers, views, allocated once">
+    <defs>
+      <marker id="wv1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7ee0c0"/></marker>
+    </defs>
+
+    <!-- ROUTING SLAB -->
+    <text x="150" y="28" text-anchor="middle" fill="#ffb86b" font-size="12.5" font-weight="700">ROUTING SLAB</text>
+    <text x="150" y="44" text-anchor="middle" fill="#9aa3b2" font-size="10">capture_index_all · (L=2, cap=8) int64</text>
+    <g font-size="9" fill="#6b7383" text-anchor="middle">
+      <text x="60" y="63">c0</text><text x="86" y="63">c1</text><text x="112" y="63">c2</text><text x="138" y="63">c3</text>
+      <text x="164" y="63">c4</text><text x="190" y="63">c5</text><text x="216" y="63">c6</text><text x="242" y="63">c7</text>
+    </g>
+    <text x="42" y="85" text-anchor="end" fill="#9aa3b2" font-size="10">L0</text>
+    <text x="42" y="111" text-anchor="end" fill="#9aa3b2" font-size="10">L1</text>
+    <g font-size="10" text-anchor="middle" fill="#6b7383">
+      <rect x="48" y="70" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="60" y="85">0</text>
+      <rect x="74" y="70" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="86" y="85">0</text>
+      <rect x="100" y="70" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="112" y="85">0</text>
+      <rect x="126" y="70" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="138" y="85">0</text>
+      <rect x="152" y="70" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="164" y="85">0</text>
+      <rect x="178" y="70" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="190" y="85">0</text>
+      <rect x="204" y="70" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="216" y="85">0</text>
+      <rect x="230" y="70" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="242" y="85">0</text>
+      <rect x="48" y="96" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="60" y="111">0</text>
+      <rect x="74" y="96" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="86" y="111">0</text>
+      <rect x="100" y="96" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="112" y="111">0</text>
+      <rect x="126" y="96" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="138" y="111">0</text>
+      <rect x="152" y="96" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="164" y="111">0</text>
+      <rect x="178" y="96" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="190" y="111">0</text>
+      <rect x="204" y="96" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="216" y="111">0</text>
+      <rect x="230" y="96" width="24" height="22" rx="3" fill="#1b1f29" stroke="#3a3f4b"/><text x="242" y="111">0</text>
+    </g>
+    <text x="150" y="138" text-anchor="middle" fill="#6b7383" font-size="9">one tensor for ALL layers · zeroed → routes to row 0 until first build</text>
+
+    <!-- VIEWS -->
+    <line x1="258" y1="81" x2="532" y2="120" stroke="#7ee0c0" stroke-width="1.5" marker-end="url(#wv1)"/>
+    <text x="392" y="92" text-anchor="middle" fill="#7ee0c0" font-size="10">view → slab row 0</text>
+    <line x1="258" y1="107" x2="532" y2="250" stroke="#7ee0c0" stroke-width="1.5" marker-end="url(#wv1)"/>
+    <text x="392" y="205" text-anchor="middle" fill="#7ee0c0" font-size="10">view → slab row 1</text>
+
+    <!-- LAYER 0 HOST -->
+    <rect x="536" y="80" width="350" height="96" rx="10" fill="#16302a" stroke="#2f9c7a"/>
+    <text x="552" y="100" fill="#9ff0d4" font-size="11" font-weight="700">layer 0 host · QKHookHost</text>
+    <text x="552" y="115" fill="#9aa3b2" font-size="9">owns q_buf (9×4) + k_buf (9×2) · capture_index = view above</text>
+    <g font-size="8.5" text-anchor="middle">
+      <rect x="552" y="124" width="34" height="44" rx="3" fill="#241015" stroke="#5a3030"/><text x="569" y="143" fill="#ff8a8a">row0</text><text x="569" y="154" fill="#ff8a8a">✗</text>
+      <rect x="588" y="124" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="605" y="149" fill="#7ee0c0">1</text>
+      <rect x="624" y="124" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="641" y="149" fill="#7ee0c0">2</text>
+      <rect x="660" y="124" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="677" y="149" fill="#7ee0c0">3</text>
+      <rect x="696" y="124" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="713" y="149" fill="#7ee0c0">4</text>
+      <rect x="732" y="124" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="749" y="149" fill="#7ee0c0">5</text>
+      <rect x="768" y="124" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="785" y="149" fill="#7ee0c0">6</text>
+      <rect x="804" y="124" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="821" y="149" fill="#7ee0c0">7</text>
+      <rect x="840" y="124" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="857" y="149" fill="#7ee0c0">8</text>
+    </g>
+
+    <!-- LAYER 1 HOST -->
+    <rect x="536" y="210" width="350" height="96" rx="10" fill="#16302a" stroke="#2f9c7a"/>
+    <text x="552" y="230" fill="#9ff0d4" font-size="11" font-weight="700">layer 1 host · QKHookHost</text>
+    <text x="552" y="245" fill="#9aa3b2" font-size="9">its own q_buf / k_buf · capture_index = slab row 1</text>
+    <g font-size="8.5" text-anchor="middle">
+      <rect x="552" y="254" width="34" height="44" rx="3" fill="#241015" stroke="#5a3030"/><text x="569" y="273" fill="#ff8a8a">row0</text><text x="569" y="284" fill="#ff8a8a">✗</text>
+      <rect x="588" y="254" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="605" y="279" fill="#7ee0c0">1</text>
+      <rect x="624" y="254" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="641" y="279" fill="#7ee0c0">2</text>
+      <rect x="660" y="254" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="677" y="279" fill="#7ee0c0">3</text>
+      <rect x="696" y="254" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="713" y="279" fill="#7ee0c0">4</text>
+      <rect x="732" y="254" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="749" y="279" fill="#7ee0c0">5</text>
+      <rect x="768" y="254" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="785" y="279" fill="#7ee0c0">6</text>
+      <rect x="804" y="254" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="821" y="279" fill="#7ee0c0">7</text>
+      <rect x="840" y="254" width="34" height="44" rx="3" fill="#10231d" stroke="#2f9c7a"/><text x="857" y="279" fill="#7ee0c0">8</text>
+    </g>
+  </svg>
+  <figcaption><b>Allocated once; never re-shaped.</b> One <em>slab</em> holds every layer's routing
+  (row L = layer L); each layer gets a <em>view</em> into its row. Each layer also owns its own
+  <em>scratch buffers</em> — <code>q_buf</code>/<code>k_buf</code> of <code>cap+1=9</code> rows, where
+  row 0 is the write-only discard sentinel (✗). Slab = the <em>addresses</em> (small ints the CPU
+  writes); buffers = the <em>mailboxes</em> the GPU kernel drops rows into.</figcaption>
+  </figure>
+
+  <h3>Phase B — the per-step loop, five beats</h3>
+  <p>Nothing is allocated again. The step just rewrites the slab, replays the graph, and sweeps the
+  buffers. We follow layer 0; layer 1 is identical.</p>
+
+  <h4 style="font-size:14.5px; color:#bcd7f0; margin:22px 0 4px;">Beats 1–2 · reset, then build the integers</h4>
+  <figure>
+  <svg viewBox="0 0 900 270" role="img" aria-label="reset then build the routing row">
+    <defs>
+      <marker id="rb2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
+    </defs>
+    <!-- requests -->
+    <text x="450" y="24" text-anchor="middle" fill="#9aa3b2" font-size="11" font-weight="700">this step's requests (1 token each)</text>
+    <rect x="150" y="34" width="180" height="40" rx="7" fill="#173049" stroke="#2f6da3"/><text x="240" y="59" text-anchor="middle" fill="#bcd7f0" font-size="11.5">req A · col 0 · ✓ capture</text>
+    <rect x="360" y="34" width="180" height="40" rx="7" fill="#23262f" stroke="#3a3f4b"/><text x="450" y="59" text-anchor="middle" fill="#9aa3b2" font-size="11.5">req B · col 1 · ✗ skip</text>
+    <rect x="570" y="34" width="180" height="40" rx="7" fill="#173049" stroke="#2f6da3"/><text x="660" y="59" text-anchor="middle" fill="#bcd7f0" font-size="11.5">req C · col 2 · ✓ capture</text>
+
+    <!-- beat 1 reset -->
+    <text x="120" y="118" text-anchor="end" fill="#7ee0c0" font-size="10.5" font-weight="700">1 · reset</text>
+    <text x="120" y="132" text-anchor="end" fill="#6b7383" font-size="9">all → sentinel</text>
+    <g font-size="11" text-anchor="middle" fill="#6b7383">
+      <rect x="140" y="104" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="161" y="124">0</text>
+      <rect x="184" y="104" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="205" y="124">0</text>
+      <rect x="228" y="104" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="249" y="124">0</text>
+      <rect x="272" y="104" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="293" y="124">0</text>
+      <rect x="316" y="104" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="337" y="124">0</text>
+      <rect x="360" y="104" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="381" y="124">0</text>
+      <rect x="404" y="104" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="425" y="124">0</text>
+      <rect x="448" y="104" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="469" y="124">0</text>
+    </g>
+    <text x="520" y="123" fill="#6b7383" font-size="9">capture_index[L0], width 8</text>
+
+    <line x1="315" y1="142" x2="315" y2="172" stroke="#9aa3b2" stroke-width="1.4" marker-end="url(#rb2)"/>
+
+    <!-- beat 2 build -->
+    <text x="120" y="196" text-anchor="end" fill="#ffb86b" font-size="10.5" font-weight="700">2 · build</text>
+    <text x="120" y="210" text-anchor="end" fill="#6b7383" font-size="9">col c → row c+1</text>
+    <g font-size="12" text-anchor="middle" font-weight="700">
+      <rect x="140" y="182" width="42" height="30" rx="4" fill="#16302a" stroke="#2f9c7a"/><text x="161" y="202" fill="#7ee0c0">1</text>
+      <rect x="184" y="182" width="42" height="30" rx="4" fill="#23262f" stroke="#3a3f4b"/><text x="205" y="202" fill="#9aa3b2">0</text>
+      <rect x="228" y="182" width="42" height="30" rx="4" fill="#16302a" stroke="#2f9c7a"/><text x="249" y="202" fill="#7ee0c0">3</text>
+      <rect x="272" y="182" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="293" y="202" fill="#6b7383">0</text>
+      <rect x="316" y="182" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="337" y="202" fill="#6b7383">0</text>
+      <rect x="360" y="182" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="381" y="202" fill="#6b7383">0</text>
+      <rect x="404" y="182" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="425" y="202" fill="#6b7383">0</text>
+      <rect x="448" y="182" width="42" height="30" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="469" y="202" fill="#6b7383">0</text>
+    </g>
+    <text x="161" y="232" text-anchor="middle" fill="#7ee0c0" font-size="9">A: c0→r1</text>
+    <text x="205" y="232" text-anchor="middle" fill="#9aa3b2" font-size="9">B: stays 0</text>
+    <text x="249" y="232" text-anchor="middle" fill="#7ee0c0" font-size="9">C: c2→r3</text>
+    <text x="381" y="232" text-anchor="middle" fill="#6b7383" font-size="9">padding cols → 0</text>
+
+    <!-- beat 3 upload -->
+    <rect x="560" y="150" width="320" height="64" rx="10" fill="#221a10" stroke="#b9802f"/>
+    <text x="720" y="174" text-anchor="middle" fill="#ffd9a8" font-size="11" font-weight="700">3 · upload (H2D)</text>
+    <text x="720" y="192" text-anchor="middle" fill="#9aa3b2" font-size="9.5">one async copy: pinned row → device slab</text>
+    <text x="720" y="206" text-anchor="middle" fill="#5ddf9a" font-size="9.5">no per-step CPU↔GPU stall (W2 ring)</text>
+    <line x1="494" y1="197" x2="556" y2="190" stroke="#5ddf9a" stroke-width="1.6" marker-end="url(#rb2)"/>
+  </svg>
+  <figcaption><b>Selection is just integers.</b> Reset paints the whole row with the sentinel (0);
+  build overwrites only the captured requests' columns with their <em>flat column + 1</em> destination
+  row. B is never written, so it keeps the 0 — "skip B" cost a non-write. The padding columns a
+  cudagraph-sized batch may add also read 0, harmlessly aimed at the discard row.</figcaption>
+  </figure>
+
+  <h4 style="font-size:14.5px; color:#bcd7f0; margin:22px 0 4px;">Beat 4 · the forward replays — the baked op scatters</h4>
+  <p>Inside layer 0's attention, the op call baked at construction fires on replay. It reads the slab
+  view and does one <code>index_copy_</code> — "row <code>idx[i]</code> of the buffer gets source row
+  <code>i</code>":</p>
+  <figure>
+  <svg viewBox="0 0 900 300" role="img" aria-label="index_copy scatter live q rows into the buffer">
+    <defs>
+      <marker id="sc4" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7ee0c0"/></marker>
+      <marker id="sc4r" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ff6b6b"/></marker>
+    </defs>
+    <!-- live q rows -->
+    <text x="105" y="40" text-anchor="middle" fill="#9aa3b2" font-size="11" font-weight="700">live q rows</text>
+    <text x="105" y="54" text-anchor="middle" fill="#6b7383" font-size="9">this step · n=3</text>
+    <rect x="50" y="64" width="110" height="34" rx="6" fill="#173049" stroke="#2f6da3"/><text x="105" y="86" text-anchor="middle" fill="#bcd7f0" font-size="11">src0 = A.q</text>
+    <rect x="50" y="106" width="110" height="34" rx="6" fill="#23262f" stroke="#3a3f4b"/><text x="105" y="128" text-anchor="middle" fill="#9aa3b2" font-size="11">src1 = B.q</text>
+    <rect x="50" y="148" width="110" height="34" rx="6" fill="#173049" stroke="#2f6da3"/><text x="105" y="170" text-anchor="middle" fill="#bcd7f0" font-size="11">src2 = C.q</text>
+
+    <!-- index -->
+    <text x="290" y="40" text-anchor="middle" fill="#ffb86b" font-size="11" font-weight="700">capture_index[:3]</text>
+    <rect x="250" y="64" width="80" height="34" rx="6" fill="#16302a" stroke="#2f9c7a"/><text x="290" y="86" text-anchor="middle" fill="#7ee0c0" font-size="12" font-weight="700">1</text>
+    <rect x="250" y="106" width="80" height="34" rx="6" fill="#23262f" stroke="#3a3f4b"/><text x="290" y="128" text-anchor="middle" fill="#9aa3b2" font-size="12" font-weight="700">0</text>
+    <rect x="250" y="148" width="80" height="34" rx="6" fill="#16302a" stroke="#2f9c7a"/><text x="290" y="170" text-anchor="middle" fill="#7ee0c0" font-size="12" font-weight="700">3</text>
+
+    <!-- buffer -->
+    <text x="690" y="28" text-anchor="middle" fill="#9ff0d4" font-size="11" font-weight="700">q_buf (9 rows) · layer 0</text>
+    <g font-size="11">
+      <rect x="560" y="40" width="260" height="24" rx="4" fill="#241015" stroke="#5a3030"/><text x="572" y="57" fill="#ff8a8a">row 0</text><text x="690" y="57" text-anchor="middle" fill="#ff8a8a">B.q — discarded ✗</text>
+      <rect x="560" y="66" width="260" height="24" rx="4" fill="#16302a" stroke="#2f9c7a"/><text x="572" y="83" fill="#9ff0d4">row 1</text><text x="690" y="83" text-anchor="middle" fill="#7ee0c0" font-weight="700">A.q ✓</text>
+      <rect x="560" y="92" width="260" height="24" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="572" y="109" fill="#6b7383">row 2</text><text x="690" y="109" text-anchor="middle" fill="#6b7383">· (untouched)</text>
+      <rect x="560" y="118" width="260" height="24" rx="4" fill="#16302a" stroke="#2f9c7a"/><text x="572" y="135" fill="#9ff0d4">row 3</text><text x="690" y="135" text-anchor="middle" fill="#7ee0c0" font-weight="700">C.q ✓</text>
+      <rect x="560" y="144" width="260" height="24" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="572" y="161" fill="#6b7383">row 4</text><text x="690" y="161" text-anchor="middle" fill="#6b7383">·</text>
+      <rect x="560" y="170" width="260" height="24" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="572" y="187" fill="#6b7383">5–8</text><text x="690" y="187" text-anchor="middle" fill="#6b7383">· (untouched)</text>
+    </g>
+
+    <!-- arrows: src -> buffer rows via index -->
+    <line x1="330" y1="81" x2="556" y2="78" stroke="#7ee0c0" stroke-width="1.6" marker-end="url(#sc4)"/>
+    <line x1="330" y1="123" x2="556" y2="55" stroke="#ff6b6b" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#sc4r)"/>
+    <line x1="330" y1="165" x2="556" y2="130" stroke="#7ee0c0" stroke-width="1.6" marker-end="url(#sc4)"/>
+
+    <!-- code -->
+    <rect x="50" y="232" width="800" height="48" rx="8" fill="#11141b" stroke="#2a2f3a"/>
+    <text x="68" y="253" fill="#cdd6f4" font-size="12.5" font-family="monospace">idx = capture_index[:3]   <tspan fill="#7ee0c0"># = [1, 0, 3]</tspan></text>
+    <text x="68" y="271" fill="#cdd6f4" font-size="12.5" font-family="monospace">q_buf.<tspan fill="#82aaff">index_copy_</tspan>(0, idx, q_src)   <tspan fill="#6b7383"># for each i: q_buf[idx[i]] = q_src[i]  → row 0 (B) is overwritten &amp; ignored</tspan></text>
+  </svg>
+  <figcaption><b>Same kernel every step — only the indices differ.</b> A's row lands in slot 1, C's in
+  slot 3; B's lands in slot 0, the trash row, and is never read. There is no branch on "is this
+  request captured" — the integers already encode it, so a replayed graph with zero Python makes the
+  exact same selection a Python hook would. <code>k_buf</code> is scattered identically with the same
+  index.</figcaption>
+  </figure>
+
+  <h4 style="font-size:14.5px; color:#bcd7f0; margin:22px 0 4px;">Beat 5 · egress — sweep the mailboxes into per-request bins</h4>
+  <figure>
+  <svg viewBox="0 0 900 230" role="img" aria-label="egress clones buffer rows into per-request buckets">
+    <defs>
+      <marker id="eg5" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5ddf9a"/></marker>
+    </defs>
+    <!-- buffer (relevant rows) -->
+    <text x="180" y="30" text-anchor="middle" fill="#9ff0d4" font-size="11" font-weight="700">q_buf · layer 0 (after scatter)</text>
+    <g font-size="11">
+      <rect x="60" y="44" width="240" height="24" rx="4" fill="#241015" stroke="#5a3030"/><text x="180" y="61" text-anchor="middle" fill="#ff8a8a">row 0 · B.q (ignored)</text>
+      <rect x="60" y="72" width="240" height="24" rx="4" fill="#16302a" stroke="#2f9c7a"/><text x="180" y="89" text-anchor="middle" fill="#7ee0c0" font-weight="700">row 1 · A.q</text>
+      <rect x="60" y="100" width="240" height="24" rx="4" fill="#1b1f29" stroke="#3a3f4b"/><text x="180" y="117" text-anchor="middle" fill="#6b7383">row 2 · ·</text>
+      <rect x="60" y="128" width="240" height="24" rx="4" fill="#16302a" stroke="#2f9c7a"/><text x="180" y="145" text-anchor="middle" fill="#7ee0c0" font-weight="700">row 3 · C.q</text>
+    </g>
+
+    <!-- plans note -->
+    <text x="180" y="178" text-anchor="middle" fill="#9aa3b2" font-size="9.5">plans from beat 2: A=rows[1:2], C=rows[3:4]</text>
+    <text x="180" y="194" text-anchor="middle" fill="#6b7383" font-size="9">egress clones q_buf[start+1:end+1] per plan</text>
+
+    <!-- arrows -->
+    <line x1="302" y1="84" x2="556" y2="74" stroke="#5ddf9a" stroke-width="1.7" marker-end="url(#eg5)"/>
+    <line x1="302" y1="140" x2="556" y2="150" stroke="#5ddf9a" stroke-width="1.7" marker-end="url(#eg5)"/>
+    <text x="430" y="64" text-anchor="middle" fill="#5ddf9a" font-size="9.5">clone</text>
+
+    <!-- buckets -->
+    <rect x="560" y="44" width="320" height="62" rx="9" fill="#221a10" stroke="#b9802f"/>
+    <text x="576" y="64" fill="#ffd9a8" font-size="10.5" font-weight="700">bucket[A][layer0]</text>
+    <text x="576" y="80" fill="#9aa3b2" font-size="9.5" font-family="monospace">{ q:[A.q], k_all:[…], layer_num:0 }</text>
+    <text x="576" y="96" fill="#6b7383" font-size="9">keyed by req_id A</text>
+    <rect x="560" y="120" width="320" height="62" rx="9" fill="#221a10" stroke="#b9802f"/>
+    <text x="576" y="140" fill="#ffd9a8" font-size="10.5" font-weight="700">bucket[C][layer0]</text>
+    <text x="576" y="156" fill="#9aa3b2" font-size="9.5" font-family="monospace">{ q:[C.q], k_all:[…], layer_num:0 }</text>
+    <text x="576" y="172" fill="#6b7383" font-size="9">keyed by req_id C</text>
+  </svg>
+  <figcaption><b>Clone, then forget the buffer.</b> Egress copies each plan's rows out of the scratch
+  buffer into that request's bucket — so the next step is free to overwrite <code>q_buf</code> wholesale.
+  B never appears: no plan, no row read. The expensive <code>.cpu()</code> is deferred; only cheap
+  GPU clones happen per step (K is appended every step to rebuild <code>k_all</code>; see the next
+  section). At request end the bucket becomes <code>probes['qk_cache']</code>.</figcaption>
+  </figure>
+
+  <div class="call key">
+    <b class="lbl">The whole machine, in one sentence</b>
+    The <strong>slab</strong> is a per-step <em>address label</em> the CPU writes ("the token in column
+    2 goes to row 3"); the <strong>buffer</strong> is the fixed <em>mailbox grid</em> the GPU kernel
+    drops rows into by following those labels; <strong>row 0 is the trash slot</strong>; the
+    <strong>view</strong> is how each layer sees its own row of labels. Construction lays out the
+    mailboxes once; every step we only rewrite the labels and sweep the delivered mail into per-request
+    bins. Nothing is ever sized to the sequence — only to one step, which is <code>cap</code> by
+    definition.
+  </div>
+</section>
+
+<!-- 08 ----------------------------------------------------------- -->
 <section id="capture">
-  <h2><span class="num">07</span>Capture data path: flat routing &amp; the growing K history</h2>
+  <h2><span class="num">08</span>Capture data path: flat routing &amp; the growing K history</h2>
   <div class="rule"></div>
   <p>The hidden-state artifact is simple — the per-token residual stream <em>is</em> the artifact, so
   egress just clones each step&rsquo;s rows. QK has a wrinkle: <code>k_all</code> for a token is the
@@ -577,9 +849,9 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
   </div>
 </section>
 
-<!-- 08 ----------------------------------------------------------- -->
+<!-- 09 ----------------------------------------------------------- -->
 <section id="steer">
-  <h2><span class="num">08</span>Steering: the mutating counterpart <span class="pill done">both methods</span></h2>
+  <h2><span class="num">09</span>Steering: the mutating counterpart <span class="pill done">both methods</span></h2>
   <div class="rule"></div>
   <p>Capture is read-only; steering must <strong>change</strong> the residual so the edit reaches
   every downstream layer. The op declares <code>mutates_args=["residual"]</code> and edits in place —
@@ -633,9 +905,9 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
   </figure>
 </section>
 
-<!-- 09 ----------------------------------------------------------- -->
+<!-- 10 ----------------------------------------------------------- -->
 <section id="perf">
-  <h2><span class="num">09</span>Performance &amp; status <span class="pill done">v0.5.0 · measured</span></h2>
+  <h2><span class="num">10</span>Performance &amp; status <span class="pill done">v0.5.0 · measured</span></h2>
   <div class="rule"></div>
   <p>Correctness was v0.4.0; v0.5.0 makes the FULL path <strong>faster than the eager
   <code>register_forward_hook</code> it replaces</strong> — per decode step, graph-vs-eager on the
@@ -656,7 +928,7 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
     <tbody>
       <tr><td>W1</td><td><strong>Invalidation routing</strong></td><td>When the batch signature and upload width are unchanged, the device slabs already hold an identical routing — skip reset/build/upload. Steady-state steering decode becomes a pure replay (its key is bit-identical each step).</td></tr>
       <tr><td>W2</td><td><strong>Pinned-mirror ring</strong> (depth 2)</td><td>The per-step CPU&harr;GPU sync a single mirror would force: <code>reset</code> waits on a slot whose H2D upload finished steps ago, not the in-flight one. Routing&rarr;forward stops being serialized.</td></tr>
-      <tr><td>W3</td><td><strong>Incremental egress</strong></td><td>The O(N&sup2;) per-step re-clone of the whole <code>k_all</code> prefix — now O(1) rows/step + flush-time reconstruction (§07). O(N) memory, byte-identical artifact.</td></tr>
+      <tr><td>W3</td><td><strong>Incremental egress</strong></td><td>The O(N&sup2;) per-step re-clone of the whole <code>k_all</code> prefix — now O(1) rows/step + flush-time reconstruction (§08). O(N) memory, byte-identical artifact.</td></tr>
       <tr><td>W4</td><td><strong>Budget-driven drains</strong></td><td>GPU residency under heavy capture: drain GPU&rarr;pinned host on a dedicated copy stream when over a byte budget (default off &rarr; zero behavior change).</td></tr>
     </tbody>
   </table>
@@ -665,7 +937,7 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
   <table>
     <thead><tr><th>Path</th><th>FULL (graph or eager per step)</th><th>chunked prefill</th><th>multi-request</th><th>AOT</th><th>TP&gt;1</th></tr></thead>
     <tbody>
-      <tr><td><strong>QK capture</strong></td><td class="good">✓ both configs</td><td class="good">✓ (§07)</td><td class="mut">M5*</td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>QK capture</strong></td><td class="good">✓ both configs</td><td class="good">✓ (§08)</td><td class="mut">M5*</td><td class="good">✓</td><td class="mut">M6</td></tr>
       <tr><td><strong>HS capture</strong></td><td class="good">✓ both configs</td><td class="good">✓</td><td class="good">✓ (flat)</td><td class="good">✓</td><td class="mut">M6</td></tr>
       <tr><td><strong>Steering</strong></td><td class="good">✓ both methods</td><td class="good">n/a</td><td class="good">✓ selectivity+churn</td><td class="good">✓</td><td class="mut">M6</td></tr>
     </tbody>

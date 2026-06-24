@@ -1,0 +1,190 @@
+[run_qk_parity_seam] === 1/3 graph capture (VLLM_HOOK_QK_CAPTURE=seam) ===
+[parity:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False cudagraph_mode=PIECEWISE
+WARNING 06-22 20:59:32 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-22 20:59:32 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-22 20:59:32 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_QK_CAPTURE
+WARNING 06-22 20:59:32 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-22 20:59:32 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-22 20:59:32 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-22 20:59:32 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-22 20:59:32 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+(EngineCore pid=1435532) [graph/install] seam-mode QK capture wired: 28 layer(s); should_capture=True; impls=['TritonAttentionImpl']; q_dim=1536 k_dim=256; NO splitting op added (rides unified_attention seam)
+(EngineCore pid=1435532) [graph/install] capture mode=seam — execute_model wrapper skipped (capture runs inside the forward)
+[parity:graph] sampling max_tokens=1 hooks_on=default(prefill)
+(EngineCore pid=1435532) WARNING 06-22 21:02:15 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=0 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) WARNING 06-22 21:02:15 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=1 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=2 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=3 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=4 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=5 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=6 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=7 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=8 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] _capture_body layer=9 q=(40, 1536) RUNS: bs=1 qsl[:bs+1]=[0, 36] meta=ctx
+(EngineCore pid=1435532) [graph/dbg] qk_probe CAPTURED req=0-913930 layer=10 mode=last_token q=(1536,) k=(36, 256) bucket=rpc
+(EngineCore pid=1435532) [graph/dbg] qk_probe CAPTURED req=0-913930 layer=11 mode=last_token q=(1536,) k=(36, 256) bucket=rpc
+(EngineCore pid=1435532) [graph/dbg] qk_probe CAPTURED req=0-913930 layer=12 mode=last_token q=(1536,) k=(36, 256) bucket=rpc
+(EngineCore pid=1435532) [graph/dbg] qk_probe CAPTURED req=0-913930 layer=13 mode=last_token q=(1536,) k=(36, 256) bucket=rpc
+(EngineCore pid=1435532) [graph/dbg] qk_probe CAPTURED req=0-913930 layer=14 mode=last_token q=(1536,) k=(36, 256) bucket=rpc
+(EngineCore pid=1435532) [graph/dbg] qk_probe CAPTURED req=0-913930 layer=15 mode=last_token q=(1536,) k=(36, 256) bucket=rpc
+(EngineCore pid=1435532) [graph/dbg] qk_probe CAPTURED req=0-913930 layer=17 mode=last_token q=(1536,) k=(36, 256) bucket=rpc
+(EngineCore pid=1435532) [graph/dbg] qk_probe CAPTURED req=0-913930 layer=18 mode=last_token q=(1536,) k=(36, 256) bucket=rpc
+[parity:graph] case=clean captured 9 layers
+[parity:graph] case=injection captured 9 layers
+[parity:graph] wrote /dev/shm/vllm_hook_fangyunh/parity_seam_1549675/graph.pkl
+[run_qk_parity_seam] === 2/3 eager capture (ground truth) ===
+[parity:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True cudagraph_mode=n/a
+WARNING 06-22 21:02:28 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_QK_CAPTURE
+WARNING 06-22 21:02:28 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-22 21:02:28 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-22 21:02:28 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-22 21:02:28 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-22 21:02:28 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-22 21:02:28 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-22 21:02:28 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-22 21:02:28 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1440182) WARNING 06-22 21:04:59 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1440182) WARNING 06-22 21:04:59 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[parity:eager] sampling max_tokens=1 hooks_on=default(prefill)
+(EngineCore pid=1440182) Installed 28 hooks on layers: ['model.layers.0.self_attn.attn', 'model.layers.1.self_attn.attn', 'model.layers.2.self_attn.attn', 'model.layers.3.self_attn.attn', 'model.layers.4.self_attn.attn', 'model.layers.5.self_attn.attn', 'model.layers.6.self_attn.attn', 'model.layers.7.self_attn.attn', 'model.layers.8.self_attn.attn', 'model.layers.9.self_attn.attn', 'model.layers.10.self_attn.attn', 'model.layers.11.self_attn.attn', 'model.layers.12.self_attn.attn', 'model.layers.13.self_attn.attn', 'model.layers.14.self_attn.attn', 'model.layers.15.self_attn.attn', 'model.layers.16.self_attn.attn', 'model.layers.17.self_attn.attn', 'model.layers.18.self_attn.attn', 'model.layers.19.self_attn.attn', 'model.layers.20.self_attn.attn', 'model.layers.21.self_attn.attn', 'model.layers.22.self_attn.attn', 'model.layers.23.self_attn.attn', 'model.layers.24.self_attn.attn', 'model.layers.25.self_attn.attn', 'model.layers.26.self_attn.attn', 'model.layers.27.self_attn.attn']
+(EngineCore pid=1440182) WARNING 06-22 21:04:59 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1440182) WARNING 06-22 21:05:00 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+[parity:eager] case=clean captured 9 layers
+[parity:eager] case=injection captured 9 layers
+[parity:eager] wrote /dev/shm/vllm_hook_fangyunh/parity_seam_1549675/eager.pkl
+[run_qk_parity_seam] === 3/3 compare ===
+[parity] case=clean layer=model.layers.10.self_attn.attn q: match=True max|Δ|=1.278e-03 mean|Δ|=2.110e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.10.self_attn.attn k_all: match=True max|Δ|=1.899e-03 mean|Δ|=2.240e-04 shape=(1, 36, 256)
+[parity] case=clean layer=model.layers.11.self_attn.attn q: match=True max|Δ|=1.145e-03 mean|Δ|=2.371e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.11.self_attn.attn k_all: match=True max|Δ|=2.720e-03 mean|Δ|=2.515e-04 shape=(1, 36, 256)
+[parity] case=clean layer=model.layers.12.self_attn.attn q: match=True max|Δ|=1.851e-03 mean|Δ|=2.755e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.12.self_attn.attn k_all: match=True max|Δ|=3.407e-03 mean|Δ|=2.780e-04 shape=(1, 36, 256)
+[parity] case=clean layer=model.layers.13.self_attn.attn q: match=True max|Δ|=1.386e-03 mean|Δ|=2.333e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.13.self_attn.attn k_all: match=True max|Δ|=2.680e-03 mean|Δ|=2.928e-04 shape=(1, 36, 256)
+[parity] case=clean layer=model.layers.14.self_attn.attn q: match=True max|Δ|=1.616e-03 mean|Δ|=2.640e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.14.self_attn.attn k_all: match=True max|Δ|=6.767e-03 mean|Δ|=3.474e-04 shape=(1, 36, 256)
+[parity] case=clean layer=model.layers.15.self_attn.attn q: match=True max|Δ|=2.288e-03 mean|Δ|=2.879e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.15.self_attn.attn k_all: match=True max|Δ|=2.886e-03 mean|Δ|=2.960e-04 shape=(1, 36, 256)
+[parity] case=clean layer=model.layers.17.self_attn.attn q: match=True max|Δ|=2.287e-03 mean|Δ|=3.587e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.17.self_attn.attn k_all: match=True max|Δ|=3.651e-03 mean|Δ|=3.297e-04 shape=(1, 36, 256)
+[parity] case=clean layer=model.layers.18.self_attn.attn q: match=True max|Δ|=1.470e-03 mean|Δ|=2.652e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.18.self_attn.attn k_all: match=True max|Δ|=4.576e-03 mean|Δ|=3.026e-04 shape=(1, 36, 256)
+[parity] case=clean layer=model.layers.19.self_attn.attn q: match=True max|Δ|=1.686e-03 mean|Δ|=3.279e-04 shape=(1, 1536)
+[parity] case=clean layer=model.layers.19.self_attn.attn k_all: match=True max|Δ|=4.962e-03 mean|Δ|=3.190e-04 shape=(1, 36, 256)
+[parity] case=injection layer=model.layers.10.self_attn.attn q: match=True max|Δ|=2.926e-03 mean|Δ|=4.597e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.10.self_attn.attn k_all: match=True max|Δ|=2.877e-03 mean|Δ|=2.775e-04 shape=(1, 44, 256)
+[parity] case=injection layer=model.layers.11.self_attn.attn q: match=True max|Δ|=2.461e-03 mean|Δ|=4.268e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.11.self_attn.attn k_all: match=True max|Δ|=3.980e-03 mean|Δ|=3.128e-04 shape=(1, 44, 256)
+[parity] case=injection layer=model.layers.12.self_attn.attn q: match=True max|Δ|=2.441e-03 mean|Δ|=3.930e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.12.self_attn.attn k_all: match=True max|Δ|=6.283e-03 mean|Δ|=3.595e-04 shape=(1, 44, 256)
+[parity] case=injection layer=model.layers.13.self_attn.attn q: match=True max|Δ|=2.069e-03 mean|Δ|=3.438e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.13.self_attn.attn k_all: match=True max|Δ|=3.785e-03 mean|Δ|=3.601e-04 shape=(1, 44, 256)
+[parity] case=injection layer=model.layers.14.self_attn.attn q: match=True max|Δ|=2.198e-03 mean|Δ|=4.292e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.14.self_attn.attn k_all: match=True max|Δ|=8.065e-03 mean|Δ|=4.129e-04 shape=(1, 44, 256)
+[parity] case=injection layer=model.layers.15.self_attn.attn q: match=True max|Δ|=3.910e-03 mean|Δ|=4.867e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.15.self_attn.attn k_all: match=True max|Δ|=4.008e-03 mean|Δ|=3.643e-04 shape=(1, 44, 256)
+[parity] case=injection layer=model.layers.17.self_attn.attn q: match=True max|Δ|=3.454e-03 mean|Δ|=5.199e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.17.self_attn.attn k_all: match=True max|Δ|=5.379e-03 mean|Δ|=4.000e-04 shape=(1, 44, 256)
+[parity] case=injection layer=model.layers.18.self_attn.attn q: match=True max|Δ|=1.986e-03 mean|Δ|=3.704e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.18.self_attn.attn k_all: match=True max|Δ|=4.576e-03 mean|Δ|=3.433e-04 shape=(1, 44, 256)
+[parity] case=injection layer=model.layers.19.self_attn.attn q: match=True max|Δ|=2.800e-03 mean|Δ|=4.630e-04 shape=(1, 1536)
+[parity] case=injection layer=model.layers.19.self_attn.attn k_all: match=True max|Δ|=4.962e-03 mean|Δ|=3.643e-04 shape=(1, 44, 256)
+============================================================
+[parity] 36/36 tensors within rtol=0.01 atol=0.01
+[parity] VERDICT: PASS — graph capture matches eager within tolerance.
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@p3-r13-n1>
+Subject: Job 1549675: <vllm_hook_qk_parity_seam> in cluster <BLUEVELA_LSF> Done
+
+Job <vllm_hook_qk_parity_seam> was submitted from host <login2> by user <fangyunh> in cluster <BLUEVELA_LSF> at Mon Jun 22 20:57:46 2026
+Job was executed on host(s) <4*p3-r13-n1>, in queue <normal>, as user <fangyunh> in cluster <BLUEVELA_LSF> at Mon Jun 22 20:57:47 2026
+</u/fangyunh> was used as the home directory.
+</u/fangyunh/vLLM-Hook> was used as the working directory.
+Started at Mon Jun 22 20:57:47 2026
+Terminated at Mon Jun 22 21:05:05 2026
+Results reported at Mon Jun 22 21:05:05 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_qk_parity_seam.sh — graph-vs-eager QK parity for the SEAM capture prototype.
+#
+# Identical to run_qk_parity.sh but the graph leg runs VLLM_HOOK_QK_CAPTURE=seam:
+# capture rides the attention impl's eager seam (NO qk_probe splitting op). The eager
+# (ground-truth) leg ignores the var — graph mode is unarmed there, so it uses the
+# legacy register_forward_hook path. PASS => seam capture == eager within tol.
+#   1. capture --mode graph  (PIECEWISE, SEAM-path)          -> graph.pkl
+#   2. capture --mode eager  (legacy register_forward_hook)  -> eager.pkl
+#   3. compare graph.pkl eager.pkl                           -> PASS/FAIL
+#
+# Submit:  bsub < tests/cuda_graph/tests/qk_graph/run_qk_parity_seam.sh
+# Result:  grep 'parity\] VERDICT' tests/cuda_graph/logs/qk_parity_seam.*.out
+#          grep 'seam-mode QK capture wired' tests/cuda_graph/logs/qk_parity_seam.*.out
+#
+#BSUB -J vllm_hook_qk_parity_seam
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/qk_parity_seam.%J.out
+#BSUB -e tests/cuda_graph/logs/qk_parity_seam.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_HOOK_USE_SAFETENSORS=1
+export VLLM_HOOK_ASYNC_SAVE=1
+# Force a clean compile each graph run so a stale cache cannot mask a regression.
+export VLLM_DISABLE_COMPILE_CACHE=1
+export VLLM_HOOK_CUDAGRAPH_MODE=PIECEWISE
+# The prototype under test: capture inside the attention impl's eager seam.
+export VLLM_HOOK_QK_CAPTURE=seam
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+
+# Per-job artifact dir (node-local tmpfs); namespaced so it never collides.
+WORK="/dev/shm/vllm_hook_${USER}/parity_seam_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+GRAPH_PKL="$WORK/graph.pkl"
+EAGER_PKL="$WORK/eager.pkl"
+
+PY=tests/cuda_graph/tests/qk_graph/qk_parity.py
+
+echo "[run_qk_parity_seam] === 1/3 graph capture (VLLM_HOOK_QK_CAPTURE=seam) ==="
+python -u "$PY" capture --mode graph --out "$GRAPH_PKL"
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   433.34 sec.
+    Max Memory :                                 2420 MB
+    Average Memory :                             1323.57 MB
+    Total Requested Memory :                     32768.00 MB
+    Delta Memory :                               30348.00 MB
+    Max Swap :                                   -
+    Max Processes :                              7
+    Max Threads :                                531
+    Run time :                                   445 sec.
+    Turnaround time :                            439 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/qk_parity_seam.1549675.err> for stderr output of this job.
+

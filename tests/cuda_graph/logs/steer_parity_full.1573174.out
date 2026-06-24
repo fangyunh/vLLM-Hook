@@ -1,0 +1,244 @@
+[run_steer_full] cudagraph_mode=FULL_DECODE_ONLY steer=buffer max_tokens=12 coeff=20.0
+============================================================
+[run_steer_full] LEG=add_vector config=model_configs/activation_steer/Qwen2-1.5B-Instruct.json
+============================================================
+[run_steer_full] === add_vector 1/3 graph capture (FULL_DECODE_ONLY, buffer) ===
+[steer-decode:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False config=model_configs/activation_steer/Qwen2-1.5B-Instruct.json coeff=20.0 max_tokens=12
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_STEER_MODE
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_STEER_COEFF
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 18:26:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.steer_activation_worker.SteerHookActWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=2286752) [graph/install] _prepare_inputs routing wrapper installed (steer)
+(EngineCore pid=2286752) [graph/install_steer] buffer-mode steering wired: 28 layer(s) over 28 slots; cap=16384 hidden=1536 V_max=16; NO splitting op (rides decode cudagraph)
+(EngineCore pid=2286752) WARNING 06-23 18:27:30 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2286752) WARNING 06-23 18:27:30 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2286752) [graph/dbg-steer] routing bs=1 steered=0 :: 
+[steer-decode:graph] case=clean
+    base : [32671, 624, 32, 13, 12095, 198, 33, 13, 7148, 198, 34, 13]
+           ' ______.\nA. Paris\nB. London\nC.'
+    steer: [12095, 13, 576, 8585, 1075, 311, 1438, 862, 5109, 448, 279, 3409]
+           ' Paris. The French like to break their numbers with the word'
+[steer-decode:graph] case=other
+    base : [2736, 5248, 28117, 518, 3055, 13, 1096, 6147, 30128, 18495, 311, 11625]
+           ' perform multiple calculations at once. This allows quantum computers to solve'
+    steer: [2736, 7525, 389, 264, 30128, 2699, 320, 80, 59220, 8, 311, 2736]
+           ' perform operations on a quantum bit (qubit) to perform'
+[steer-decode:graph] wrote /dev/shm/vllm_hook_fangyunh/steer_parity_full_1573174/add_vector_graph.pkl
+[run_steer_full] === add_vector 2/3 eager capture (ground truth) ===
+[steer-decode:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True config=model_configs/activation_steer/Qwen2-1.5B-Instruct.json coeff=20.0 max_tokens=12
+WARNING 06-23 18:27:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_STEER_MODE
+WARNING 06-23 18:27:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 18:27:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 18:27:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 18:27:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_STEER_COEFF
+WARNING 06-23 18:27:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 18:27:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 18:27:43 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 18:27:44 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-23 18:27:44 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=2288840) WARNING 06-23 18:28:03 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=2288840) WARNING 06-23 18:28:03 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=2288840) WARNING 06-23 18:28:03 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2288840) WARNING 06-23 18:28:03 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2288840) WARNING 06-23 18:28:03 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+[steer-decode:eager] case=clean
+    base : [32671, 624, 32, 13, 12095, 198, 33, 13, 7148, 198, 34, 13]
+           ' ______.\nA. Paris\nB. London\nC.'
+    steer: [12095, 13, 576, 8585, 1075, 311, 1438, 862, 5109, 448, 279, 3409]
+           ' Paris. The French like to break their numbers with the word'
+[steer-decode:eager] case=other
+    base : [2736, 5248, 28117, 518, 3055, 13, 1096, 6147, 30128, 18495, 311, 11625]
+           ' perform multiple calculations at once. This allows quantum computers to solve'
+    steer: [2736, 7525, 389, 264, 30128, 2699, 320, 80, 59220, 8, 311, 2736]
+           ' perform operations on a quantum bit (qubit) to perform'
+[steer-decode:eager] wrote /dev/shm/vllm_hook_fangyunh/steer_parity_full_1573174/add_vector_eager.pkl
+(EngineCore pid=2288840) Installed 28 steering hooks on layers: ['model.layers.0', 'model.layers.1', 'model.layers.2', 'model.layers.3', 'model.layers.4', 'model.layers.5', 'model.layers.6', 'model.layers.7', 'model.layers.8', 'model.layers.9', 'model.layers.10', 'model.layers.11', 'model.layers.12', 'model.layers.13', 'model.layers.14', 'model.layers.15', 'model.layers.16', 'model.layers.17', 'model.layers.18', 'model.layers.19', 'model.layers.20', 'model.layers.21', 'model.layers.22', 'model.layers.23', 'model.layers.24', 'model.layers.25', 'model.layers.26', 'model.layers.27']
+(EngineCore pid=2288840) Hooks installed successfully
+[run_steer_full] === add_vector 3/3 compare (token-for-token, prefill+decode) ===
+[steer-decode] case=clean: steer_match=True (LCP=12/12) base_match=True steer_changed_output=True => OK
+[steer-decode] case=other: steer_match=True (LCP=12/12) base_match=True steer_changed_output=True => OK
+======================================================================
+[steer-decode] VERDICT: PASS — graph steering matches eager across decode.
+============================================================
+[run_steer_full] LEG=adjust_rs config=model_configs/activation_steer/Qwen2-1.5B-Instruct_adjust_rs.json
+============================================================
+[run_steer_full] === adjust_rs 1/3 graph capture (FULL_DECODE_ONLY, buffer) ===
+[steer-decode:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False config=model_configs/activation_steer/Qwen2-1.5B-Instruct_adjust_rs.json coeff=20.0 max_tokens=12
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_STEER_MODE
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_STEER_COEFF
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 18:28:16 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.steer_activation_worker.SteerHookActWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=2290353) [graph/install] _prepare_inputs routing wrapper installed (steer)
+(EngineCore pid=2290353) [graph/install_steer] buffer-mode steering wired: 28 layer(s) over 28 slots; cap=16384 hidden=1536 V_max=16; NO splitting op (rides decode cudagraph)
+(EngineCore pid=2290353) WARNING 06-23 18:28:46 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2290353) WARNING 06-23 18:28:46 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=2290353) [graph/dbg-steer] routing bs=1 steered=0 :: 
+[steer-decode:graph] case=clean
+    base : [32671, 624, 32, 13, 12095, 198, 33, 13, 7148, 198, 34, 13]
+           ' ______.\nA. Paris\nB. London\nC.'
+    steer: [279, 330, 63593, 315, 279, 18374, 315, 279, 18374, 315, 279, 54543]
+           ' the "Capital of the Capital of the Capital of the Infinite'
+[steer-decode:graph] case=other
+    base : [2736, 5248, 28117, 518, 3055, 13, 1096, 6147, 30128, 18495, 311, 11625]
+           ' perform multiple calculations at once. This allows quantum computers to solve'
+    steer: [3553, 2804, 81402, 11, 892, 525, 330, 80, 81402, 1, 429, 646]
+           ' store qubits, which are "qubits" that can'
+[steer-decode:graph] wrote /dev/shm/vllm_hook_fangyunh/steer_parity_full_1573174/adjust_rs_graph.pkl
+[run_steer_full] === adjust_rs 2/3 eager capture (ground truth) ===
+[steer-decode:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True config=model_configs/activation_steer/Qwen2-1.5B-Instruct_adjust_rs.json coeff=20.0 max_tokens=12
+WARNING 06-23 18:28:59 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_STEER_MODE
+WARNING 06-23 18:28:59 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 18:28:59 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 18:28:59 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 18:28:59 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_STEER_COEFF
+WARNING 06-23 18:28:59 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 18:28:59 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 18:28:59 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 18:28:59 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-23 18:28:59 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=2291987) WARNING 06-23 18:29:19 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=2291987) WARNING 06-23 18:29:19 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=2291987) WARNING 06-23 18:29:19 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2291987) WARNING 06-23 18:29:19 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2291987) WARNING 06-23 18:29:19 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+[steer-decode:eager] case=clean
+    base : [32671, 624, 32, 13, 12095, 198, 33, 13, 7148, 198, 34, 13]
+           ' ______.\nA. Paris\nB. London\nC.'
+    steer: [279, 330, 63593, 315, 279, 18374, 315, 279, 18374, 315, 279, 54543]
+           ' the "Capital of the Capital of the Capital of the Infinite'
+[steer-decode:eager] case=other
+    base : [2736, 5248, 28117, 518, 3055, 13, 1096, 6147, 30128, 18495, 311, 11625]
+           ' perform multiple calculations at once. This allows quantum computers to solve'
+    steer: [3553, 2804, 81402, 11, 892, 525, 330, 80, 81402, 1, 429, 646]
+           ' store qubits, which are "qubits" that can'
+[steer-decode:eager] wrote /dev/shm/vllm_hook_fangyunh/steer_parity_full_1573174/adjust_rs_eager.pkl
+(EngineCore pid=2291987) Installed 28 steering hooks on layers: ['model.layers.0', 'model.layers.1', 'model.layers.2', 'model.layers.3', 'model.layers.4', 'model.layers.5', 'model.layers.6', 'model.layers.7', 'model.layers.8', 'model.layers.9', 'model.layers.10', 'model.layers.11', 'model.layers.12', 'model.layers.13', 'model.layers.14', 'model.layers.15', 'model.layers.16', 'model.layers.17', 'model.layers.18', 'model.layers.19', 'model.layers.20', 'model.layers.21', 'model.layers.22', 'model.layers.23', 'model.layers.24', 'model.layers.25', 'model.layers.26', 'model.layers.27']
+(EngineCore pid=2291987) Hooks installed successfully
+[run_steer_full] === adjust_rs 3/3 compare (token-for-token, prefill+decode) ===
+[steer-decode] case=clean: steer_match=True (LCP=12/12) base_match=True steer_changed_output=True => OK
+[steer-decode] case=other: steer_match=True (LCP=12/12) base_match=True steer_changed_output=True => OK
+======================================================================
+[steer-decode] VERDICT: PASS — graph steering matches eager across decode.
+[run_steer_full] DONE — see VERDICT lines above per leg.
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@p2-r24-n2>
+Subject: Job 1573174: <vllm_hook_steer_full> in cluster <BLUEVELA_LSF> Done
+
+Job <vllm_hook_steer_full> was submitted from host <login2> by user <fangyunh> in cluster <BLUEVELA_LSF> at Tue Jun 23 18:26:17 2026
+Job was executed on host(s) <4*p2-r24-n2>, in queue <normal>, as user <fangyunh> in cluster <BLUEVELA_LSF> at Tue Jun 23 18:26:18 2026
+</u/fangyunh> was used as the home directory.
+</u/fangyunh/vLLM-Hook> was used as the working directory.
+Started at Tue Jun 23 18:26:18 2026
+Terminated at Tue Jun 23 18:29:25 2026
+Results reported at Tue Jun 23 18:29:25 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_steer_parity_full.sh — graph-vs-eager activation-steering parity under
+# FULL_DECODE_ONLY (v0.4.0 M3): eager prefill + FULL cudagraph decode, BUFFER steering
+# mode. The new vllm_hook::steer_buffer op (masked in-place residual += coeff·vec) is
+# NOT a splitting op, so it is absorbed into the single full decode cudagraph and
+# replays every decode step; routing (per-request coeff/vec_id) is host Python in the
+# _prepare_inputs wrapper, OUTSIDE the graph. This is the milestone that proves a FULL
+# graph can honor per-request config AND that an in-place residual mutation propagates
+# downstream on cudagraph replay (the central worry: no Python runs on replay).
+#
+# Each engine boot runs base (no steer) + steer (config's optimal_layer, every step).
+# PASS = graph-steered reproduces eager-steered token-for-token across all decode steps,
+# AND steering is non-vacuous (steer != base). add_vector method, coeff=VLLM_STEER_COEFF.
+#
+# Submit:  bsub < tests/cuda_graph/tests/steer_graph/run_steer_parity_full.sh
+# Result:  grep 'steer-decode] VERDICT' tests/cuda_graph/logs/steer_parity_full.*.out
+#          grep 'buffer-mode steering wired\|dbg-steer' tests/cuda_graph/logs/steer_parity_full.*.out
+#
+#BSUB -J vllm_hook_steer_full
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/steer_parity_full.%J.out
+#BSUB -e tests/cuda_graph/logs/steer_parity_full.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_DISABLE_COMPILE_CACHE=1
+# The FULL target: eager prefill, full cudagraph decode.
+export VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_STEER_COEFF="${VLLM_STEER_COEFF:-20.0}"
+export VLLM_HOOK_PARITY_MAX_TOKENS="${VLLM_HOOK_PARITY_MAX_TOKENS:-12}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+
+WORK="/dev/shm/vllm_hook_${USER}/steer_parity_full_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+PY=tests/cuda_graph/tests/steer_graph/steer_parity_decode.py
+
+echo "[run_steer_full] cudagraph_mode=FULL_DECODE_ONLY steer=buffer max_tokens=$VLLM_HOOK_PARITY_MAX_TOKENS coeff=$VLLM_STEER_COEFF"
+
+run_leg () {
+  local name="$1" cfg="$2"
+  local g="$WORK/${name}_graph.pkl" e="$WORK/${name}_eager.pkl"
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   1164.00 sec.
+    Max Memory :                                 2595 MB
+    Average Memory :                             1299.69 MB
+    Total Requested Memory :                     32768.00 MB
+    Delta Memory :                               30173.00 MB
+    Max Swap :                                   -
+    Max Processes :                              6
+    Max Threads :                                564
+    Run time :                                   190 sec.
+    Turnaround time :                            188 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/steer_parity_full.1573174.err> for stderr output of this job.
+

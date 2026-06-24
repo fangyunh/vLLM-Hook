@@ -1,0 +1,157 @@
+[run_steer_perf] FULL_DECODE_ONLY N=128 coeff=20.0 cfg=model_configs/activation_steer/Qwen2-1.5B-Instruct.json
+[run_steer_perf] === 1/3 graph measure (FULL_DECODE_ONLY, buffer) ===
+[steer-perf:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False config=model_configs/activation_steer/Qwen2-1.5B-Instruct.json coeff=20.0 N=128 repeats=3
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_STEER_MODE
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_MAX_TOKENS
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PROFILE
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_REPEATS
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_STEER_COEFF
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 23:27:01 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.steer_activation_worker.SteerHookActWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=3705079) [graph/install] _prepare_inputs routing wrapper installed (steer)
+(EngineCore pid=3705079) [graph/install_steer] buffer-mode steering wired: 28 layer(s) over 28 slots; cap=16384 hidden=1536 V_max=16; NO splitting op (rides decode cudagraph)
+(EngineCore pid=3705079) WARNING 06-23 23:30:23 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=3705079) WARNING 06-23 23:30:24 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+(EngineCore pid=3705079) [graph/dbg-steer] routing bs=1 steered=0 :: 
+[steer-perf:graph] base=3.431 ms/step  steer=3.405 ms/step
+[steer-perf:graph] wrote /dev/shm/vllm_hook_fangyunh/steer_perf_1588459/graph.json
+[run_steer_perf] === 2/3 eager measure (v0.2.0 baseline, register_forward_hook) ===
+[steer-perf:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True config=model_configs/activation_steer/Qwen2-1.5B-Instruct.json coeff=20.0 N=128 repeats=3
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_MAX_TOKENS
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PROFILE
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_REPEATS
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_STEER_COEFF
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 23:30:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 23:30:40 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-23 23:30:40 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=3708156) WARNING 06-23 23:31:03 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=3708156) WARNING 06-23 23:31:03 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=3708156) WARNING 06-23 23:31:03 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=3708156) WARNING 06-23 23:31:03 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=3708156) WARNING 06-23 23:31:03 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+[steer-perf:eager] base=11.672 ms/step  steer=12.281 ms/step
+[steer-perf:eager] wrote /dev/shm/vllm_hook_fangyunh/steer_perf_1588459/eager.json
+(EngineCore pid=3708156) Installed 28 steering hooks on layers: ['model.layers.0', 'model.layers.1', 'model.layers.2', 'model.layers.3', 'model.layers.4', 'model.layers.5', 'model.layers.6', 'model.layers.7', 'model.layers.8', 'model.layers.9', 'model.layers.10', 'model.layers.11', 'model.layers.12', 'model.layers.13', 'model.layers.14', 'model.layers.15', 'model.layers.16', 'model.layers.17', 'model.layers.18', 'model.layers.19', 'model.layers.20', 'model.layers.21', 'model.layers.22', 'model.layers.23', 'model.layers.24', 'model.layers.25', 'model.layers.26', 'model.layers.27']
+(EngineCore pid=3708156) Hooks installed successfully
+[run_steer_perf] === 3/3 report ===
+========================================================================
+[steer-perf] decode ms/step (lower is better)
+                     no-hook       steer   hook overhead
+  graph (FULL)       3.431ms     3.405ms       -0.026ms
+  eager (v0.2)      11.672ms    12.281ms       +0.609ms
+------------------------------------------------------------------------
+  graph-steer vs eager-steer: 3.405 vs 12.281 ms/step (3.61x)
+========================================================================
+[steer-perf] VERDICT: PASS — graph-steer (3.405 ms/step) <= eager-steer (12.281 ms/step). Regression fixed.
+[run_steer_perf] DONE — see VERDICT line above.
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@p6-r02-n1>
+Subject: Job 1588459: <vllm_hook_steer_perf> in cluster <BLUEVELA_LSF> Done
+
+Job <vllm_hook_steer_perf> was submitted from host <login2> by user <fangyunh> in cluster <BLUEVELA_LSF> at Tue Jun 23 23:26:35 2026
+Job was executed on host(s) <4*p6-r02-n1>, in queue <normal>, as user <fangyunh> in cluster <BLUEVELA_LSF> at Tue Jun 23 23:26:36 2026
+</u/fangyunh> was used as the home directory.
+</u/fangyunh/vLLM-Hook> was used as the working directory.
+Started at Tue Jun 23 23:26:36 2026
+Terminated at Tue Jun 23 23:31:21 2026
+Results reported at Tue Jun 23 23:31:21 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_steer_perf.sh — per-decode-step STEERING performance under FULL_DECODE_ONLY
+# (v0.5.0 W1/W2/W6). Proves the steering regression is fixed: graph-steer (buffer mode,
+# eager prefill + FULL cudagraph decode, with W1 invalidation routing + W2/W6a
+# double-buffered pinned mirror) must be FASTER per decode step than v0.2.0 eager
+# (register_forward_hook every step). Complements run_steer_parity_full.sh (correctness).
+#
+# Each engine boots in its own subprocess and reports decode ms/step for no-hook (floor)
+# and steer, computed as 1000*(T_full - T_prefill)/(N-1). VLLM_HOOK_PROFILE surfaces the
+# graph.route.skip / .build counters so you can confirm W1 invalidation fires.
+#
+# Submit:  bsub < tests/cuda_graph/tests/steer_graph/run_steer_perf.sh
+# Result:  grep 'steer-perf] VERDICT' tests/cuda_graph/logs/steer_perf.*.out
+#          grep 'decode ms/step\|invalidation:' tests/cuda_graph/logs/steer_perf.*.out
+#
+#BSUB -J vllm_hook_steer_perf
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/steer_perf.%J.out
+#BSUB -e tests/cuda_graph/logs/steer_perf.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_DISABLE_COMPILE_CACHE=1
+export VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_STEER_COEFF="${VLLM_STEER_COEFF:-20.0}"
+export VLLM_HOOK_PERF_MAX_TOKENS="${VLLM_HOOK_PERF_MAX_TOKENS:-128}"
+export VLLM_HOOK_PERF_REPEATS="${VLLM_HOOK_PERF_REPEATS:-3}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+# Count-only profiling (cheap counters: graph.route.skip / .build); no CUDA timers.
+export VLLM_HOOK_PROFILE="${VLLM_HOOK_PROFILE:-1}"
+
+WORK="/dev/shm/vllm_hook_${USER}/steer_perf_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+PY=tests/cuda_graph/tests/steer_graph/steer_perf.py
+CFG="${VLLM_HOOK_CONFIG_FILE:-model_configs/activation_steer/Qwen2-1.5B-Instruct.json}"
+G="$WORK/graph.json" E="$WORK/eager.json"
+
+echo "[run_steer_perf] FULL_DECODE_ONLY N=$VLLM_HOOK_PERF_MAX_TOKENS coeff=$VLLM_STEER_COEFF cfg=$CFG"
+
+echo "[run_steer_perf] === 1/3 graph measure (FULL_DECODE_ONLY, buffer) ==="
+VLLM_HOOK_CONFIG_FILE="$CFG" VLLM_HOOK_STEER_MODE=buffer \
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   500.70 sec.
+    Max Memory :                                 2634 MB
+    Average Memory :                             1041.88 MB
+    Total Requested Memory :                     32768.00 MB
+    Delta Memory :                               30134.00 MB
+    Max Swap :                                   -
+    Max Processes :                              8
+    Max Threads :                                570
+    Run time :                                   285 sec.
+    Turnaround time :                            286 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/steer_perf.1588459.err> for stderr output of this job.
+

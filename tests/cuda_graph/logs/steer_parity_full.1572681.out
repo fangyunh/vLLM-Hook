@@ -1,0 +1,308 @@
+[run_steer_full] cudagraph_mode=FULL_DECODE_ONLY steer=buffer max_tokens=12 coeff=20.0
+============================================================
+[run_steer_full] LEG=add_vector config=model_configs/activation_steer/Qwen2-1.5B-Instruct.json
+============================================================
+[run_steer_full] === add_vector 1/3 graph capture (FULL_DECODE_ONLY, buffer) ===
+[steer-decode:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False config=model_configs/activation_steer/Qwen2-1.5B-Instruct.json coeff=20.0 max_tokens=12
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_STEER_MODE
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_STEER_COEFF
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 18:22:23 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.steer_activation_worker.SteerHookActWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=3457563) [graph/install] _prepare_inputs routing wrapper installed (steer)
+(EngineCore pid=3457563) [graph/install_steer] buffer-mode steering wired: 28 layer(s) over 28 slots; cap=16384 hidden=1536 V_max=16; NO splitting op (rides decode cudagraph)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] EngineCore failed to start.
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] Traceback (most recent call last):
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1114, in run_engine_core
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 880, in __init__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     super().__init__(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 128, in __init__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     kv_cache_config = self._initialize_kv_caches(vllm_config)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 250, in _initialize_kv_caches
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     available_gpu_memory = self.model_executor.determine_available_memory()
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/executor/abstract.py", line 147, in determine_available_memory
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return self.collective_rpc("determine_available_memory")
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 93, in collective_rpc
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     result = run_method(self.driver_worker, method, args, kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/serial_utils.py", line 510, in run_method
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py", line 392, in determine_available_memory
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     self.model_runner.profile_run()
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 5948, in profile_run
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     hidden_states, last_hidden_states = self._dummy_run(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                                         ^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 5616, in _dummy_run
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     outputs = self.model(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]               ^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/cuda_graph.py", line 254, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return self.runnable(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return self._call_impl(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return forward_call(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/model_executor/models/qwen2.py", line 550, in forward
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     hidden_states = self.model(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                     ^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/decorators.py", line 678, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     output = TorchCompileWithNoGuardsWrapper.__call__(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/wrapper.py", line 181, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return self._call_with_optional_nvtx_range(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/wrapper.py", line 70, in _call_with_optional_nvtx_range
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return callable_fn(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1038, in compile_wrapper
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     raise e.remove_dynamo_frames() from None  # see TORCHDYNAMO_VERBOSE=1
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_dynamo/output_graph.py", line 2689, in _call_user_compiler
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     raise BackendCompilerFailed(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_dynamo/output_graph.py", line 2664, in _call_user_compiler
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     compiled_fn = compiler_fn(gm, example_inputs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_dynamo/repro/after_dynamo.py", line 156, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     compiled_gm = compiler_fn(gm, example_inputs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/__init__.py", line 2535, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return self.compiler_fn(model_, inputs_, **self.kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/contextlib.py", line 81, in inner
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return func(*args, **kwds)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/backends.py", line 1214, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     PiecewiseCompileInterpreter(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/backends.py", line 723, in run
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return super().run(*args)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/fx/interpreter.py", line 200, in run
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     self.env[node] = self.run_node(node)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                      ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/fx/interpreter.py", line 297, in run_node
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return getattr(self, n.op)(n.target, args, kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/backends.py", line 750, in call_module
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     piecewise_backend = PiecewiseBackend(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                         ^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/piecewise_backend.py", line 190, in __init__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     self.compile_all_ranges()
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/piecewise_backend.py", line 266, in compile_all_ranges
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     range_entry.runnable = self.vllm_backend.compiler_manager.compile(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return func(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/backends.py", line 353, in compile
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     compiled_graph, handle = self.compiler.compile(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                              ^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/compilation/compiler_interface.py", line 376, in compile
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_inductor/__init__.py", line 444, in standalone_compile
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return standalone_compile(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_inductor/standalone_compile.py", line 444, in standalone_compile
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     compiled_fn = compile_fx(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                   ^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_inductor/compile_fx.py", line 2527, in compile_fx
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return compile_fx(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_inductor/compile_fx.py", line 2578, in compile_fx
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return _maybe_wrap_and_compile_fx_main(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_inductor/compile_fx.py", line 2655, in _maybe_wrap_and_compile_fx_main
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return _compile_fx_main(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_inductor/compile_fx.py", line 2850, in _compile_fx_main
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return aot_autograd(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_dynamo/backends/common.py", line 124, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     cg = aot_module_simplified(gm, example_inputs, **self.kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_functorch/aot_autograd.py", line 1151, in aot_module_simplified
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     aot_state = create_aot_state(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                 ^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_functorch/aot_autograd.py", line 583, in create_aot_state
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     fw_metadata = run_functionalized_fw_and_collect_metadata(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_functorch/_aot_autograd/collect_metadata_analysis.py", line 222, in inner
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     flat_f_outs = f(*flat_f_args)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                   ^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_functorch/_aot_autograd/graph_capture_wrappers.py", line 1500, in functional_call
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     out = PropagateUnbackedSymInts(mod).run(*args)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/fx/interpreter.py", line 200, in run
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     self.env[node] = self.run_node(node)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                      ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/fx/experimental/symbolic_shapes.py", line 8187, in run_node
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     result = super().run_node(n)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]              ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/fx/interpreter.py", line 297, in run_node
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return getattr(self, n.op)(n.target, args, kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/fx/interpreter.py", line 380, in call_function
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return target(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_ops.py", line 1269, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return self._op(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_compile.py", line 54, in inner
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return disable_fn(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1263, in _fn
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return fn(*args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py", line 517, in __torch_dispatch__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return do_auto_functionalize(self, func, args, kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_higher_order_ops/auto_functionalize.py", line 540, in do_auto_functionalize
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     unwrapped_outs = auto_functionalized(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]                      ^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_higher_order_ops/auto_functionalize.py", line 370, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return super().__call__(_mutable_op, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_ops.py", line 533, in __call__
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     return self.dispatch(dispatch_key_set.highestPriorityTypeId(), *args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/torch/_ops.py", line 416, in dispatch
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     result = handler(mode, *args, **kwargs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] torch._dynamo.exc.BackendCompilerFailed: backend='<vllm.compilation.backends.VllmBackend object at 0x146ff534d340>' raised:
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] TypeError: auto_functionalized_fake() got multiple values for argument 'mode'
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] 
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] While executing %steer_buffer : [num_users=0] = call_function[target=torch.ops.vllm_hook.steer_buffer](args = (%getitem_1, %l_self_modules_layers_modules_0_modules_vllm_hook_steer_host_coeff, %l_self_modules_layers_modules_0_modules_vllm_hook_steer_host_vec_id, %l_self_modules_layers_modules_0_modules_vllm_hook_steer_host_vec_table, %l_self_modules_layers_modules_0_modules_vllm_hook_steer_host_avg_proj, %l_self_modules_layers_modules_0_modules_vllm_hook_steer_host_mode), kwargs = {})
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] Original traceback:
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/miniconda3/envs/vllm_hook_env/lib/python3.12/site-packages/vllm/model_executor/models/qwen2.py", line 411, in forward
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     hidden_states, residual = layer(positions, hidden_states, residual)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/vLLM-Hook/vllm_hook_plugins/vllm_hook_plugins/graph/install_steer.py", line 199, in wrapped
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     host.steer(out[1])      # mutate the residual in place
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]   File "/u/fangyunh/vLLM-Hook/vllm_hook_plugins/vllm_hook_plugins/graph/hosts.py", line 226, in steer
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140]     torch.ops.vllm_hook.steer_buffer(
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] 
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] Use tlparse to see full graph. (https://github.com/pytorch/tlparse?tab=readme-ov-file#tlparse-parse-structured-pt2-logs)
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] 
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+(EngineCore pid=3457563) ERROR 06-23 18:23:48 [core.py:1140] 
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@p3-r25-n2>
+Subject: Job 1572681: <vllm_hook_steer_full> in cluster <BLUEVELA_LSF> Exited
+
+Job <vllm_hook_steer_full> was submitted from host <login2> by user <fangyunh> in cluster <BLUEVELA_LSF> at Tue Jun 23 18:19:30 2026
+Job was executed on host(s) <4*p3-r25-n2>, in queue <normal>, as user <fangyunh> in cluster <BLUEVELA_LSF> at Tue Jun 23 18:19:31 2026
+</u/fangyunh> was used as the home directory.
+</u/fangyunh/vLLM-Hook> was used as the working directory.
+Started at Tue Jun 23 18:19:31 2026
+Terminated at Tue Jun 23 18:23:53 2026
+Results reported at Tue Jun 23 18:23:53 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_steer_parity_full.sh — graph-vs-eager activation-steering parity under
+# FULL_DECODE_ONLY (v0.4.0 M3): eager prefill + FULL cudagraph decode, BUFFER steering
+# mode. The new vllm_hook::steer_buffer op (masked in-place residual += coeff·vec) is
+# NOT a splitting op, so it is absorbed into the single full decode cudagraph and
+# replays every decode step; routing (per-request coeff/vec_id) is host Python in the
+# _prepare_inputs wrapper, OUTSIDE the graph. This is the milestone that proves a FULL
+# graph can honor per-request config AND that an in-place residual mutation propagates
+# downstream on cudagraph replay (the central worry: no Python runs on replay).
+#
+# Each engine boot runs base (no steer) + steer (config's optimal_layer, every step).
+# PASS = graph-steered reproduces eager-steered token-for-token across all decode steps,
+# AND steering is non-vacuous (steer != base). add_vector method, coeff=VLLM_STEER_COEFF.
+#
+# Submit:  bsub < tests/cuda_graph/tests/steer_graph/run_steer_parity_full.sh
+# Result:  grep 'steer-decode] VERDICT' tests/cuda_graph/logs/steer_parity_full.*.out
+#          grep 'buffer-mode steering wired\|dbg-steer' tests/cuda_graph/logs/steer_parity_full.*.out
+#
+#BSUB -J vllm_hook_steer_full
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/steer_parity_full.%J.out
+#BSUB -e tests/cuda_graph/logs/steer_parity_full.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_DISABLE_COMPILE_CACHE=1
+# The FULL target: eager prefill, full cudagraph decode.
+export VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_STEER_COEFF="${VLLM_STEER_COEFF:-20.0}"
+export VLLM_HOOK_PARITY_MAX_TOKENS="${VLLM_HOOK_PARITY_MAX_TOKENS:-12}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+
+WORK="/dev/shm/vllm_hook_${USER}/steer_parity_full_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+PY=tests/cuda_graph/tests/steer_graph/steer_parity_decode.py
+
+echo "[run_steer_full] cudagraph_mode=FULL_DECODE_ONLY steer=buffer max_tokens=$VLLM_HOOK_PARITY_MAX_TOKENS coeff=$VLLM_STEER_COEFF"
+
+run_leg () {
+  local name="$1" cfg="$2"
+  local g="$WORK/${name}_graph.pkl" e="$WORK/${name}_eager.pkl"
+
+(... more ...)
+------------------------------------------------------------
+
+Exited with exit code 1.
+
+Resource usage summary:
+
+    CPU time :                                   220.12 sec.
+    Max Memory :                                 1894 MB
+    Average Memory :                             835.87 MB
+    Total Requested Memory :                     32768.00 MB
+    Delta Memory :                               30874.00 MB
+    Max Swap :                                   -
+    Max Processes :                              6
+    Max Threads :                                466
+    Run time :                                   268 sec.
+    Turnaround time :                            263 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/steer_parity_full.1572681.err> for stderr output of this job.
+

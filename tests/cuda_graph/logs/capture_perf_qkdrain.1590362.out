@@ -1,0 +1,1239 @@
+[qkdrain] === graph NO-drain (baseline) ===
+[cap-perf:qk:graph] booting worker=probe_hook_qk enforce_eager=False config=model_configs/attention_tracker/Qwen2-1.5B-Instruct_alltok.json N=128
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_MAX_TOKENS
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_REPEATS
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_WORKER
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_QK_CAPTURE
+WARNING 06-24 00:05:49 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.probe_hookqk_worker.ProbeHookQKWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=2857819) [graph/install] QK static buffers: 3136.2 MiB on cuda:0 (cap=16384)
+(EngineCore pid=2857819) [graph/install] QK hosts installed: 28 host(s) over 28 layer slot(s); should_capture=True; cap=16384; q_dim=1536 k_dim=256
+(EngineCore pid=2857819) [graph/install] _prepare_inputs routing wrapper installed (qk)
+(EngineCore pid=2857819) [graph/install] execute_model wrapper installed (routing + egress)
+(EngineCore pid=2857819) WARNING 06-24 00:06:17 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2857819) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2857819) WARNING 06-24 00:06:17 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2857819) [graph/dbg] call#1: plans=0 op_fired=28 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2857819) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2857819) [graph/dbg] call#2: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2857819) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2857819) [graph/dbg] call#3: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2857819) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2857819) [graph/dbg] call#4: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2857819) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2857819) [graph/dbg] call#5: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2857819) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2857819) [graph/dbg] call#6: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2857819) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2857819) [graph/dbg] call#7: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2857819) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2857819) [graph/dbg] call#8: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2857819) [graph/dbg] call#530: plans=1 op_fired=28 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#531: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#532: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#533: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#534: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#535: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#536: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#537: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#538: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#539: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#540: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#541: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#542: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#543: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#544: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#545: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#546: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#547: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#548: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#549: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#550: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#551: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#552: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#553: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#554: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#555: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#556: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#557: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#558: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#559: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#560: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#561: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#562: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#563: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#564: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#565: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#566: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#567: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#568: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#569: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#570: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#571: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#572: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#573: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#574: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#575: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#576: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#577: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#578: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#579: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#580: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#581: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#582: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#583: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#584: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#585: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#586: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#587: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#588: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#589: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#590: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#591: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#592: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#593: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#594: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#595: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#596: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#597: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#598: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#599: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#600: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#601: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#602: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#603: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#604: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#605: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#606: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#607: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#608: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#609: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#610: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#611: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#612: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#613: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#614: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#615: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#616: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#617: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#618: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#619: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#620: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#621: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#622: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#623: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#624: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#625: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#626: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#627: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#628: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#629: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#630: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#631: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#632: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#633: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#634: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#635: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#636: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#637: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#638: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#639: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#640: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#641: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#642: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#643: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#644: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#645: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#646: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#647: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#648: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#649: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#650: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#651: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#652: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#653: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#654: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#655: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#656: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#657: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#660: plans=1 op_fired=28 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#661: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#662: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#663: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#664: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#665: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#666: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#667: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#668: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#669: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#670: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#671: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#672: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#673: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#674: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#675: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#676: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#677: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#678: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#679: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#680: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#681: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#682: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#683: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#684: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#685: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#686: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#687: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#688: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#689: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#690: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#691: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#692: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#693: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#694: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#695: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#696: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#697: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#698: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#699: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#700: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#701: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#702: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#703: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#704: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#705: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#706: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#707: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#708: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#709: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#710: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#711: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#712: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#713: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#714: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#715: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#716: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#717: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#718: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#719: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#720: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#721: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#722: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#723: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#724: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#725: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#726: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#727: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#728: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#729: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#730: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#731: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#732: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#733: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#734: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#735: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#736: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#737: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#738: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#739: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#740: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#741: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#742: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#743: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#744: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#745: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#746: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#747: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#748: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#749: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#750: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#751: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#752: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#753: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#754: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#755: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#756: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#757: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#758: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#759: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#760: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#761: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#762: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#763: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#764: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#765: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#766: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#767: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#768: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#769: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#770: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#771: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#772: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#773: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#774: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#775: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#776: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#777: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#778: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#779: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#780: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#781: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#782: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#783: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#784: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#785: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#786: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#787: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#790: plans=1 op_fired=28 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#791: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#792: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#793: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#794: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#795: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#796: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#797: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#798: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#799: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#800: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#801: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#802: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#803: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#804: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#805: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#806: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#807: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#808: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#809: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#810: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#811: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#812: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#813: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#814: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#815: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#816: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#817: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#818: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#819: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#820: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#821: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#822: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#823: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#824: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#825: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#826: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#827: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#828: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#829: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#830: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#831: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#832: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#833: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#834: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#835: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#836: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#837: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#838: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#839: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#840: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#841: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#842: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#843: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#844: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#845: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#846: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#847: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#848: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#849: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#850: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#851: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#852: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#853: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#854: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#855: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#856: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#857: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#858: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#859: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#860: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#861: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#862: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#863: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#864: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#865: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#866: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#867: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#868: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#869: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#870: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#871: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#872: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#873: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#874: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#875: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#876: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#877: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#878: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#879: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#880: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#881: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#882: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#883: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#884: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#885: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#886: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#887: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#888: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#889: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#890: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#891: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#892: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#893: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#894: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#895: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#896: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#897: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#898: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#899: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#900: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#901: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#902: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#903: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#904: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#905: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#906: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#907: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#908: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#909: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#910: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#911: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#912: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#913: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#914: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#915: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#916: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#917: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#920: plans=1 op_fired=28 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#921: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#922: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#923: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#924: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#925: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#926: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#927: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#928: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#929: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#930: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#931: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#932: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#933: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#934: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#935: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#936: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#937: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#938: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#939: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#940: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#941: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#942: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#943: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#944: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#945: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#946: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#947: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#948: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#949: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#950: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#951: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#952: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#953: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#954: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#955: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#956: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#957: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#958: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#959: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#960: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#961: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#962: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#963: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#964: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#965: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#966: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#967: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#968: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#969: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#970: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#971: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#972: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#973: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#974: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#975: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#976: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#977: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#978: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#979: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#980: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#981: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#982: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#983: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#984: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#985: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#986: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#987: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#988: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#989: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#990: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#991: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#992: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#993: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#994: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#995: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#996: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#997: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#998: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#999: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1000: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1001: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1002: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1003: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1004: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1005: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1006: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1007: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1008: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1009: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1010: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1011: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1012: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1013: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1014: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1015: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1016: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1017: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1018: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1019: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1020: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1021: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1022: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1023: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1024: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1025: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1026: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1027: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1028: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1029: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1030: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1031: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1032: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1033: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1034: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1035: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1036: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1037: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1038: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1039: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1040: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1041: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1042: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1043: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1044: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1045: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1046: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1047: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1050: plans=1 op_fired=28 (total=3360) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1053: plans=1 op_fired=28 (total=3388) disk_entries=0 rpc_entries=28
+(EngineCore pid=2857819) [graph/dbg] call#1056: plans=1 op_fired=28 (total=3416) disk_entries=0 rpc_entries=28
+[cap-perf:qk:graph] base=3.169 ms/step  capture=21.480 ms/step
+[cap-perf:qk:graph] wrote /dev/shm/vllm_hook_fangyunh/qkdrain_1590362/nodrain.json
+[qkdrain] === graph WITH drain (8 MiB budget) ===
+[cap-perf:qk:graph] booting worker=probe_hook_qk enforce_eager=False config=model_configs/attention_tracker/Qwen2-1.5B-Instruct_alltok.json N=128
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CAPTURE_DRAIN_BYTES
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_MAX_TOKENS
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_REPEATS
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_WORKER
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_QK_CAPTURE
+WARNING 06-24 00:06:41 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.probe_hookqk_worker.ProbeHookQKWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=2860351) [graph/install] QK static buffers: 3136.2 MiB on cuda:0 (cap=16384)
+(EngineCore pid=2860351) [graph/install] QK hosts installed: 28 host(s) over 28 layer slot(s); should_capture=True; cap=16384; q_dim=1536 k_dim=256
+(EngineCore pid=2860351) [graph/install] _prepare_inputs routing wrapper installed (qk)
+(EngineCore pid=2860351) [graph/install] capture drain enabled: budget=8388608 bytes
+(EngineCore pid=2860351) [graph/install] execute_model wrapper installed (routing + egress)
+(EngineCore pid=2860351) WARNING 06-24 00:07:08 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2860351) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2860351) WARNING 06-24 00:07:08 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2860351) [graph/dbg] call#1: plans=0 op_fired=28 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2860351) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2860351) [graph/dbg] call#2: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2860351) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2860351) [graph/dbg] call#3: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2860351) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2860351) [graph/dbg] call#4: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2860351) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2860351) [graph/dbg] call#5: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2860351) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2860351) [graph/dbg] call#6: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2860351) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2860351) [graph/dbg] call#7: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2860351) [graph/dbg]   routing bs=1 plans=0 :: r0:no_output_qk
+(EngineCore pid=2860351) [graph/dbg] call#8: plans=0 op_fired=0 (total=3052) disk_entries=0 rpc_entries=0
+(EngineCore pid=2860351) [graph/dbg] call#530: plans=1 op_fired=28 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#531: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#532: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#533: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#534: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#535: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#536: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#537: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#538: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#539: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#540: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#541: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#542: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#543: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 840 tensor(s) (drain #1, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#544: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#545: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#546: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#547: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#548: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#549: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#550: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#551: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#552: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#553: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 560 tensor(s) (drain #2, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#554: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#555: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#556: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#557: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#558: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#559: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#560: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#561: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 448 tensor(s) (drain #3, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#562: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#563: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#564: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#565: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#566: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#567: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#568: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 392 tensor(s) (drain #4, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#569: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#570: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#571: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#572: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#573: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#574: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 336 tensor(s) (drain #5, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#575: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#576: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#577: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#578: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#579: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 280 tensor(s) (drain #6, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#580: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#581: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#582: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#583: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#584: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 280 tensor(s) (drain #7, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#585: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#586: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#587: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#588: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#589: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 280 tensor(s) (drain #8, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#590: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#591: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#592: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#593: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 224 tensor(s) (drain #9, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#594: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#595: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#596: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#597: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 224 tensor(s) (drain #10, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#598: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#599: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#600: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#601: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 224 tensor(s) (drain #11, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#602: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#603: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#604: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#605: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/drain] drained 224 tensor(s) (drain #12, budget=8388608B)
+(EngineCore pid=2860351) [graph/dbg] call#606: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#607: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#608: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#609: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#610: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#611: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#612: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#613: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#614: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#615: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#616: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#617: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#618: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#619: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#620: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#621: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#622: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#623: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#624: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#625: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#626: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#627: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#628: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#629: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#630: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#631: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#632: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#633: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#634: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#635: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#636: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#637: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#638: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#639: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#640: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#641: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#642: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#643: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#644: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#645: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#646: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#647: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#648: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#649: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#650: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#651: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#652: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#653: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#654: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#655: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#656: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#657: plans=1 op_fired=0 (total=3248) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#660: plans=1 op_fired=28 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#661: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#662: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#663: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#664: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#665: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#666: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#667: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#668: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#669: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#670: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#671: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#672: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#673: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#674: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#675: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#676: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#677: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#678: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#679: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#680: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#681: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#682: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#683: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#684: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#685: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#686: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#687: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#688: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#689: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#690: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#691: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#692: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#693: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#694: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#695: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#696: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#697: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#698: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#699: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#700: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#701: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#702: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#703: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#704: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#705: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#706: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#707: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#708: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#709: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#710: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#711: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#712: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#713: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#714: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#715: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#716: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#717: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#718: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#719: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#720: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#721: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#722: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#723: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#724: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#725: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#726: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#727: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#728: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#729: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#730: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#731: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#732: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#733: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#734: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#735: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#736: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#737: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#738: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#739: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#740: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#741: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#742: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#743: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#744: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#745: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#746: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#747: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#748: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#749: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#750: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#751: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#752: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#753: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#754: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#755: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#756: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#757: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#758: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#759: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#760: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#761: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#762: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#763: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#764: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#765: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#766: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#767: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#768: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#769: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#770: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#771: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#772: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#773: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#774: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#775: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#776: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#777: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#778: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#779: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#780: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#781: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#782: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#783: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#784: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#785: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#786: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#787: plans=1 op_fired=0 (total=3276) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#790: plans=1 op_fired=28 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#791: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#792: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#793: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#794: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#795: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#796: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#797: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#798: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#799: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#800: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#801: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#802: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#803: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#804: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#805: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#806: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#807: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#808: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#809: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#810: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#811: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#812: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#813: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#814: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#815: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#816: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#817: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#818: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#819: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#820: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#821: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#822: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#823: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#824: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#825: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#826: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#827: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#828: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#829: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#830: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#831: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#832: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#833: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#834: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#835: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#836: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#837: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#838: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#839: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#840: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#841: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#842: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#843: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#844: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#845: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#846: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#847: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#848: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#849: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#850: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#851: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#852: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#853: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#854: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#855: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#856: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#857: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#858: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#859: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#860: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#861: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#862: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#863: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#864: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#865: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#866: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#867: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#868: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#869: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#870: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#871: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#872: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#873: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#874: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#875: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#876: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#877: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#878: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#879: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#880: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#881: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#882: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#883: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#884: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#885: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#886: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#887: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#888: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#889: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#890: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#891: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#892: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#893: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#894: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#895: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#896: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#897: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#898: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#899: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#900: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#901: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#902: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#903: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#904: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#905: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#906: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#907: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#908: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#909: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#910: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#911: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#912: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#913: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#914: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#915: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#916: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#917: plans=1 op_fired=0 (total=3304) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#920: plans=1 op_fired=28 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#921: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#922: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#923: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#924: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#925: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#926: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#927: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#928: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#929: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#930: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#931: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#932: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#933: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#934: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#935: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#936: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#937: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#938: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#939: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#940: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#941: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#942: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#943: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#944: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#945: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#946: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#947: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#948: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#949: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#950: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#951: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#952: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#953: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#954: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#955: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#956: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#957: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#958: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#959: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#960: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#961: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#962: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#963: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#964: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#965: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#966: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#967: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#968: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#969: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#970: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#971: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#972: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#973: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#974: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#975: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#976: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#977: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#978: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#979: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#980: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#981: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#982: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#983: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#984: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#985: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#986: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#987: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#988: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#989: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#990: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#991: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#992: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#993: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#994: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#995: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#996: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#997: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#998: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#999: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1000: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1001: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1002: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1003: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1004: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1005: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1006: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1007: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1008: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1009: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1010: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1011: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1012: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1013: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1014: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1015: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1016: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1017: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1018: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1019: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1020: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1021: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1022: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1023: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1024: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1025: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1026: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1027: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1028: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1029: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1030: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1031: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1032: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1033: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1034: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1035: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1036: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1037: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1038: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1039: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1040: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1041: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1042: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1043: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1044: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1045: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1046: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1047: plans=1 op_fired=0 (total=3332) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1050: plans=1 op_fired=28 (total=3360) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1053: plans=1 op_fired=28 (total=3388) disk_entries=0 rpc_entries=28
+(EngineCore pid=2860351) [graph/dbg] call#1056: plans=1 op_fired=28 (total=3416) disk_entries=0 rpc_entries=28
+[cap-perf:qk:graph] base=3.166 ms/step  capture=21.244 ms/step
+[cap-perf:qk:graph] wrote /dev/shm/vllm_hook_fangyunh/qkdrain_1590362/drain.json
+[qkdrain] === eager ===
+[cap-perf:qk:eager] booting worker=probe_hook_qk enforce_eager=True config=model_configs/attention_tracker/Qwen2-1.5B-Instruct_alltok.json N=128
+WARNING 06-24 00:07:31 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_MAX_TOKENS
+WARNING 06-24 00:07:31 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-24 00:07:31 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-24 00:07:31 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-24 00:07:31 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_REPEATS
+WARNING 06-24 00:07:31 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PERF_WORKER
+WARNING 06-24 00:07:31 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-24 00:07:31 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-24 00:07:32 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-24 00:07:32 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=2862724) WARNING 06-24 00:07:50 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=2862724) WARNING 06-24 00:07:50 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=2862724) WARNING 06-24 00:07:50 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2862724) WARNING 06-24 00:07:50 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=2862724) WARNING 06-24 00:07:50 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+[cap-perf:qk:eager] base=11.394 ms/step  capture=36.935 ms/step
+[cap-perf:qk:eager] wrote /dev/shm/vllm_hook_fangyunh/qkdrain_1590362/eager.json
+(EngineCore pid=2862724) Installed 28 hooks on layers: ['model.layers.0.self_attn.attn', 'model.layers.1.self_attn.attn', 'model.layers.2.self_attn.attn', 'model.layers.3.self_attn.attn', 'model.layers.4.self_attn.attn', 'model.layers.5.self_attn.attn', 'model.layers.6.self_attn.attn', 'model.layers.7.self_attn.attn', 'model.layers.8.self_attn.attn', 'model.layers.9.self_attn.attn', 'model.layers.10.self_attn.attn', 'model.layers.11.self_attn.attn', 'model.layers.12.self_attn.attn', 'model.layers.13.self_attn.attn', 'model.layers.14.self_attn.attn', 'model.layers.15.self_attn.attn', 'model.layers.16.self_attn.attn', 'model.layers.17.self_attn.attn', 'model.layers.18.self_attn.attn', 'model.layers.19.self_attn.attn', 'model.layers.20.self_attn.attn', 'model.layers.21.self_attn.attn', 'model.layers.22.self_attn.attn', 'model.layers.23.self_attn.attn', 'model.layers.24.self_attn.attn', 'model.layers.25.self_attn.attn', 'model.layers.26.self_attn.attn', 'model.layers.27.self_attn.attn']
+[qkdrain] === summary ===
+QKDRAIN base no-hook (graph): 3.169 ms/step
+QKDRAIN capture graph NO-drain : 21.480 ms/step
+QKDRAIN capture graph DRAIN-8M : 21.244 ms/step
+QKDRAIN capture EAGER          : 36.935 ms/step
+QKDRAIN VERDICT: DRAIN BEATS EAGER (drain 21.2 vs eager 36.9)
+[qkdrain] DONE
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@p5-r06-n3>
+Subject: Job 1590362: <vllm_hook_qkdrain> in cluster <BLUEVELA_LSF> Done
+
+Job <vllm_hook_qkdrain> was submitted from host <login2> by user <fangyunh> in cluster <BLUEVELA_LSF> at Wed Jun 24 00:05:32 2026
+Job was executed on host(s) <4*p5-r06-n3>, in queue <normal>, as user <fangyunh> in cluster <BLUEVELA_LSF> at Wed Jun 24 00:05:33 2026
+</u/fangyunh> was used as the home directory.
+</u/fangyunh/vLLM-Hook> was used as the working directory.
+Started at Wed Jun 24 00:05:33 2026
+Terminated at Wed Jun 24 00:08:17 2026
+Results reported at Wed Jun 24 00:08:17 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_capture_perf_qkdrain.sh — DIAGNOSTIC for the QK capture-on-decode regression
+# (graph 49.98 vs eager 42.54 ms/step, all_tokens N=128). Tests whether the W4 drain
+# (freeing GPU-resident k_all clones to pinned host) alone closes the gap — i.e. whether
+# the bottleneck is GPU allocator pressure from the O(N^2) accumulating clones vs the
+# clone/host-loop work itself. Runs QK three ways and prints all three capture ms/step:
+#   graph-nodrain (the 49.98 baseline) | graph-drain (8 MiB budget) | eager (42.54).
+#
+# Submit:  bsub < tests/cuda_graph/tests/capture_perf/run_capture_perf_qkdrain.sh
+# Result:  grep -E 'cap-perf|QKDRAIN' tests/cuda_graph/logs/capture_perf_qkdrain.*.out
+#
+#BSUB -J vllm_hook_qkdrain
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/capture_perf_qkdrain.%J.out
+#BSUB -e tests/cuda_graph/logs/capture_perf_qkdrain.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_DISABLE_COMPILE_CACHE=1
+export VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_HOOK_PERF_MAX_TOKENS="${VLLM_HOOK_PERF_MAX_TOKENS:-128}"
+export VLLM_HOOK_PERF_REPEATS="${VLLM_HOOK_PERF_REPEATS:-3}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+export VLLM_HOOK_PERF_WORKER=qk
+export VLLM_HOOK_CONFIG_FILE="model_configs/attention_tracker/Qwen2-1.5B-Instruct_alltok.json"
+
+WORK="/dev/shm/vllm_hook_${USER}/qkdrain_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+PY=tests/cuda_graph/tests/capture_perf/capture_perf.py
+
+echo "[qkdrain] === graph NO-drain (baseline) ==="
+python -u "$PY" measure --mode graph --out "$WORK/nodrain.json"
+
+echo "[qkdrain] === graph WITH drain (8 MiB budget) ==="
+VLLM_HOOK_CAPTURE_DRAIN_BYTES=8388608 \
+  python -u "$PY" measure --mode graph --out "$WORK/drain.json"
+
+echo "[qkdrain] === eager ==="
+python -u "$PY" measure --mode eager --out "$WORK/eager.json"
+
+echo "[qkdrain] === summary ==="
+python - "$WORK/nodrain.json" "$WORK/drain.json" "$WORK/eager.json" <<'PYEOF'
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   2358.00 sec.
+    Max Memory :                                 4787 MB
+    Average Memory :                             1971.32 MB
+    Total Requested Memory :                     32768.00 MB
+    Delta Memory :                               27981.00 MB
+    Max Swap :                                   -
+    Max Processes :                              6
+    Max Threads :                                571
+    Run time :                                   164 sec.
+    Turnaround time :                            165 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/capture_perf_qkdrain.1590362.err> for stderr output of this job.
+

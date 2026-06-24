@@ -1,0 +1,247 @@
+============================================================
+[run_chunked] MODE=alltok  config=model_configs/attention_tracker/Qwen2-1.5B-Instruct_alltok.json  MNBT=512
+============================================================
+[run_chunked] === alltok 1/3 graph capture (FULL_DECODE_ONLY, buffer) ===
+[chunked:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False cudagraph_mode=FULL_DECODE_ONLY MNBT=512 config=model_configs/attention_tracker/Qwen2-1.5B-Instruct_alltok.json
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_QK_CAPTURE
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CHUNKED_MNBT
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-24 15:06:00 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.probe_hookqk_worker.ProbeHookQKWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=1699448) [graph/install] QK static buffers: 98.2 MiB on cuda:0 (cap=512)
+(EngineCore pid=1699448) [graph/install] QK hosts installed: 28 host(s) over 28 layer slot(s); should_capture=True; cap=512; q_dim=1536 k_dim=256
+(EngineCore pid=1699448) [graph/install] _prepare_inputs routing wrapper installed (qk)
+(EngineCore pid=1699448) [graph/install] execute_model wrapper installed (routing + egress)
+[chunked:graph] short=128 toks (<MNBT=512, no chunk) | long=1472 toks (>MNBT -> ~3 chunks)
+(EngineCore pid=1699448) WARNING 06-24 15:07:17 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1699448) [graph/dbg]   routing bs=1 plans=1 :: r0:qlen=128,out_toks=0,computed=0,prompt=128,hooks_on=prefill | r0:qlen=128,abs=[0,128),mode=all_tokens
+(EngineCore pid=1699448) WARNING 06-24 15:07:17 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1699448) [graph/dbg] call#1: plans=1 op_fired=28 (total=420) disk_entries=0 rpc_entries=28
+(EngineCore pid=1699448) [graph/dbg] call#2: plans=0 op_fired=0 (total=420) disk_entries=0 rpc_entries=28
+(EngineCore pid=1699448) [graph/dbg] call#3: plans=0 op_fired=0 (total=420) disk_entries=0 rpc_entries=28
+[chunked:graph] scenario=short prompt=128 toks: 28 layers, q=(1, 128, 1536) k_all=(1, 128, 256)
+(EngineCore pid=1699448) [graph/dbg]   routing bs=1 plans=1 :: r0:qlen=512,out_toks=0,computed=0,prompt=1472,hooks_on=prefill | r0:qlen=512,abs=[0,512),mode=all_tokens
+(EngineCore pid=1699448) [graph/dbg] call#4: plans=1 op_fired=28 (total=448) disk_entries=0 rpc_entries=28
+(EngineCore pid=1699448) [graph/dbg]   routing bs=1 plans=0 :: r0:qlen=512,out_toks=0,computed=512,prompt=1472,hooks_on=prefill | r0:over_cap(abs_start=512)
+(EngineCore pid=1699448) [graph/dbg] call#5: plans=0 op_fired=28 (total=476) disk_entries=0 rpc_entries=28
+(EngineCore pid=1699448) [graph/dbg]   routing bs=1 plans=0 :: r0:qlen=448,out_toks=0,computed=1024,prompt=1472,hooks_on=prefill | r0:over_cap(abs_start=1024)
+(EngineCore pid=1699448) [graph/dbg] call#6: plans=0 op_fired=28 (total=504) disk_entries=0 rpc_entries=28
+(EngineCore pid=1699448) [graph/dbg] call#7: plans=0 op_fired=0 (total=504) disk_entries=0 rpc_entries=28
+(EngineCore pid=1699448) [graph/dbg] call#8: plans=0 op_fired=0 (total=504) disk_entries=0 rpc_entries=28
+[chunked:graph] scenario=long prompt=1472 toks: 28 layers, q=(1, 512, 1536) k_all=(1, 512, 256)
+[chunked:graph] wrote /dev/shm/vllm_hook_fangyunh/chunked_1639640/alltok_graph.pkl
+[run_chunked] === alltok 2/3 eager capture (ground truth) ===
+[chunked:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True cudagraph_mode=n/a MNBT=512 config=model_configs/attention_tracker/Qwen2-1.5B-Instruct_alltok.json
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_QK_CAPTURE
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CHUNKED_MNBT
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-24 15:07:35 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-24 15:07:36 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-24 15:07:36 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1703557) WARNING 06-24 15:08:02 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1703557) WARNING 06-24 15:08:02 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[chunked:eager] short=128 toks (<MNBT=512, no chunk) | long=1472 toks (>MNBT -> ~3 chunks)
+(EngineCore pid=1703557) Installed 28 hooks on layers: ['model.layers.0.self_attn.attn', 'model.layers.1.self_attn.attn', 'model.layers.2.self_attn.attn', 'model.layers.3.self_attn.attn', 'model.layers.4.self_attn.attn', 'model.layers.5.self_attn.attn', 'model.layers.6.self_attn.attn', 'model.layers.7.self_attn.attn', 'model.layers.8.self_attn.attn', 'model.layers.9.self_attn.attn', 'model.layers.10.self_attn.attn', 'model.layers.11.self_attn.attn', 'model.layers.12.self_attn.attn', 'model.layers.13.self_attn.attn', 'model.layers.14.self_attn.attn', 'model.layers.15.self_attn.attn', 'model.layers.16.self_attn.attn', 'model.layers.17.self_attn.attn', 'model.layers.18.self_attn.attn', 'model.layers.19.self_attn.attn', 'model.layers.20.self_attn.attn', 'model.layers.21.self_attn.attn', 'model.layers.22.self_attn.attn', 'model.layers.23.self_attn.attn', 'model.layers.24.self_attn.attn', 'model.layers.25.self_attn.attn', 'model.layers.26.self_attn.attn', 'model.layers.27.self_attn.attn']
+(EngineCore pid=1703557) WARNING 06-24 15:08:02 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1703557) WARNING 06-24 15:08:02 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+[chunked:eager] scenario=short prompt=128 toks: 28 layers, q=(1, 128, 1536) k_all=(1, 128, 256)
+[chunked:eager] scenario=long prompt=1472 toks: 28 layers, q=(3, 512, 1536) k_all=(3, 1472, 256)
+[chunked:eager] wrote /dev/shm/vllm_hook_fangyunh/chunked_1639640/alltok_eager.pkl
+[run_chunked] === alltok 3/3 compare (short=control, long=chunked test) ===
+[chunked] MNBT=512 short=128 long=1472 hooks_on=prefill
+[chunked] scenario=short: 56/56 tensors match (0 shape-mismatch); layermodel.layers.0.self_attn.attn k_all coverage graph=128 eager=128 (entries graph=1 eager=1)
+[chunked] scenario=long: 0/56 tensors match (56 shape-mismatch); layermodel.layers.0.self_attn.attn k_all coverage graph=512 eager=1472 (entries graph=1 eager=3)
+           layermodel.layers.0.self_attn.attn q: SHAPE graph=(1, 512, 1536) eager=(3, 512, 1536)
+           layermodel.layers.0.self_attn.attn k_all: SHAPE graph=(1, 512, 256) eager=(3, 1472, 256)
+           layermodel.layers.1.self_attn.attn q: SHAPE graph=(1, 512, 1536) eager=(3, 512, 1536)
+           layermodel.layers.1.self_attn.attn k_all: SHAPE graph=(1, 512, 256) eager=(3, 1472, 256)
+           layermodel.layers.2.self_attn.attn q: SHAPE graph=(1, 512, 1536) eager=(3, 512, 1536)
+           layermodel.layers.2.self_attn.attn k_all: SHAPE graph=(1, 512, 256) eager=(3, 1472, 256)
+================================================================
+[chunked] config=Qwen2-1.5B-Instruct_alltok.json: short=match long=mismatch
+[chunked] VERDICT: UNDER-CAPTURE CONFIRMED — non-chunked control matches eager but the chunked long prompt does NOT: buffer-mode QK drops keys past the cap (max_num_batched_tokens). Eager reconstructs the full history from the paged cache; the static buffer cannot.
+[run_chunked] MODE=alltok returned non-zero (see VERDICT above)
+============================================================
+[run_chunked] MODE=lasttoken  config=model_configs/attention_tracker/Qwen2-1.5B-Instruct.json  MNBT=512
+============================================================
+[run_chunked] === lasttoken 1/3 graph capture (FULL_DECODE_ONLY, buffer) ===
+[chunked:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False cudagraph_mode=FULL_DECODE_ONLY MNBT=512 config=model_configs/attention_tracker/Qwen2-1.5B-Instruct.json
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_QK_CAPTURE
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CHUNKED_MNBT
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-24 15:08:30 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.probe_hookqk_worker.ProbeHookQKWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=1706709) [graph/install] QK static buffers: 98.2 MiB on cuda:0 (cap=512)
+(EngineCore pid=1706709) [graph/install] QK hosts installed: 28 host(s) over 28 layer slot(s); should_capture=True; cap=512; q_dim=1536 k_dim=256
+(EngineCore pid=1706709) [graph/install] _prepare_inputs routing wrapper installed (qk)
+(EngineCore pid=1706709) [graph/install] execute_model wrapper installed (routing + egress)
+[chunked:graph] short=128 toks (<MNBT=512, no chunk) | long=1472 toks (>MNBT -> ~3 chunks)
+(EngineCore pid=1706709) WARNING 06-24 15:08:58 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1706709) [graph/dbg]   routing bs=1 plans=1 :: r0:qlen=128,out_toks=0,computed=0,prompt=128,hooks_on=prefill | r0:qlen=128,abs=[0,128),mode=last_token
+(EngineCore pid=1706709) WARNING 06-24 15:08:58 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1706709) [graph/dbg] call#1: plans=1 op_fired=28 (total=420) disk_entries=0 rpc_entries=9
+(EngineCore pid=1706709) [graph/dbg] call#2: plans=0 op_fired=0 (total=420) disk_entries=0 rpc_entries=9
+(EngineCore pid=1706709) [graph/dbg] call#3: plans=0 op_fired=0 (total=420) disk_entries=0 rpc_entries=9
+[chunked:graph] scenario=short prompt=128 toks: 9 layers, q=(1, 1536) k_all=(1, 128, 256)
+(EngineCore pid=1706709) [graph/dbg]   routing bs=1 plans=1 :: r0:qlen=512,out_toks=0,computed=0,prompt=1472,hooks_on=prefill | r0:qlen=512,abs=[0,512),mode=last_token
+(EngineCore pid=1706709) [graph/dbg] call#4: plans=1 op_fired=28 (total=448) disk_entries=0 rpc_entries=9
+(EngineCore pid=1706709) [graph/dbg]   routing bs=1 plans=0 :: r0:qlen=512,out_toks=0,computed=512,prompt=1472,hooks_on=prefill | r0:over_cap(abs_start=512)
+(EngineCore pid=1706709) [graph/dbg] call#5: plans=0 op_fired=28 (total=476) disk_entries=0 rpc_entries=9
+(EngineCore pid=1706709) [graph/dbg]   routing bs=1 plans=0 :: r0:qlen=448,out_toks=0,computed=1024,prompt=1472,hooks_on=prefill | r0:over_cap(abs_start=1024)
+(EngineCore pid=1706709) [graph/dbg] call#6: plans=0 op_fired=28 (total=504) disk_entries=0 rpc_entries=9
+(EngineCore pid=1706709) [graph/dbg] call#7: plans=0 op_fired=0 (total=504) disk_entries=0 rpc_entries=9
+(EngineCore pid=1706709) [graph/dbg] call#8: plans=0 op_fired=0 (total=504) disk_entries=0 rpc_entries=9
+[chunked:graph] scenario=long prompt=1472 toks: 9 layers, q=(1, 1536) k_all=(1, 512, 256)
+[chunked:graph] wrote /dev/shm/vllm_hook_fangyunh/chunked_1639640/lasttoken_graph.pkl
+[run_chunked] === lasttoken 2/3 eager capture (ground truth) ===
+[chunked:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True cudagraph_mode=n/a MNBT=512 config=model_configs/attention_tracker/Qwen2-1.5B-Instruct.json
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_QK_CAPTURE
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CHUNKED_MNBT
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-24 15:09:09 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-24 15:09:10 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-24 15:09:10 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1708319) WARNING 06-24 15:09:29 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1708319) WARNING 06-24 15:09:29 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[chunked:eager] short=128 toks (<MNBT=512, no chunk) | long=1472 toks (>MNBT -> ~3 chunks)
+(EngineCore pid=1708319) Installed 28 hooks on layers: ['model.layers.0.self_attn.attn', 'model.layers.1.self_attn.attn', 'model.layers.2.self_attn.attn', 'model.layers.3.self_attn.attn', 'model.layers.4.self_attn.attn', 'model.layers.5.self_attn.attn', 'model.layers.6.self_attn.attn', 'model.layers.7.self_attn.attn', 'model.layers.8.self_attn.attn', 'model.layers.9.self_attn.attn', 'model.layers.10.self_attn.attn', 'model.layers.11.self_attn.attn', 'model.layers.12.self_attn.attn', 'model.layers.13.self_attn.attn', 'model.layers.14.self_attn.attn', 'model.layers.15.self_attn.attn', 'model.layers.16.self_attn.attn', 'model.layers.17.self_attn.attn', 'model.layers.18.self_attn.attn', 'model.layers.19.self_attn.attn', 'model.layers.20.self_attn.attn', 'model.layers.21.self_attn.attn', 'model.layers.22.self_attn.attn', 'model.layers.23.self_attn.attn', 'model.layers.24.self_attn.attn', 'model.layers.25.self_attn.attn', 'model.layers.26.self_attn.attn', 'model.layers.27.self_attn.attn']
+(EngineCore pid=1708319) WARNING 06-24 15:09:29 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1708319) WARNING 06-24 15:09:29 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+[chunked:eager] scenario=short prompt=128 toks: 9 layers, q=(1, 1536) k_all=(1, 128, 256)
+[chunked:eager] scenario=long prompt=1472 toks: 9 layers, q=(1, 1536) k_all=(1, 1472, 256)
+[chunked:eager] wrote /dev/shm/vllm_hook_fangyunh/chunked_1639640/lasttoken_eager.pkl
+[run_chunked] === lasttoken 3/3 compare (short=control, long=chunked test) ===
+[chunked] MNBT=512 short=128 long=1472 hooks_on=prefill
+[chunked] scenario=short: 18/18 tensors match (0 shape-mismatch); layermodel.layers.10.self_attn.attn k_all coverage graph=128 eager=128 (entries graph=1 eager=1)
+[chunked] scenario=long: 0/18 tensors match (9 shape-mismatch); layermodel.layers.10.self_attn.attn k_all coverage graph=512 eager=1472 (entries graph=1 eager=1)
+           layermodel.layers.10.self_attn.attn q: VALUE graph=(1, 1536) eager=(1, 1536)
+           layermodel.layers.10.self_attn.attn k_all: SHAPE graph=(1, 512, 256) eager=(1, 1472, 256)
+           layermodel.layers.11.self_attn.attn q: VALUE graph=(1, 1536) eager=(1, 1536)
+           layermodel.layers.11.self_attn.attn k_all: SHAPE graph=(1, 512, 256) eager=(1, 1472, 256)
+           layermodel.layers.12.self_attn.attn q: VALUE graph=(1, 1536) eager=(1, 1536)
+           layermodel.layers.12.self_attn.attn k_all: SHAPE graph=(1, 512, 256) eager=(1, 1472, 256)
+================================================================
+[chunked] config=Qwen2-1.5B-Instruct.json: short=match long=mismatch
+[chunked] VERDICT: UNDER-CAPTURE CONFIRMED — non-chunked control matches eager but the chunked long prompt does NOT: buffer-mode QK drops keys past the cap (max_num_batched_tokens). Eager reconstructs the full history from the paged cache; the static buffer cannot.
+[run_chunked] MODE=lasttoken returned non-zero (see VERDICT above)
+[run_chunked] DONE — VERDICT lines above, one per mode.
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@p2-r09-n3>
+Subject: Job 1639640: <vllm_hook_chunked_parity> in cluster <BLUEVELA_LSF> Done
+
+Job <vllm_hook_chunked_parity> was submitted from host <login2> by user <fangyunh> in cluster <BLUEVELA_LSF> at Wed Jun 24 15:05:25 2026
+Job was executed on host(s) <4*p2-r09-n3>, in queue <normal>, as user <fangyunh> in cluster <BLUEVELA_LSF> at Wed Jun 24 15:05:27 2026
+</u/fangyunh> was used as the home directory.
+</u/fangyunh/vLLM-Hook> was used as the working directory.
+Started at Wed Jun 24 15:05:27 2026
+Terminated at Wed Jun 24 15:09:34 2026
+Results reported at Wed Jun 24 15:09:34 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_chunked_parity.sh — verification (b): does the CURRENT buffer-mode QK capture
+# correctly capture Q/K under CHUNKED PREFILL (a single prompt split across prefill
+# steps)? We force chunking by booting with max_num_batched_tokens (MNBT) BELOW the
+# long prompt's length; the buffer cap == MNBT, so positions past it are the suspected
+# under-capture. Eager (paged-cache prefix-K reconstruction) is the ground truth.
+#
+# Per mode (all_tokens, last_token), in ONE job:
+#   1. graph capture (FULL_DECODE_ONLY, buffer) of a SHORT (<MNBT) and a LONG (>MNBT) prompt
+#   2. eager capture (op->register_forward_hook ground truth) of the same two prompts
+#   3. compare: SHORT is the control (must match); LONG is the test (chunked).
+# VERDICT per mode: PASS (chunked capture correct) | UNDER-CAPTURE CONFIRMED | INCONCLUSIVE.
+#
+# Submit:  bsub < tests/cuda_graph/tests/chunked_prefill/run_chunked_parity.sh
+# Result:  grep -E 'VERDICT|coverage|chunks|UNDER-CAPTURE' tests/cuda_graph/logs/chunked_parity.*.out
+#          grep 'over_cap' tests/cuda_graph/logs/chunked_parity.*.out   # routing drops past cap
+#
+#BSUB -J vllm_hook_chunked_parity
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/chunked_parity.%J.out
+#BSUB -e tests/cuda_graph/logs/chunked_parity.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_HOOK_USE_SAFETENSORS=1
+export VLLM_HOOK_ASYNC_SAVE=1
+export VLLM_DISABLE_COMPILE_CACHE=1
+export VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+# Force chunked prefill: cap (==MNBT) far below the long prompt (~1472 toks -> 3 chunks).
+export VLLM_HOOK_CHUNKED_MNBT="${VLLM_HOOK_CHUNKED_MNBT:-512}"
+
+WORK="/dev/shm/vllm_hook_${USER}/chunked_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+PY=tests/cuda_graph/tests/chunked_prefill/chunked_prefill_parity.py
+
+run_mode () {
+  local tag="$1"
+  local cfg="$2"
+  echo "============================================================"
+  echo "[run_chunked] MODE=$tag  config=$cfg  MNBT=$VLLM_HOOK_CHUNKED_MNBT"
+  echo "============================================================"
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   1514.17 sec.
+    Max Memory :                                 3219 MB
+    Average Memory :                             1455.09 MB
+    Total Requested Memory :                     32768.00 MB
+    Delta Memory :                               29549.00 MB
+    Max Swap :                                   -
+    Max Processes :                              8
+    Max Threads :                                572
+    Run time :                                   250 sec.
+    Turnaround time :                            249 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/chunked_parity.1639640.err> for stderr output of this job.
+

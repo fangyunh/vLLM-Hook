@@ -1,0 +1,307 @@
+============================================================
+[run_hs_parity_buffer] LEG=prefillonly_lasttok config=model_configs/hidden_states/Qwen2-1.5B-Instruct.json hooks_on=prefill max_tokens=1
+============================================================
+[run_hs_parity_buffer] === prefillonly_lasttok 1/3 graph capture (PIECEWISE, buffer) ===
+[hs-parity:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False config=model_configs/hidden_states/Qwen2-1.5B-Instruct.json
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_HS_CAPTURE
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 15:10:40 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.probe_hidden_states_worker.ProbeHiddenStatesWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=1469244) [graph/install_hs] HS static buffers: 2688.2 MiB on cuda:0 (cap=16384)
+(EngineCore pid=1469244) [graph/install_hs] buffer-mode HS capture wired: 28 host(s) over 28 layer slot(s); should_capture=True; hidden_size=1536; NO splitting op (rides decode cudagraph)
+(EngineCore pid=1469244) [graph/install] _prepare_inputs routing wrapper installed (hs)
+(EngineCore pid=1469244) [graph/install_hs] execute_model wrapper installed (HS egress)
+[hs-parity:graph] sampling max_tokens=1 hooks_on=prefill
+(EngineCore pid=1469244) WARNING 06-23 15:11:58 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1469244) [graph/dbg-hs]   routing bs=1 plans=1 :: r0:qlen=5,mode=last_token,nlayers=4
+(EngineCore pid=1469244) WARNING 06-23 15:11:58 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1469244) [graph/dbg-hs] call#1: plans=1 op_fired=0 (total=3024) disk=0 rpc=4
+(EngineCore pid=1469244) [graph/dbg-hs] call#2: plans=0 op_fired=0 (total=3024) disk=0 rpc=4
+(EngineCore pid=1469244) [graph/dbg-hs] call#3: plans=0 op_fired=0 (total=3024) disk=0 rpc=4
+[hs-parity:graph] case=clean captured 4 layers
+(EngineCore pid=1469244) [graph/dbg-hs]   routing bs=1 plans=1 :: r0:qlen=8,mode=last_token,nlayers=4
+(EngineCore pid=1469244) [graph/dbg-hs] call#4: plans=1 op_fired=0 (total=3024) disk=0 rpc=4
+(EngineCore pid=1469244) [graph/dbg-hs] call#5: plans=0 op_fired=0 (total=3024) disk=0 rpc=4
+(EngineCore pid=1469244) [graph/dbg-hs] call#6: plans=0 op_fired=0 (total=3024) disk=0 rpc=4
+[hs-parity:graph] case=other captured 4 layers
+[hs-parity:graph] wrote /dev/shm/vllm_hook_fangyunh/hs_parity_buffer_1563264/prefillonly_lasttok_graph.pkl
+[run_hs_parity_buffer] === prefillonly_lasttok 2/3 eager capture (ground truth) ===
+[hs-parity:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True config=model_configs/hidden_states/Qwen2-1.5B-Instruct.json
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_HS_CAPTURE
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 15:12:11 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 15:12:11 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-23 15:12:11 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1475265) WARNING 06-23 15:12:35 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1475265) WARNING 06-23 15:12:35 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[hs-parity:eager] sampling max_tokens=1 hooks_on=prefill
+(EngineCore pid=1475265) Installed 28 hidden-state hooks on layers: ['model.layers.0', 'model.layers.1', 'model.layers.2', 'model.layers.3', 'model.layers.4', 'model.layers.5', 'model.layers.6', 'model.layers.7', 'model.layers.8', 'model.layers.9', 'model.layers.10', 'model.layers.11', 'model.layers.12', 'model.layers.13', 'model.layers.14', 'model.layers.15', 'model.layers.16', 'model.layers.17', 'model.layers.18', 'model.layers.19', 'model.layers.20', 'model.layers.21', 'model.layers.22', 'model.layers.23', 'model.layers.24', 'model.layers.25', 'model.layers.26', 'model.layers.27']
+(EngineCore pid=1475265) WARNING 06-23 15:12:35 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1475265) WARNING 06-23 15:12:35 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+[hs-parity:eager] case=clean captured 4 layers
+[hs-parity:eager] case=other captured 4 layers
+[hs-parity:eager] wrote /dev/shm/vllm_hook_fangyunh/hs_parity_buffer_1563264/prefillonly_lasttok_eager.pkl
+[run_hs_parity_buffer] === prefillonly_lasttok 3/3 compare ===
+[hs-parity] case=clean layer=model.layers.0: match=True max|Δ|=1.509e-05 mean|Δ|=4.932e-07 shape=(1, 1536)
+[hs-parity] case=clean layer=model.layers.1: match=True max|Δ|=4.673e-05 mean|Δ|=2.925e-06 shape=(1, 1536)
+[hs-parity] case=clean layer=model.layers.2: match=True max|Δ|=5.624e-05 mean|Δ|=9.928e-06 shape=(1, 1536)
+[hs-parity] case=clean layer=model.layers.3: match=True max|Δ|=9.727e-05 mean|Δ|=1.364e-05 shape=(1, 1536)
+[hs-parity] case=other layer=model.layers.0: match=True max|Δ|=5.066e-07 mean|Δ|=7.542e-08 shape=(1, 1536)
+[hs-parity] case=other layer=model.layers.1: match=True max|Δ|=2.851e-05 mean|Δ|=1.921e-06 shape=(1, 1536)
+[hs-parity] case=other layer=model.layers.2: match=True max|Δ|=5.358e-05 mean|Δ|=1.326e-05 shape=(1, 1536)
+[hs-parity] case=other layer=model.layers.3: match=True max|Δ|=3.242e-04 mean|Δ|=2.440e-05 shape=(1, 1536)
+============================================================
+[hs-parity] 8/8 tensors within rtol=0.01 atol=0.01
+[hs-parity] VERDICT: PASS — graph HS capture matches eager.
+============================================================
+[run_hs_parity_buffer] LEG=both_alltok config=model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json hooks_on=both max_tokens=12
+============================================================
+[run_hs_parity_buffer] === both_alltok 1/3 graph capture (PIECEWISE, buffer) ===
+[hs-parity:graph] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=False config=model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_HS_CAPTURE
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 15:12:47 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_GRAPH_MODE
+[vllm-hook] buffer/seam capture for worker vllm_hook_plugins.workers.probe_hidden_states_worker.ProbeHiddenStatesWorker: no splitting op declared (op absorbed into the cudagraph)
+(EngineCore pid=1478907) [graph/install_hs] HS static buffers: 2688.2 MiB on cuda:0 (cap=16384)
+(EngineCore pid=1478907) [graph/install_hs] buffer-mode HS capture wired: 28 host(s) over 28 layer slot(s); should_capture=True; hidden_size=1536; NO splitting op (rides decode cudagraph)
+(EngineCore pid=1478907) [graph/install] _prepare_inputs routing wrapper installed (hs)
+(EngineCore pid=1478907) [graph/install_hs] execute_model wrapper installed (HS egress)
+[hs-parity:graph] sampling max_tokens=12 hooks_on=both
+(EngineCore pid=1478907) WARNING 06-23 15:13:16 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1478907) [graph/dbg-hs]   routing bs=1 plans=1 :: r0:qlen=5,mode=all_tokens,nlayers=28
+(EngineCore pid=1478907) WARNING 06-23 15:13:16 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1478907) [graph/dbg-hs] call#1: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs]   routing bs=1 plans=1 :: r0:qlen=1,mode=all_tokens,nlayers=28
+(EngineCore pid=1478907) WARNING 06-23 15:13:16 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1478907) [graph/dbg-hs] call#2: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs]   routing bs=1 plans=1 :: r0:qlen=1,mode=all_tokens,nlayers=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#3: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs]   routing bs=1 plans=1 :: r0:qlen=1,mode=all_tokens,nlayers=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#4: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs]   routing bs=1 plans=1 :: r0:qlen=1,mode=all_tokens,nlayers=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#5: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs]   routing bs=1 plans=1 :: r0:qlen=1,mode=all_tokens,nlayers=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#6: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#7: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#8: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#9: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#10: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#11: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#12: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+[hs-parity:graph] case=clean captured 28 layers
+(EngineCore pid=1478907) [graph/dbg-hs] call#15: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#16: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#17: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#18: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#19: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#20: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#21: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#22: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#23: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#24: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#25: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+(EngineCore pid=1478907) [graph/dbg-hs] call#26: plans=1 op_fired=0 (total=3024) disk=0 rpc=28
+[hs-parity:graph] case=other captured 28 layers
+[hs-parity:graph] wrote /dev/shm/vllm_hook_fangyunh/hs_parity_buffer_1563264/both_alltok_graph.pkl
+[run_hs_parity_buffer] === both_alltok 2/3 eager capture (ground truth) ===
+[hs-parity:eager] booting model=Qwen/Qwen2-1.5B-Instruct enforce_eager=True config=model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_MAX_TOKENS
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CONFIG_FILE
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_PARITY_HOOKS_ON
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_HS_CAPTURE
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_CUDAGRAPH_MODE
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_DEMO_MODEL
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ASYNC_SAVE
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_USE_SAFETENSORS
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_USE_V1
+WARNING 06-23 15:13:29 [envs.py:1866] Unknown vLLM environment variable detected: VLLM_HOOK_ALLOW_CUDAGRAPH
+WARNING 06-23 15:13:30 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-23 15:13:30 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=1482745) WARNING 06-23 15:13:49 [vllm.py:942] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=1482745) WARNING 06-23 15:13:49 [vllm.py:960] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[hs-parity:eager] sampling max_tokens=12 hooks_on=both
+(EngineCore pid=1482745) Installed 28 hidden-state hooks on layers: ['model.layers.0', 'model.layers.1', 'model.layers.2', 'model.layers.3', 'model.layers.4', 'model.layers.5', 'model.layers.6', 'model.layers.7', 'model.layers.8', 'model.layers.9', 'model.layers.10', 'model.layers.11', 'model.layers.12', 'model.layers.13', 'model.layers.14', 'model.layers.15', 'model.layers.16', 'model.layers.17', 'model.layers.18', 'model.layers.19', 'model.layers.20', 'model.layers.21', 'model.layers.22', 'model.layers.23', 'model.layers.24', 'model.layers.25', 'model.layers.26', 'model.layers.27']
+(EngineCore pid=1482745) WARNING 06-23 15:13:49 [jit_monitor.py:103] Triton kernel JIT compilation during inference: _compute_slot_mapping_kernel. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1482745) WARNING 06-23 15:13:49 [jit_monitor.py:103] Triton kernel JIT compilation during inference: kernel_unified_attention. This causes a latency spike; consider extending warmup to cover this shape/config.
+(EngineCore pid=1482745) WARNING 06-23 15:13:49 [jit_monitor.py:103] Triton kernel JIT compilation during inference: reduce_segments. This causes a latency spike; consider extending warmup to cover this shape/config.
+[hs-parity:eager] case=clean captured 28 layers
+[hs-parity:eager] case=other captured 28 layers
+[hs-parity:eager] wrote /dev/shm/vllm_hook_fangyunh/hs_parity_buffer_1563264/both_alltok_eager.pkl
+[run_hs_parity_buffer] === both_alltok 3/3 compare ===
+[hs-parity] case=clean layer=model.layers.0: match=True max|Δ|=1.509e-05 mean|Δ|=4.970e-08 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.1: match=True max|Δ|=4.883e-04 mean|Δ|=6.996e-07 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.10: match=True max|Δ|=2.476e-03 mean|Δ|=3.116e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.11: match=True max|Δ|=2.697e-03 mean|Δ|=3.386e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.12: match=True max|Δ|=3.859e-03 mean|Δ|=3.522e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.13: match=True max|Δ|=1.928e-03 mean|Δ|=3.728e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.14: match=True max|Δ|=1.726e-03 mean|Δ|=3.883e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.15: match=True max|Δ|=2.417e-03 mean|Δ|=4.256e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.16: match=True max|Δ|=2.121e-03 mean|Δ|=4.595e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.17: match=True max|Δ|=2.148e-03 mean|Δ|=4.981e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.18: match=True max|Δ|=1.909e-03 mean|Δ|=5.537e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.19: match=True max|Δ|=3.297e-03 mean|Δ|=6.302e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.2: match=True max|Δ|=4.883e-04 mean|Δ|=3.671e-06 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.20: match=True max|Δ|=2.849e-03 mean|Δ|=7.201e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.21: match=True max|Δ|=3.944e-03 mean|Δ|=8.207e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.22: match=True max|Δ|=5.781e-03 mean|Δ|=9.550e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.23: match=True max|Δ|=5.432e-03 mean|Δ|=1.123e-04 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.24: match=True max|Δ|=7.408e-03 mean|Δ|=1.352e-04 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.25: match=True max|Δ|=8.179e-03 mean|Δ|=1.605e-04 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.26: match=True max|Δ|=8.484e-03 mean|Δ|=1.909e-04 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.27: match=True max|Δ|=2.393e-02 mean|Δ|=2.323e-04 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.3: match=True max|Δ|=3.662e-04 mean|Δ|=5.863e-06 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.4: match=True max|Δ|=5.651e-04 mean|Δ|=8.973e-06 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.5: match=True max|Δ|=4.451e-04 mean|Δ|=1.447e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.6: match=True max|Δ|=5.884e-04 mean|Δ|=1.698e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.7: match=True max|Δ|=1.351e-03 mean|Δ|=2.102e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.8: match=True max|Δ|=1.722e-03 mean|Δ|=2.460e-05 shape=(12, 5, 1536)
+[hs-parity] case=clean layer=model.layers.9: match=True max|Δ|=2.133e-03 mean|Δ|=2.821e-05 shape=(12, 5, 1536)
+[hs-parity] case=other layer=model.layers.0: match=True max|Δ|=1.430e-04 mean|Δ|=2.585e-07 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.1: match=True max|Δ|=1.896e-04 mean|Δ|=7.422e-07 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.10: match=True max|Δ|=5.412e-03 mean|Δ|=2.404e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.11: match=True max|Δ|=6.011e-03 mean|Δ|=2.725e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.12: match=True max|Δ|=8.198e-03 mean|Δ|=3.625e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.13: match=True max|Δ|=7.209e-03 mean|Δ|=3.693e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.14: match=True max|Δ|=5.461e-03 mean|Δ|=3.757e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.15: match=True max|Δ|=3.807e-03 mean|Δ|=3.774e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.16: match=True max|Δ|=3.839e-03 mean|Δ|=3.830e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.17: match=True max|Δ|=3.317e-03 mean|Δ|=3.988e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.18: match=True max|Δ|=4.112e-03 mean|Δ|=4.331e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.19: match=True max|Δ|=5.991e-03 mean|Δ|=4.701e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.2: match=True max|Δ|=3.080e-04 mean|Δ|=1.855e-06 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.20: match=True max|Δ|=4.793e-03 mean|Δ|=5.155e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.21: match=True max|Δ|=5.546e-03 mean|Δ|=5.937e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.22: match=True max|Δ|=5.703e-03 mean|Δ|=6.502e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.23: match=True max|Δ|=5.291e-03 mean|Δ|=7.100e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.24: match=True max|Δ|=6.077e-03 mean|Δ|=8.124e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.25: match=True max|Δ|=5.966e-03 mean|Δ|=9.039e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.26: match=True max|Δ|=6.332e-03 mean|Δ|=1.062e-04 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.27: match=True max|Δ|=2.003e-02 mean|Δ|=1.235e-04 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.3: match=True max|Δ|=3.939e-04 mean|Δ|=4.113e-06 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.4: match=True max|Δ|=1.245e-03 mean|Δ|=1.014e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.5: match=True max|Δ|=8.364e-04 mean|Δ|=1.300e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.6: match=True max|Δ|=9.274e-04 mean|Δ|=1.617e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.7: match=True max|Δ|=1.590e-03 mean|Δ|=1.929e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.8: match=True max|Δ|=2.901e-03 mean|Δ|=2.082e-05 shape=(12, 8, 1536)
+[hs-parity] case=other layer=model.layers.9: match=True max|Δ|=5.199e-03 mean|Δ|=2.200e-05 shape=(12, 8, 1536)
+============================================================
+[hs-parity] 56/56 tensors within rtol=0.01 atol=0.01
+[hs-parity] VERDICT: PASS — graph HS capture matches eager.
+[run_hs_parity_buffer] DONE — see VERDICT lines above per leg.
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@p2-r24-n2>
+Subject: Job 1563264: <vllm_hook_hs_parity_buffer> in cluster <BLUEVELA_LSF> Done
+
+Job <vllm_hook_hs_parity_buffer> was submitted from host <login2> by user <fangyunh> in cluster <BLUEVELA_LSF> at Tue Jun 23 15:10:14 2026
+Job was executed on host(s) <4*p2-r24-n2>, in queue <normal>, as user <fangyunh> in cluster <BLUEVELA_LSF> at Tue Jun 23 15:10:14 2026
+</u/fangyunh> was used as the home directory.
+</u/fangyunh/vLLM-Hook> was used as the working directory.
+Started at Tue Jun 23 15:10:14 2026
+Terminated at Tue Jun 23 15:14:28 2026
+Results reported at Tue Jun 23 15:14:28 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/bin/bash
+# run_hs_parity_buffer.sh — graph-vs-eager HIDDEN-STATE parity for BUFFER capture mode
+# under PIECEWISE (v0.4.0 M4 / M1-equivalent for HS). HS had NO buffer-mode path before
+# v0.4.0 — this exercises the new capture_hs scatter (HSHookHost static hs_buf + device
+# routing), the FULL-ready analogue of capture_qk. NO splitting op is declared (the op is
+# absorbed into the cudagraph), so this also confirms the op replays under PIECEWISE decode.
+# Unlike QK there is no prefix-K: the residual stream is per-token, so the scattered rows
+# ARE the artifact — both hook configs compare cleanly.
+#
+# Two legs in ONE job:
+#   leg A (prefill-only, last_token): default config layers [1,2,3,4].
+#   leg B (both, all_tokens):        all layers, prefill + every decode step (max_tokens=12).
+# Each leg: graph (PIECEWISE, buffer) vs eager (register_forward_hook) -> compare.
+#
+# Submit:  bsub < tests/cuda_graph/tests/hs_graph/run_hs_parity_buffer.sh
+# Result:  grep 'hs-parity\] VERDICT' tests/cuda_graph/logs/hs_parity_buffer.*.out
+#          grep 'buffer-mode HS capture wired\|HS static buffers' tests/cuda_graph/logs/hs_parity_buffer.*.out
+#
+#BSUB -J vllm_hook_hs_parity_buffer
+#BSUB -G grp_exploratory
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/hs_parity_buffer.%J.out
+#BSUB -e tests/cuda_graph/logs/hs_parity_buffer.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_HOOK_USE_SAFETENSORS=1
+export VLLM_HOOK_ASYNC_SAVE=1
+export VLLM_DISABLE_COMPILE_CACHE=1
+export VLLM_HOOK_CUDAGRAPH_MODE=PIECEWISE
+# The path under test: static-buffer + device-routing HS scatter.
+export VLLM_HOOK_HS_CAPTURE=buffer
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+
+WORK="/dev/shm/vllm_hook_${USER}/hs_parity_buffer_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+PY=tests/cuda_graph/tests/hs_graph/hs_parity.py
+
+run_leg () {
+  local name="$1" cfg="$2" hooks_on="$3" mt="$4"
+  local g="$WORK/${name}_graph.pkl" e="$WORK/${name}_eager.pkl"
+  echo "============================================================"
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   1863.21 sec.
+    Max Memory :                                 2441 MB
+    Average Memory :                             1209.84 MB
+    Total Requested Memory :                     32768.00 MB
+    Delta Memory :                               30327.00 MB
+    Max Swap :                                   -
+    Max Processes :                              7
+    Max Threads :                                571
+    Run time :                                   254 sec.
+    Turnaround time :                            254 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <tests/cuda_graph/logs/hs_parity_buffer.1563264.err> for stderr output of this job.
+

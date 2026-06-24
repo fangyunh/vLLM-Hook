@@ -1,0 +1,22 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2780379) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2780379) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=2780379) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:01<00:00,  1.71s/it]
+(EngineCore pid=2780379) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:01<00:00,  1.71s/it]
+(EngineCore pid=2780379) 
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 56.65it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.60it/s, est. speed input: 129.51 toks/s, output: 25.18 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.60it/s, est. speed input: 129.51 toks/s, output: 25.18 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.59it/s, est. speed input: 129.51 toks/s, output: 25.18 toks/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 958.48it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  6.35it/s, est. speed input: 279.44 toks/s, output: 44.45 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  6.35it/s, est. speed input: 279.44 toks/s, output: 44.45 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  6.34it/s, est. speed input: 279.44 toks/s, output: 44.45 toks/s]
+[rank0]:[W623 23:49:11.760973572 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2785916) Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+(EngineCore pid=2785916) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=2785916) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:02<00:00,  2.54s/it]
+(EngineCore pid=2785916) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:02<00:00,  2.54s/it]
+(EngineCore pid=2785916) 
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 64.51it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.77it/s, est. speed input: 18.85 toks/s, output: 45.24 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.77it/s, est. speed input: 18.85 toks/s, output: 45.24 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  3.77it/s, est. speed input: 18.85 toks/s, output: 45.24 toks/s]
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 1652.60it/s]
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  5.69it/s, est. speed input: 45.56 toks/s, output: 68.34 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  5.69it/s, est. speed input: 45.56 toks/s, output: 68.34 toks/s]Processed prompts: 100%|██████████| 1/1 [00:00<00:00,  5.64it/s, est. speed input: 45.56 toks/s, output: 68.34 toks/s]
+[rank0]:[W623 23:50:41.819639737 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
