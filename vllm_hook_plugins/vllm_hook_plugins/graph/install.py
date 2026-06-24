@@ -81,6 +81,15 @@ _PREFIXK_STASH = os.environ.get("VLLM_HOOK_QK_PREFIXK_STASH") == "1"
 # the unified_attention split — NO extra splitting op. See docs/qk_seam_capture_prototype.md.
 _CAPTURE_MODE = os.environ.get("VLLM_HOOK_QK_CAPTURE", "op")
 
+# Batched egress (prototype). Default OFF. When ON, egress clones the active flat-column
+# prefix of each layer's buffer ONCE per step (one q + one k clone per layer) and hands
+# each request a VIEW into that clone, instead of one clone per (layer, request). Cuts the
+# per-step launch/Python count from O(num_layers * num_requests) to O(num_layers) — the
+# decode-tax driver at high concurrency. Correctness is unchanged: the clone still happens
+# every step (stream-ordered before the next step's scatter), so it is NOT deferral; the
+# views reference the per-step CLONE (not the scratch buffer), so they survive reuse.
+_BATCHED_EGRESS = os.environ.get("VLLM_HOOK_BATCHED_EGRESS") == "1"
+
 # Set at install for the op-mode capture body.
 _ACTIVE_WORKER = None
 _LAYER_TO_NAME: Dict[int, str] = {}
@@ -883,19 +892,46 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
     each decode step for last_token (the eager skip-guard equivalent). q is this step's
     slice ``q_buf[start+1:end+1]`` (all_tokens) or its last row ``q_buf[end]``
     (last_token).
+
+    With ``VLLM_HOOK_BATCHED_EGRESS=1`` the per-(layer, request) clones become ONE clone
+    per layer of the active flat-column prefix (a per-step SNAPSHOT) plus per-request
+    VIEWS into it — same data captured, O(num_layers) launches instead of
+    O(num_layers * num_requests). The snapshot is cloned every step (stream-ordered
+    before the next scatter), so it is byte-identical to the per-request path; views
+    reference the snapshot, not the scratch buffer, so they survive buffer reuse.
     """
     if not plans:
         return
+
+    dm = getattr(worker, "_capture_drain", None)
 
     for layer_num, host in registry.iter_hosts():
         q_buf = host.q_buf  # (cap+1, q_dim)
         k_buf = host.k_buf   # (cap+1, k_dim)
         module_name = host.module_name
 
-        for plan in plans:
-            if layer_num not in plan["layers"]:
-                continue
+        layer_plans = [p for p in plans if layer_num in p["layers"]]
+        if not layer_plans:
+            continue
 
+        # ---- batched: ONE q + ONE k clone for the whole layer, sliced as views ----
+        snap_q = snap_k = None
+        if _BATCHED_EGRESS:
+            # Snapshot index j == buffer row j+1 == flat column j, so a plan's flat span
+            # [start, end) maps to snapshot[start:end]. W bounds it by the furthest column
+            # any capturing request used (<= cap). Sentinel-routed gaps are copied but
+            # never sliced into a bucket. The snapshot IS the GPU residency (views share
+            # its storage), so the drain/byte gauge is noted ONCE per layer here.
+            W = max(p["end"] for p in layer_plans)
+            snap_k = k_buf[1:W + 1, :].detach().clone()
+            snap_q = q_buf[1:W + 1, :].detach().clone()
+            nbytes = (snap_k.numel() * snap_k.element_size()
+                      + snap_q.numel() * snap_q.element_size())
+            PROF.gauge("captured.bytes.qk", nbytes)
+            if dm is not None:
+                dm.note(nbytes)
+
+        for plan in layer_plans:
             start = plan["start"]
             end = plan["end"]
             abs_end = plan["abs_end"]
@@ -903,12 +939,14 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             req_id = plan["req_id"]
             req_mode = plan["hookq_mode"]
 
-            # W3 incremental: clone only THIS step's NEW keys (flat rows [start+1,end+1)),
-            # O(1) rows/decode step instead of the O(seq_len) full-prefix clone. ALWAYS
-            # appended (even on a last_token mid-prefill chunk that emits no q) so the
-            # k_all list is the complete in-order history; flush reconstructs the exact
-            # growing prefixes from it + k_prefix_ends, byte-identical to eager.
-            k_new = k_buf[start + 1:end + 1, :].detach().clone()
+            # W3 incremental: only THIS step's NEW keys (flat rows [start+1,end+1)),
+            # O(1) rows/decode step. ALWAYS appended (even a last_token mid-prefill chunk
+            # that emits no q) so the k_all list is the complete in-order history; flush
+            # reconstructs the growing prefixes from it + k_prefix_ends, byte-identical.
+            if _BATCHED_EGRESS:
+                k_new = snap_k[start:end]                       # view into the snapshot
+            else:
+                k_new = k_buf[start + 1:end + 1, :].detach().clone()
 
             bucket = getattr(worker, plan["bucket_key"])
             if req_id not in bucket:
@@ -920,25 +958,28 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                     "layer_num": layer_num, "hookq_mode": req_mode,
                 }
             layer_states[module_name]["k_all"].append(k_new)
-            nbytes = k_new.numel() * k_new.element_size()
+            nbytes = 0 if _BATCHED_EGRESS else k_new.numel() * k_new.element_size()
 
             if emit_q:
                 # q = this step's queries (all_tokens) or its last token (last_token);
-                # flat row `end` is the last scattered column (end-1) + 1.
+                # flat row `end` is the last scattered column (end-1) + 1 → snapshot[end-1].
                 if req_mode == "all_tokens":
-                    q_tok = q_buf[start + 1:end + 1, :].detach().clone()
+                    q_tok = snap_q[start:end] if _BATCHED_EGRESS \
+                        else q_buf[start + 1:end + 1, :].detach().clone()
                 else:
-                    q_tok = q_buf[end, :].detach().clone()
+                    q_tok = snap_q[end - 1] if _BATCHED_EGRESS \
+                        else q_buf[end, :].detach().clone()
                 layer_states[module_name]["q"].append(q_tok)
                 layer_states[module_name]["k_prefix_ends"].append(int(abs_end))
-                nbytes += q_tok.numel() * q_tok.element_size()
+                if not _BATCHED_EGRESS:
+                    nbytes += q_tok.numel() * q_tok.element_size()
 
             PROF.incr("hook.fire.qk")
-            PROF.gauge("captured.bytes.qk", nbytes)
-            # W4: accrue GPU-resident clone bytes for the budget-driven drain.
-            dm = getattr(worker, "_capture_drain", None)
-            if dm is not None:
-                dm.note(nbytes)
+            # Batched already noted the snapshot bytes once per layer above.
+            if not _BATCHED_EGRESS:
+                PROF.gauge("captured.bytes.qk", nbytes)
+                if dm is not None:
+                    dm.note(nbytes)
 
 
 # ---------------------------------------------------------------------------
@@ -1195,6 +1236,8 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     if worker._capture_drain.enabled:
         print(f"[graph/install] capture drain enabled: budget="
               f"{worker._capture_drain.budget_bytes} bytes")
+    if _BATCHED_EGRESS:
+        print("[graph/install] batched egress ON (1 clone/layer + per-request views)")
 
     orig_execute_model = model_runner.execute_model
 

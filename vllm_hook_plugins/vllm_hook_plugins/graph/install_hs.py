@@ -43,6 +43,10 @@ _DEBUG = os.environ.get("VLLM_HOOK_QK_DEBUG", "1") == "1"
 #             absorbed into the decode cudagraph — the FULL_DECODE_ONLY path.
 _CAPTURE_MODE_HS = os.environ.get("VLLM_HOOK_HS_CAPTURE", "op")
 
+# Batched egress (prototype, shared knob with QK): one clone per layer + per-request
+# views instead of one clone per (layer, request). See graph/install.py::_egress.
+_BATCHED_EGRESS = os.environ.get("VLLM_HOOK_BATCHED_EGRESS") == "1"
+
 # Per-step debug-print budget for the routing/egress wrapper.
 _dbg_hs_call_n = [0]
 _DBG_HS_MAX_CALLS = 6
@@ -484,37 +488,59 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
     last_token: the request's final row; all_tokens: the [start+1, end+1) slice.
     No prefix-K — the residual stream is per-token, so the scattered rows ARE the
     artifact (contrast QK, where k_all reconstructs the cached key history).
+
+    With ``VLLM_HOOK_BATCHED_EGRESS=1`` the per-(layer, request) clones become ONE clone
+    per layer (a per-step SNAPSHOT of the active flat-column prefix) plus per-request
+    VIEWS — O(num_layers) launches instead of O(num_layers * num_requests), same data.
     """
     if not plans:
         return
+    dm = getattr(worker, "_capture_drain", None)
     for layer_num, host in registry.iter_hosts():
         hs_buf = host.hs_buf          # (cap+1, hidden)
         module_name = host.module_name
         ln = host.egress_layer_num    # 1-based, matching the eager artifact
         cap = host.cap
-        for plan in plans:
-            if layer_num not in plan["layers"]:
-                continue
+
+        layer_plans = [p for p in plans if layer_num in p["layers"]]
+        if not layer_plans:
+            continue
+
+        # ---- batched: ONE clone for the layer; requests take views ----
+        snap = None
+        if _BATCHED_EGRESS:
+            # Snapshot index j == buffer row j+1 == flat column j; plan span [start, end)
+            # → snap[start:end], last_token row → snap[end-1]. The snapshot is the GPU
+            # residency (views share it), so note the drain/gauge ONCE per layer.
+            W = max(p["end"] for p in layer_plans)
+            snap = hs_buf[1:W + 1, :].detach().clone()
+            nbytes = snap.numel() * snap.element_size()
+            PROF.gauge("captured.bytes.hs", nbytes)
+            if dm is not None:
+                dm.note(nbytes)
+
+        for plan in layer_plans:
             start = plan["start"]
             end = plan["end"]
             req_id = plan["req_id"]
             req_mode = plan["hs_mode"]
 
-            # Rows are start+1 .. end (sentinel-offset). Clone so we own the data
-            # (buffers are overwritten next step).
-            if req_mode == "last_token":
+            # Rows are start+1 .. end (sentinel-offset). Per-request path clones so we own
+            # the data; batched path takes a view into the per-step snapshot.
+            if _BATCHED_EGRESS:
+                hs_tok = snap[end - 1] if req_mode == "last_token" else snap[start:end]
+            elif req_mode == "last_token":
                 last_row = min(end, cap)  # row (end-1)+1 == end, bounded by cap
                 hs_tok = hs_buf[last_row, :].detach().clone()
             else:
                 hs_tok = hs_buf[start + 1:end + 1, :].detach().clone()
 
-            nbytes = hs_tok.numel() * hs_tok.element_size()
             PROF.incr("hook.fire.hs")
-            PROF.gauge("captured.bytes.hs", nbytes)
-            # W4: accrue GPU-resident clone bytes for the budget-driven drain.
-            dm = getattr(worker, "_capture_drain", None)
-            if dm is not None:
-                dm.note(nbytes)
+            if not _BATCHED_EGRESS:
+                nbytes = hs_tok.numel() * hs_tok.element_size()
+                PROF.gauge("captured.bytes.hs", nbytes)
+                if dm is not None:
+                    dm.note(nbytes)
 
             bucket = getattr(worker, plan["bucket_key"])
             if req_id not in bucket:
@@ -561,6 +587,8 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
     if worker._capture_drain.enabled:
         print(f"[graph/install_hs] capture drain enabled: budget="
               f"{worker._capture_drain.budget_bytes} bytes")
+    if _BATCHED_EGRESS:
+        print("[graph/install_hs] batched egress ON (1 clone/layer + per-request views)")
 
     orig_execute_model = model_runner.execute_model
 
