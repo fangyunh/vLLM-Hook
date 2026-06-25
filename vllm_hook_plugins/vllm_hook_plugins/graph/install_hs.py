@@ -526,6 +526,23 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
             req_id = plan["req_id"]
             req_mode = plan["hs_mode"]
 
+            # Stage 3 admission throttle (placed ABOVE the clone/note/gauge — HS accounts
+            # bytes before its bucket gate, so throttling only at the gate would still
+            # clone + double-count). Skip a throttled request uniformly; refuse a NEW
+            # request only over the resident ceiling; never throttle an admitted one.
+            bucket = getattr(worker, plan["bucket_key"])
+            if dm is not None and dm.throttle_enabled:
+                if req_id in dm._throttled:
+                    continue
+                if req_id not in bucket and not dm.admit(req_id, False):
+                    PROF.incr("capture.throttled")
+                    if _DEBUG and _capture_dbg.get("thr", 0) < 8:
+                        _capture_dbg["thr"] = _capture_dbg.get("thr", 0) + 1
+                        print(f"[graph/dbg-hs] capture throttled (resident ceiling) "
+                              f"req={str(req_id)[:8]} resident={dm.resident_bytes}B "
+                              f"ceiling={dm.ceiling_bytes}B", flush=True)
+                    continue
+
             # Rows are start+1 .. end (sentinel-offset). Per-request path clones so we own
             # the data; batched path takes a view into the per-step snapshot.
             if _BATCHED_EGRESS:
@@ -542,11 +559,14 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
             # eager paths regardless of batching.
             nbytes = hs_tok.numel() * hs_tok.element_size()
             PROF.gauge("captured.bytes.hs", nbytes)
+            # Stage 3: accrue the per-request REDUCED bytes (batching-invariant; matches
+            # the decrement-on-pop at flush). NOT the W-row snapshot dm.note charges.
+            if dm is not None:
+                dm.note_resident(nbytes)
             # Batched already noted the snapshot's GPU residency once per layer above.
             if not _BATCHED_EGRESS and dm is not None:
                 dm.note(nbytes)
 
-            bucket = getattr(worker, plan["bucket_key"])
             if req_id not in bucket:
                 bucket[req_id] = {}
             layer_states = bucket[req_id]

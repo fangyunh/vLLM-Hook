@@ -288,7 +288,12 @@ async def _patched_generate(
                         output.probes = probes
             yield output
     finally:
-        if needs_hooks and not wants_steer and not save_to_disk:
+        # Cleanup on abort/disconnect. Runs for BOTH paths: on normal completion the
+        # bucket was already popped (get_captured_states / flush_disk), so this clear is a
+        # no-op; on an abort BEFORE output.finished it releases the orphan bucket — which
+        # for save_to_disk also releases the Stage-3 resident-byte counter (else an aborted
+        # disk-mode request leaks it and can wedge the admission ceiling).
+        if needs_hooks and not wants_steer:
             await self.collective_rpc("clear_captured_states", args=(request_id,))
 
 

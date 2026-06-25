@@ -993,6 +993,23 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             req_id = plan["req_id"]
             req_mode = plan["hookq_mode"]
 
+            # Stage 3 admission throttle: skip a throttled request uniformly (every layer,
+            # every later step) BEFORE any clone/prefix-K read, so no half-captured
+            # artifact. A NEW request (not yet in a bucket) is refused only when over the
+            # resident ceiling; an already-admitted request is never throttled mid-stream.
+            bucket = getattr(worker, plan["bucket_key"])
+            if dm is not None and dm.throttle_enabled:
+                if req_id in dm._throttled:
+                    continue
+                if req_id not in bucket and not dm.admit(req_id, False):
+                    PROF.incr("capture.throttled")
+                    if _DEBUG and _capture_dbg.get("thr", 0) < 8:
+                        _capture_dbg["thr"] = _capture_dbg.get("thr", 0) + 1
+                        print(f"[graph/dbg] capture throttled (resident ceiling) "
+                              f"req={str(req_id)[:8]} resident={dm.resident_bytes}B "
+                              f"ceiling={dm.ceiling_bytes}B", flush=True)
+                    continue
+
             # W3 incremental: only THIS step's NEW keys (flat rows [start+1,end+1)),
             # O(1) rows/decode step. ALWAYS appended (even a last_token mid-prefill chunk
             # that emits no q) so the k_all list is the complete in-order history; flush
@@ -1002,7 +1019,6 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             else:
                 k_new = k_buf[start + 1:end + 1, :].detach().clone()
 
-            bucket = getattr(worker, plan["bucket_key"])
             if req_id not in bucket:
                 bucket[req_id] = {}
             layer_states = bucket[req_id]
@@ -1057,6 +1073,10 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
 
             PROF.incr("hook.fire.qk")
             PROF.gauge("captured.bytes.qk", nbytes)
+            # Stage 3: accrue the per-request REDUCED bytes (batching-invariant; matches
+            # the decrement-on-pop at flush). NOT the W-row snapshot dm.note charges.
+            if dm is not None:
+                dm.note_resident(nbytes)
             # Batched already noted the snapshot's GPU residency once per layer above;
             # the per-request path drains the reduced clone it just made.
             if not _BATCHED_EGRESS and dm is not None:
