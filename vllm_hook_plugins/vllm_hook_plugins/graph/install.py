@@ -824,6 +824,10 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
             "end": end,
             "abs_end": abs_end,
             "emit_q": emit_q,
+            # Cached-prefix length: keys [0, num_computed) the scheduler skipped
+            # forwarding on this request's first chunk (prefix caching). Egress reads
+            # them back from paged KV on the first capture step so k_all is complete.
+            "num_computed": num_computed,
             "layers": req_layers,
             "hookq_mode": req_mode,
             "bucket_key": bucket_key,
@@ -841,6 +845,55 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
 # ---------------------------------------------------------------------------
 # Egress: drain the static buffers into the reuse-contract worker buckets
 # ---------------------------------------------------------------------------
+
+
+def _read_cached_keys_buffer(model_runner, module_name, req_idx: int,
+                             num_cached: int):
+    """Read the ``[0, num_cached)`` cached prefix keys for request ``req_idx``
+    directly from the persistent paged KV cache + this step's block table — the
+    OFF-GRAPH, post-forward analogue of the eager ``_read_cached_keys``.
+
+    When prefix caching is active, the scheduler trims a prompt's shared prefix
+    (``num_computed_tokens`` starts at the cached length C) so those C keys are
+    NEVER forwarded → the static-buffer scatter never sees them. The eager path
+    reads them back from paged KV mid-forward; buffer-mode egress runs post-forward
+    (``get_forward_context()`` is gone), so we read the SAME data from persistent
+    sources instead of an in-forward stash — which would graph-break the FULL decode
+    graph (the reason ``_PREFIXK_STASH`` stayed off):
+
+      * kv_cache    — ``compilation_config.static_forward_context[name]`` is the same
+                      persistent Attention layer ``get_forward_context().no_compile_layers``
+                      exposes; its ``.kv_cache`` blocks outlive the forward.
+      * block table — ``input_batch.block_table`` is committed (H2D) in ``_prepare_inputs``
+                      this step and indexed by the SAME input-batch slot ``req_idx`` the
+                      routing uses, so row ``req_idx`` is current at egress.
+
+    Returns a CLONE ``(num_cached, num_kv_heads*head_size)`` on the cache device, or
+    None on any error (caller degrades to forwarded-only keys — never crashes). The
+    bounds guard is load-bearing: an out-of-range block id makes the gather an
+    UNRECOVERABLE device-side assert.
+    """
+    try:
+        sfc = model_runner.vllm_config.compilation_config.static_forward_context
+        layer = sfc.get(module_name)
+        if layer is None:
+            return None
+        key_cache = key_cache_from_layer_kv(layer.kv_cache)
+        num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
+
+        mgbt = model_runner.input_batch.block_table
+        num_reqs = model_runner.input_batch.num_reqs
+        block_table = mgbt.block_tables[0].get_device_tensor(num_reqs)
+        num_blocks_needed = math.ceil(num_cached / block_size)
+        block_ids = block_table[req_idx, :num_blocks_needed]
+        if block_ids.numel() == 0 or int(block_ids.max()) >= num_blocks \
+                or int(block_ids.min()) < 0:
+            return None
+
+        prefix_keys = key_cache[block_ids].reshape(-1, num_kv_heads * head_size)
+        return prefix_keys[:num_cached].detach().clone()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _read_cached_keys_from_ctx(
@@ -953,16 +1006,41 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             if req_id not in bucket:
                 bucket[req_id] = {}
             layer_states = bucket[req_id]
+            nbytes = 0
             if module_name not in layer_states:
                 layer_states[module_name] = {
                     "q": [], "k_all": [], "k_prefix_ends": [],
                     "layer_num": layer_num, "hookq_mode": req_mode,
                 }
+                # FIRST capture step for this (request, layer). Prefix caching trims a
+                # shared prompt prefix (num_computed > 0) so those keys were never
+                # forwarded into the buffer — read them back from paged KV ONCE and
+                # prepend them as k_all[0] so the flush-time growing-prefix
+                # reconstruction (full[:abs_end]) yields the COMPLETE key history,
+                # matching eager. Absent prefix caching num_computed is 0 → no-op.
+                num_computed = plan.get("num_computed", 0)
+                if num_computed > 0 and not _NO_PREFIXK:
+                    PROF.incr("kv.prefix_recon")
+                    with PROF.timed("kv.prefix_recon"):
+                        prefix_k = _read_cached_keys_buffer(
+                            worker.model_runner, module_name,
+                            plan["req_idx"], num_computed)
+                    if prefix_k is not None:
+                        prefix_k = prefix_k.to(device=k_new.device, dtype=k_new.dtype)
+                        layer_states[module_name]["k_all"].append(prefix_k)
+                        nbytes += prefix_k.numel() * prefix_k.element_size()
+                        if _DEBUG and _capture_dbg.get("pkb", 0) < 8:
+                            _capture_dbg["pkb"] = _capture_dbg.get("pkb", 0) + 1
+                            print(f"[graph/dbg] buffer prefixK layer={layer_num} "
+                                  f"req={str(req_id)[:8]} num_cached={num_computed} "
+                                  f"prefix_k={tuple(prefix_k.shape)}", flush=True)
+                    else:
+                        PROF.incr("kv.prefix_recon.errors")
             layer_states[module_name]["k_all"].append(k_new)
             # SAVED bytes = this reduced view/clone (NOT the W-row snapshot). .numel() on a
             # view returns its logical (reduced) element count, so this is byte-identical to
             # the per-request and eager paths regardless of batching.
-            nbytes = k_new.numel() * k_new.element_size()
+            nbytes += k_new.numel() * k_new.element_size()
 
             if emit_q:
                 # q = this step's queries (all_tokens) or its last token (last_token);
