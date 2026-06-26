@@ -67,6 +67,7 @@
   th,td{border:1px solid var(--line); padding:9px 12px; text-align:left; vertical-align:top;}
   th{background:var(--panel2); color:var(--ink); font-weight:600;}
   td.good{color:var(--good);} td.bad{color:var(--bad);} td.mut{color:var(--warn);}
+  td.num{font-variant-numeric:tabular-nums; text-align:right; font-family:"SF Mono",monospace; font-size:13px;}
   tbody tr:nth-child(even){background:rgba(255,255,255,.015);}
   /* legend chips */
   .legend{display:flex; flex-wrap:wrap; gap:14px; margin:6px 0 0; font-size:12.5px; color:var(--muted);}
@@ -94,23 +95,28 @@
   <a href="#placement"><span class="n">03</span>Placement: the baked op</a>
   <a href="#behavior"><span class="n">04</span>Behavior: the data plane</a>
   <a href="#memory"><span class="n">05</span>Where data lives</a>
+  <div class="grp">Sizing</div>
+  <a href="#buffers"><span class="n">06</span>Buffers &amp; how to size them</a>
   <div class="grp">The workflow</div>
-  <a href="#flow"><span class="n">06</span>Prefill &amp; decode</a>
-  <a href="#walkthrough"><span class="n">07</span>Walkthrough by integers</a>
-  <a href="#capture"><span class="n">08</span>Capture data path</a>
-  <a href="#steer"><span class="n">09</span>Steering</a>
+  <a href="#flow"><span class="n">07</span>Prefill &amp; decode</a>
+  <a href="#walkthrough"><span class="n">08</span>Walkthrough by integers</a>
+  <a href="#capture"><span class="n">09</span>Capture data path</a>
+  <a href="#steer"><span class="n">10</span>Steering</a>
+  <div class="grp">Scaling</div>
+  <a href="#load"><span class="n">11</span>Memory under load</a>
   <div class="grp">The payoff</div>
-  <a href="#perf"><span class="n">10</span>Performance &amp; status</a>
+  <a href="#perf"><span class="n">12</span>Performance &amp; status</a>
 </nav>
 
 <main>
 <header class="hero">
-  <span class="tag">v0.5.0 · Design Note</span>
+  <span class="tag">v0.5.4 · Design Note</span>
   <h1>Hooking model internals under a&nbsp;FULL CUDA graph</h1>
   <p class="lede">Capturing attention, hidden states, and steering the residual stream — while the
   step is a frozen sequence of GPU kernels and <em>no Python ever runs again</em>. We turn
   <code>cudagraph_mode=FULL</code> on and let vLLM decide, per step, whether to replay a graph or
-  run eagerly; our hook is correct either way, and faster than the eager hook it replaces.</p>
+  run eagerly; our hook is correct either way, faster than the eager hook it replaces, and — under
+  high-throughput continuous batching — bounded in memory so capture does not OOM the engine.</p>
 </header>
 
 <!-- 00 ----------------------------------------------------------- -->
@@ -322,7 +328,7 @@
   vec_id = v</code> across request <em>r</em>&rsquo;s tokens steers that request by vector <em>v</em>
   at strength <em>c</em>. A per-token <code>steer_mode</code> mask unifies both methods —
   <code>add_vector</code> (host coefficient) and <code>adjust_rs</code> (coefficient computed
-  in-kernel from the live residual) — so one batch can mix them (full diagram in §09).</p>
+  in-kernel from the live residual) — so one batch can mix them (full diagram in §10).</p>
 </section>
 
 <!-- 05 ----------------------------------------------------------- -->
@@ -425,35 +431,115 @@
   never the artifact. The growing artifact accumulates in per-request buckets as cheap GPU clones;
   the expensive <code>.cpu()</code> happens once, at request end. Per step we add <b>no</b>
   host&harr;GPU sync — the only syncs are vLLM&rsquo;s own input-prep event and the once-per-request
-  flush.</figcaption>
+  flush. (The per-request buckets are the one plane <em>not</em> sized at construction; §11 covers
+  how they stay bounded under load.)</figcaption>
   </figure>
-
-  <h3>Sizing the buffers — the equation</h3>
-  <p>Every static buffer is allocated once at <code>load_model</code> (before capture, so its
-  data-ptr is fixed) and sized from model dims and a single scheduler knob. The driver is
-  <strong><code>cap = max_num_batched_tokens</code></strong> — the largest single-step token count —
-  <em>not</em> <code>max_model_len</code>: flat per-step routing only ever stages one step&rsquo;s
-  tokens, so the buffer is sized to one batch, not the whole sequence.</p>
-  <pre><code><span class="cmt"># per worker, summed over the L hooked layers · b = dtype bytes (2 fp16/bf16, 4 fp32)</span>
-QK    bytes = L · (cap + 1) · (q_dim + k_dim) · b
-HS    bytes = L · (cap + 1) · d_model · b
-route bytes = L · cap · 8           <span class="cmt"># int64 capture_index (+ tiny any_active)</span>
-steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(layer,token) coeff/vec_id slabs)</span>
-
-  cap     = max_num_batched_tokens   <span class="cmt"># the +1 row is the row-0 discard sentinel</span>
-  q_dim   = n_heads    · d_head
-  k_dim   = n_kv_heads · d_head      <span class="cmt"># grouped-query: usually &lt; q_dim</span>
-  d_model = hidden size  ·  L = hooked layers  ·  V_max = steering vector-table capacity</code></pre>
-  <p class="muted">Example — Qwen2-1.5B (<code>L=28</code>, <code>q_dim=1536</code>,
-  <code>k_dim=256</code>, fp32) at <code>cap=2048</code>:
-  28 · 2049 · (1536+256) · 4 &asymp; <strong>392 MiB</strong> of QK scratch — exactly what the worker
-  logs. It scales linearly in <code>cap</code>, so <code>cap=16384</code> is 8&times; that. Densifying
-  <code>cudagraph_capture_sizes</code> changes how many steps replay, not this footprint.</p>
 </section>
 
 <!-- 06 ----------------------------------------------------------- -->
+<section id="buffers">
+  <h2><span class="num">06</span>Buffers &amp; how to size them <span class="pill done">Granite-3.1-8B worked example</span></h2>
+  <div class="rule"></div>
+  <p>Everything the graph reads or writes is allocated <strong>once</strong> at <code>load_model</code> —
+  before vLLM compiles or captures, so every <code>data_ptr</code> is frozen for the lifetime of the
+  replays. There are four families of fixed allocation, sized purely from <em>model dims</em> and a
+  single scheduler knob. (The fifth memory plane, the per-request artifact buckets, is <em>not</em>
+  pre-sized — it grows with decode and is bounded at runtime; see §11.)</p>
+
+  <h3>The one knob that drives every size</h3>
+  <p>The driver is <strong><code>cap = max_num_batched_tokens</code></strong> — the largest number of
+  tokens one step may carry — <em>not</em> <code>max_model_len</code>. Flat per-step routing (§09)
+  only ever stages <em>one step&rsquo;s</em> tokens into the buffers, so a buffer is sized to a single
+  batch, never to a whole sequence. The static buffers also carry a <strong>+1 row</strong>: row 0 is
+  the write-only discard sentinel.</p>
+
+  <h3>What each worker allocates</h3>
+  <table>
+    <thead><tr><th>Plane</th><th>Buffer</th><th>Shape</th><th>dtype</th><th>Where</th><th>Workers</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="3">① scratch<br><span class="muted">(the mailboxes)</span></td><td><code>q_buf</code></td><td><code>(cap+1, q_dim)</code></td><td>model</td><td>GPU</td><td>QK</td></tr>
+      <tr><td><code>k_buf</code></td><td><code>(cap+1, k_dim)</code></td><td>model</td><td>GPU</td><td>QK</td></tr>
+      <tr><td><code>hs_buf</code></td><td><code>(cap+1, hidden)</code></td><td>model</td><td>GPU</td><td>HS</td></tr>
+      <tr><td rowspan="2">② route slab<br><span class="muted">(the labels)</span></td><td><code>capture_index_all</code></td><td><code>(L, cap)</code></td><td>int64</td><td>GPU</td><td>QK, HS</td></tr>
+      <tr><td><code>any_active</code></td><td><code>(L,)</code></td><td>int32</td><td>GPU</td><td>QK, HS</td></tr>
+      <tr><td rowspan="3">③ steer slabs<br>+ tables</td><td><code>coeff_all</code></td><td><code>(L, cap)</code></td><td>fp32</td><td>GPU</td><td>steer</td></tr>
+      <tr><td><code>vec_id_all</code> · <code>mode_all</code></td><td><code>(L, cap)</code> ×2</td><td>int64</td><td>GPU</td><td>steer</td></tr>
+      <tr><td><code>vec_table</code> · <code>avg_proj_table</code></td><td><code>(V_max, hidden)</code> · <code>(V_max,)</code></td><td>model · fp32</td><td>GPU</td><td>steer</td></tr>
+      <tr><td>④ pinned ring<br><span class="muted">(staging, W2)</span></td><td>mirror of ② or ③ × <code>ring_depth</code></td><td>same as mirrored slabs</td><td>same</td><td>pinned host</td><td>all</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">The steer worker owns <strong>no scratch buffer</strong> — it mutates the residual
+  in place (§10), so its only state is the routing slabs and the resident vector tables. The route
+  slab (②) is shared verbatim by QK and HS — both drive the same <code>index_copy_</code> scatter.</p>
+
+  <h3>The sizing functions</h3>
+  <pre><code><span class="cmt"># model dims (b = dtype bytes: bf16/fp16 → 2, fp32 → 4)</span>
+b       = dtype_bytes          <span class="cmt"># element size of the model's activations</span>
+q_dim   = n_heads    * d_head  <span class="cmt"># query width</span>
+k_dim   = n_kv_heads * d_head  <span class="cmt"># key width (GQA: usually &lt; q_dim)</span>
+hidden  = d_model              <span class="cmt"># residual width</span>
+cap     = max_num_batched_tokens   <span class="cmt"># the +1 row is the row-0 discard sentinel</span>
+
+<span class="kw">def</span> <span class="fn">qk_scratch_bytes</span>(L, cap, q_dim, k_dim, b):     <span class="cmt"># ① QK worker</span>
+    <span class="kw">return</span> L * (cap + 1) * (q_dim + k_dim) * b
+
+<span class="kw">def</span> <span class="fn">hs_scratch_bytes</span>(L, cap, hidden, b):          <span class="cmt"># ① HS worker</span>
+    <span class="kw">return</span> L * (cap + 1) * hidden * b
+
+<span class="kw">def</span> <span class="fn">route_slab_bytes</span>(L, cap):                     <span class="cmt"># ② QK + HS</span>
+    <span class="kw">return</span> L * cap * 8  +  L * 4        <span class="cmt"># capture_index int64 + any_active int32</span>
+
+<span class="kw">def</span> <span class="fn">steer_slab_bytes</span>(L, cap):                     <span class="cmt"># ③ steer slabs</span>
+    <span class="kw">return</span> L * cap * (4 + 8 + 8)         <span class="cmt"># coeff fp32 + vec_id int64 + mode int64</span>
+
+<span class="kw">def</span> <span class="fn">steer_table_bytes</span>(V_max, hidden, b):          <span class="cmt"># ③ resident vector library</span>
+    <span class="kw">return</span> V_max * hidden * b  +  V_max * 4
+
+<span class="kw">def</span> <span class="fn">pinned_ring_bytes</span>(per_step_slab_bytes, ring_depth=2):   <span class="cmt"># ④ host staging</span>
+    <span class="kw">return</span> ring_depth * per_step_slab_bytes</code></pre>
+
+  <h3>Granite-3.1-8B, plugged in</h3>
+  <p>Take the Granite-3.1-8B model — <strong>L = 32 hooked layers</strong>, <code>hidden = 4096</code>,
+  <code>n_heads = 32</code>, <code>n_kv_heads = 8</code>, <code>d_head = 128</code>, weights in
+  <strong>bf16</strong> (<code>b = 2</code>). So <code>q_dim = 32·128 = 4096</code> and
+  <code>k_dim = 8·128 = 1024</code> (GQA shrinks the key buffer 4×). Steering uses the default vector
+  table <code>V_max = 16</code> and a pinned ring of depth 2. At <code>cap = 2048</code>:</p>
+
+  <table>
+    <thead><tr><th>Buffer (function)</th><th>Granite-8B substitution</th><th class="num">bytes</th><th class="num">size</th></tr></thead>
+    <tbody>
+      <tr><td>① <code>qk_scratch_bytes</code></td><td>32 · 2049 · (4096+1024) · 2</td><td class="num">671,416,320</td><td class="num">640.3 MiB</td></tr>
+      <tr><td>① <code>hs_scratch_bytes</code></td><td>32 · 2049 · 4096 · 2</td><td class="num">537,133,056</td><td class="num">512.3 MiB</td></tr>
+      <tr><td>② <code>route_slab_bytes</code></td><td>32 · 2048 · 8 + 32 · 4</td><td class="num">524,416</td><td class="num">0.50 MiB</td></tr>
+      <tr><td>③ <code>steer_slab_bytes</code></td><td>32 · 2048 · 20</td><td class="num">1,310,720</td><td class="num">1.25 MiB</td></tr>
+      <tr><td>③ <code>steer_table_bytes</code></td><td>16 · 4096 · 2 + 16 · 4</td><td class="num">131,136</td><td class="num">0.13 MiB</td></tr>
+      <tr><td>④ pinned ring · capture (×2)</td><td>2 · route_slab</td><td class="num">1,048,832</td><td class="num">1.00 MiB</td></tr>
+      <tr><td>④ pinned ring · steer (×2)</td><td>2 · steer_slab</td><td class="num">2,621,440</td><td class="num">2.50 MiB</td></tr>
+    </tbody>
+  </table>
+
+  <p>Reading off the per-worker GPU-static footprint: the <strong>QK worker ≈ 641 MiB</strong>
+  (scratch + route slab), the <strong>HS worker ≈ 513 MiB</strong>, and the <strong>steer worker ≈
+  1.4 MiB</strong> (no scratch — slabs + tables only). The capture scratch dominates by three orders
+  of magnitude; the routing/config metadata that actually <em>encodes per-request behavior</em> is
+  under a megabyte.</p>
+
+  <div class="call key">
+    <b class="lbl">Two facts to keep in your head</b>
+    <strong>Linear in <code>cap</code>.</strong> Halve <code>max_num_batched_tokens</code> and the
+    scratch halves; at <code>cap = 8192</code> Granite&rsquo;s QK scratch is ~2.5 GiB and HS ~2.0 GiB.
+    <strong>GQA pays off.</strong> <code>k_dim</code> is <code>q_dim/4</code> here, so
+    <code>k_buf</code> is a quarter of <code>q_buf</code>. Densifying
+    <code>cudagraph_capture_sizes</code> changes how many steps <em>replay</em>, never this footprint.
+  </div>
+  <p class="muted">Cross-check against the worker log: Qwen2-1.5B (<code>L=28</code>,
+  <code>q_dim=1536</code>, <code>k_dim=256</code>, fp32) at <code>cap=2048</code> →
+  28 · 2049 · 1792 · 4 = <strong>392 MiB</strong>, exactly what the QK worker prints.</p>
+</section>
+
+<!-- 07 ----------------------------------------------------------- -->
 <section id="flow">
-  <h2><span class="num">06</span>The per-step workflow: prefill &amp; decode</h2>
+  <h2><span class="num">07</span>The per-step workflow: prefill &amp; decode</h2>
   <div class="rule"></div>
   <p>Every step has the same four beats, bracketing the forward from <em>outside</em> the graph: a
   host routing build, the (replayed or eager) forward where the baked op fires, and a host egress
@@ -535,7 +621,7 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
     <!-- flush row -->
     <rect x="210" y="392" width="668" height="56" rx="10" fill="#160f14" stroke="#ff6b6b" stroke-width="1.2"/>
     <text x="232" y="416" fill="#ff6b6b" font-size="11.5" font-weight="700">FLUSH — once per request (sync)</text>
-    <text x="232" y="434" fill="#9aa3b2" font-size="10.5">reconstruct the growing-prefix k_all from the per-step new-row clones + k_prefix_ends (§08), then a single D2H to CPU → probes / disk.</text>
+    <text x="232" y="434" fill="#9aa3b2" font-size="10.5">reconstruct the growing-prefix k_all from the per-step new-row clones + k_prefix_ends (§09), then a single D2H to CPU → probes / disk.</text>
     <line x1="100" y1="366" x2="100" y2="420" stroke="#ff6b6b" stroke-width="1.3" stroke-dasharray="5 3"/>
     <line x1="100" y1="420" x2="206" y2="420" stroke="#ff6b6b" stroke-width="1.3" stroke-dasharray="5 3" marker-end="url(#at)"/>
   </svg>
@@ -547,9 +633,9 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
   </figure>
 </section>
 
-<!-- 07 ----------------------------------------------------------- -->
+<!-- 08 ----------------------------------------------------------- -->
 <section id="walkthrough">
-  <h2><span class="num">07</span>Walkthrough: one decode step, by the integers</h2>
+  <h2><span class="num">08</span>Walkthrough: one decode step, by the integers</h2>
   <div class="rule"></div>
   <p>Everything so far is abstract — slabs, buffers, views, sentinels. Here is a single decode step
   with <em>real numbers</em> flowing through every object, so the machine stops being a metaphor. We
@@ -575,7 +661,6 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
     <defs>
       <marker id="wv1" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7ee0c0"/></marker>
     </defs>
-
     <!-- ROUTING SLAB -->
     <text x="150" y="28" text-anchor="middle" fill="#ffb86b" font-size="12.5" font-weight="700">ROUTING SLAB</text>
     <text x="150" y="44" text-anchor="middle" fill="#9aa3b2" font-size="10">capture_index_all · (L=2, cap=8) int64</text>
@@ -818,9 +903,9 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
   </div>
 </section>
 
-<!-- 08 ----------------------------------------------------------- -->
+<!-- 09 ----------------------------------------------------------- -->
 <section id="capture">
-  <h2><span class="num">08</span>Capture data path: flat routing &amp; the growing K history</h2>
+  <h2><span class="num">09</span>Capture data path: flat routing, growing K &amp; the cached prefix</h2>
   <div class="rule"></div>
   <p>The hidden-state artifact is simple — the per-token residual stream <em>is</em> the artifact, so
   egress just clones each step&rsquo;s rows. QK has a wrinkle: <code>k_all</code> for a token is the
@@ -847,11 +932,32 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
     eager with a forced-chunked-prefill oracle, including a no-chunk control that isolated the small
     residual diff as the engine&rsquo;s own compiled-vs-eager fp matmul drift, not a capture error.
   </div>
+
+  <h3>The prefix-cache hole — keys that were never forwarded <span class="pill done">v0.5.2</span></h3>
+  <p>Flat routing fixed the chunked-prefill drop, but a continuous-batching server with
+  <code>enable_prefix_caching=True</code> exposes a second, subtler under-capture. When two requests
+  share a prompt prefix, the scheduler does <em>not</em> recompute the shared part: the request starts
+  at <code>num_computed_tokens = C</code> (the cached length) and only the tail is forwarded. Those
+  <em>C</em> cached keys never pass through attention, so the static buffer never sees them — buffer
+  mode would capture only the ~tail, where eager reconstructs the whole history from the paged KV
+  cache mid-forward.</p>
+  <p>The fix lives entirely at <strong>egress</strong> (post-forward, off-graph — no in-forward stash,
+  no graph break). On the <em>first</em> capture step for a <code>(request, layer)</code> where
+  <code>num_computed &gt; 0</code>, we read the <code>[0, C)</code> cached keys straight from the
+  persistent paged KV cache — <code>static_forward_context[name].kv_cache</code> indexed by the
+  request&rsquo;s <code>block_table</code> row — and <strong>prepend</strong> them as
+  <code>k_all[0]</code>. The flush-time <code>full[:abs_end]</code> reconstruction then yields the
+  complete key history, byte-identical to eager. When there is no prefix cache (<code>num_computed ==
+  0</code>) it is a strict no-op, so the FULL-milestone tests cannot regress. Validated on LSF by
+  running the same prompt twice (run 2 is a guaranteed cache hit): <code>num_cached=240</code> +
+  <code>16</code> forwarded = <code>256</code> = the full prompt, matching eager.</p>
+  <p class="muted">HS is deliberately <em>not</em> changed: residuals live in no cache, so neither eager
+  nor buffer can reconstruct a prefix-trimmed residual — they are equally limited and parity holds.</p>
 </section>
 
-<!-- 09 ----------------------------------------------------------- -->
+<!-- 10 ----------------------------------------------------------- -->
 <section id="steer">
-  <h2><span class="num">09</span>Steering: the mutating counterpart <span class="pill done">both methods</span></h2>
+  <h2><span class="num">10</span>Steering: the mutating counterpart <span class="pill done">both methods</span></h2>
   <div class="rule"></div>
   <p>Capture is read-only; steering must <strong>change</strong> the residual so the edit reaches
   every downstream layer. The op declares <code>mutates_args=["residual"]</code> and edits in place —
@@ -905,9 +1011,128 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
   </figure>
 </section>
 
-<!-- 10 ----------------------------------------------------------- -->
+<!-- 11 ----------------------------------------------------------- -->
+<section id="load">
+  <h2><span class="num">11</span>Memory under load: continuous drains &amp; admission throttle <span class="pill plan">v0.5.3–0.5.4 · opt-in</span></h2>
+  <div class="rule"></div>
+  <p>The fixed buffers of §06 are bounded by construction. The one plane that is <em>not</em> is the
+  per-request artifact bucket (§05): egress clones each step&rsquo;s rows GPU&rarr;GPU and
+  <strong>defers the <code>.cpu()</code> to request completion</strong>, so live residency is
+  <code>Σ<sub>in-flight reqs</sub>(layers × tokens × dim)</code> and grows with both concurrency and
+  decode length. Under high-reqs/s continuous batching that overruns memory and the engine OOMs. The
+  same retention policy is shared verbatim by the v0.2.0 eager path — graph mode only shifts where the
+  OOM lands.</p>
+
+  <div class="call bad">
+    <b class="lbl">The cost, made concrete</b>
+    For Granite-8B QK in <code>all_tokens</code> mode, one in-flight request at a 2048-token context
+    holds roughly the same bytes as the <em>entire static QK scratch</em> — ≈640 MiB
+    (<code>L · (P+T) · (q_dim+k_dim) · b</code>). At concurrency N that is N&times; that, held until
+    each request flushes. The clones themselves are cheap; <em>holding them all</em> is the problem.
+  </div>
+
+  <p>Two opt-in stages, armed by <code>VLLM_HOOK_CAPTURE_STREAMING=1</code> (default OFF &rarr; the
+  manager is inert and the parity oracles are byte-for-byte unchanged):</p>
+
+  <figure>
+  <svg viewBox="0 0 900 320" role="img" aria-label="continuous drain to pinned host plus admission throttle">
+    <defs>
+      <marker id="ld" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5ddf9a"/></marker>
+      <marker id="ldb" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ff6b6b"/></marker>
+      <marker id="ldm" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa3b2"/></marker>
+    </defs>
+
+    <!-- admission gate -->
+    <rect x="24" y="40" width="150" height="80" rx="10" fill="#1d212c" stroke="#2a2f3a"/>
+    <text x="99" y="66" text-anchor="middle" fill="#e6e9ef" font-size="12" font-weight="700">new request</text>
+    <text x="99" y="86" text-anchor="middle" fill="#9aa3b2" font-size="10">wants to start</text>
+    <text x="99" y="101" text-anchor="middle" fill="#9aa3b2" font-size="10">capturing</text>
+
+    <path d="M210,80 L268,46 L326,80 L268,114 Z" fill="#2c1f1f" stroke="#ff6b6b" stroke-width="1.4"/>
+    <text x="268" y="76" text-anchor="middle" fill="#ff8a8a" font-size="10" font-weight="700">resident &gt;</text>
+    <text x="268" y="90" text-anchor="middle" fill="#ff8a8a" font-size="10" font-weight="700">ceiling?</text>
+    <line x1="174" y1="80" x2="208" y2="80" stroke="#9aa3b2" stroke-width="1.4" marker-end="url(#ldm)"/>
+    <text x="360" y="44" text-anchor="middle" fill="#ff6b6b" font-size="10" font-weight="700">YES → refuse</text>
+    <text x="360" y="58" text-anchor="middle" fill="#9aa3b2" font-size="9">(log + count; never half-capture)</text>
+    <line x1="290" y1="62" x2="330" y2="50" stroke="#ff6b6b" stroke-width="1.4" marker-end="url(#ldb)"/>
+    <text x="268" y="134" text-anchor="middle" fill="#5ddf9a" font-size="10" font-weight="700">NO → admit ↓</text>
+
+    <!-- GPU residency stack -->
+    <rect x="190" y="150" width="210" height="150" rx="11" fill="#0c1411" stroke="#2f9c7a" stroke-width="1.3"/>
+    <text x="295" y="172" text-anchor="middle" fill="#7ee0c0" font-size="11.5" font-weight="700">GPU-resident clones</text>
+    <g font-size="9" text-anchor="middle">
+      <rect x="206" y="184" width="178" height="20" rx="3" fill="#16302a" stroke="#2f9c7a"/><text x="295" y="198" fill="#9ff0d4">req A · step k clone</text>
+      <rect x="206" y="208" width="178" height="20" rx="3" fill="#16302a" stroke="#2f9c7a"/><text x="295" y="222" fill="#9ff0d4">req B · step k clone</text>
+      <rect x="206" y="232" width="178" height="20" rx="3" fill="#16302a" stroke="#2f9c7a"/><text x="295" y="246" fill="#9ff0d4">req C · step k clone</text>
+    </g>
+    <text x="295" y="272" text-anchor="middle" fill="#ffb86b" font-size="9.5">gpu_bytes = CURRENT residency</text>
+    <text x="295" y="287" text-anchor="middle" fill="#6b7383" font-size="9">+egress · −drain · −on_pop</text>
+
+    <!-- drain stream -->
+    <line x1="400" y1="220" x2="470" y2="220" stroke="#5ddf9a" stroke-width="1.8" marker-end="url(#ld)"/>
+    <text x="435" y="210" text-anchor="middle" fill="#5ddf9a" font-size="9.5">over budget?</text>
+    <rect x="476" y="178" width="190" height="84" rx="11" fill="#102a22" stroke="#2f9c7a" stroke-width="1.4"/>
+    <text x="571" y="200" text-anchor="middle" fill="#7ee0c0" font-size="11" font-weight="700">Stage 1 · async drain</text>
+    <text x="571" y="218" text-anchor="middle" fill="#9aa3b2" font-size="9.5">dedicated copy stream</text>
+    <text x="571" y="232" text-anchor="middle" fill="#9aa3b2" font-size="9.5">D2H → pinned host · event ring</text>
+    <text x="571" y="248" text-anchor="middle" fill="#5ddf9a" font-size="9.5">overlaps decode · gpu_bytes→0</text>
+
+    <line x1="666" y1="220" x2="724" y2="220" stroke="#9aa3b2" stroke-width="1.5" marker-end="url(#ldm)"/>
+    <rect x="728" y="150" width="148" height="150" rx="11" fill="#221a10" stroke="#b9802f" stroke-width="1.3"/>
+    <text x="802" y="172" text-anchor="middle" fill="#ffd9a8" font-size="11" font-weight="700">pinned host</text>
+    <text x="802" y="192" text-anchor="middle" fill="#9aa3b2" font-size="9.5">bounded GPU →</text>
+    <text x="802" y="206" text-anchor="middle" fill="#9aa3b2" font-size="9.5">host holds the</text>
+    <text x="802" y="220" text-anchor="middle" fill="#9aa3b2" font-size="9.5">growing artifact</text>
+    <text x="802" y="244" text-anchor="middle" fill="#a070d8" font-size="9.5">Stage 3 ceiling</text>
+    <text x="802" y="258" text-anchor="middle" fill="#6b7383" font-size="9">caps THIS total →</text>
+    <text x="802" y="272" text-anchor="middle" fill="#6b7383" font-size="9">throttles new reqs</text>
+    <text x="802" y="290" text-anchor="middle" fill="#ff6b6b" font-size="9">flush: .cpu() is a no-op</text>
+  </svg>
+  <figcaption><b>Stage 1 bounds the GPU; Stage 3 bounds the total.</b> Stage 1 drains GPU-resident
+  clones to pinned host every step on a dedicated copy stream (the D2H overlaps decode; a depth-K event
+  ring waits a stale, already-complete event, never the in-flight copy), so GPU residency stays
+  <code>O(ring × snapshot)</code>. Stage 3 tracks total resident bytes and refuses <em>new</em>
+  requests over a ceiling (default 0.5 × host RAM) — an admitted request always runs to completion, so
+  no artifact is ever half-captured. Draining only moves <em>where</em> a tensor lives; values are
+  byte-identical (a pinned tensor&rsquo;s <code>.cpu()</code> returns itself).</figcaption>
+  </figure>
+
+  <div class="call key">
+    <b class="lbl">v0.5.4 — the trigger had to track <em>current</em> residency, not throughput</b>
+    The drain trigger <code>gpu_bytes</code> was first a <strong>monotonic cumulative</strong> counter:
+    it accrued at every egress but was never decremented on flush, so it crossed the budget from sheer
+    throughput even on a <em>fixed-shape</em> workload with no memory pressure (<code>num_preemptions
+    = 0</code>, KV ≤ 10%). Those drains relieved nothing yet cost a periodic burst of pinned-alloc +
+    D2H on the launch thread — a measured <strong>+38–44% TPOT</strong> regression for QK
+    <code>last_token</code> at N16, scaling with capture volume. The fix makes <code>gpu_bytes</code>
+    track <em>current</em> GPU residency: charged the per-request reduced bytes at egress, reset to 0
+    on drain, and decremented on <code>on_pop</code> by the bucket&rsquo;s still-GPU bytes (a
+    host-drained tensor already left the GPU, so it must not re-credit). On fixed-shape, live residency
+    stays well under budget &rarr; <strong>drains never fire</strong> &rarr; the regression is gone;
+    under real continuous-batching pressure residency climbs to the budget &rarr; drains fire &rarr;
+    OOM relief is preserved.
+  </div>
+
+  <table>
+    <thead><tr><th>Knob</th><th>Default</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><code>VLLM_HOOK_CAPTURE_STREAMING</code></td><td><code>0</code> (off)</td><td>Master opt-in — enables both the drain budget and the resident-ceiling throttle.</td></tr>
+      <tr><td><code>VLLM_HOOK_CAPTURE_GPU_BUDGET</code></td><td>0.05 × free GPU</td><td>Fraction of free GPU the clones may occupy before a drain fires (Stage 1). Explicit <code>0</code> disables the drain.</td></tr>
+      <tr><td><code>VLLM_HOOK_CAPTURE_DRAIN_RING</code></td><td><code>3</code></td><td>Depth of the drain event ring, so continuous draining waits a stale event, not the in-flight D2H.</td></tr>
+      <tr><td><code>VLLM_HOOK_CAPTURE_RESIDENT_CEILING(_FRAC)</code></td><td>0.5 × host RAM</td><td>Total resident-byte ceiling (Stage 3). Over it, new requests are refused; <code>≤0</code> = no ceiling.</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">A pooled/shared pinned arena was considered and <strong>rejected</strong>: sharing a
+  drain buffer across requests breaks the ceiling&rsquo;s byte accounting (a shared buffer lives until
+  its last view frees, so <code>resident_bytes</code> would under-count real host RAM). The per-tensor
+  fresh <code>torch.empty(pin_memory=True)</code> is load-bearing for accurate accounting. Stage 2
+  (incremental sink + free to the async-save thread, collapsing the host retention window to N steps)
+  is deferred — Stage 1 + Stage 3 already prevent OOM.</p>
+</section>
+
+<!-- 12 ----------------------------------------------------------- -->
 <section id="perf">
-  <h2><span class="num">10</span>Performance &amp; status <span class="pill done">v0.5.0 · measured</span></h2>
+  <h2><span class="num">12</span>Performance &amp; status <span class="pill done">v0.5.x</span></h2>
   <div class="rule"></div>
   <p>Correctness was v0.4.0; v0.5.0 makes the FULL path <strong>faster than the eager
   <code>register_forward_hook</code> it replaces</strong> — per decode step, graph-vs-eager on the
@@ -922,52 +1147,59 @@ steer bytes = V_max · d_model · b   <span class="cmt"># vec_table (+ per-(laye
     </tbody>
   </table>
 
-  <p>Four optimizations, all riding the buffer-mode discipline:</p>
+  <p>The decode-perf wins ride four optimizations on the buffer-mode discipline:</p>
   <table>
     <thead><tr><th>#</th><th>Optimization</th><th>What it removes</th></tr></thead>
     <tbody>
       <tr><td>W1</td><td><strong>Invalidation routing</strong></td><td>When the batch signature and upload width are unchanged, the device slabs already hold an identical routing — skip reset/build/upload. Steady-state steering decode becomes a pure replay (its key is bit-identical each step).</td></tr>
       <tr><td>W2</td><td><strong>Pinned-mirror ring</strong> (depth 2)</td><td>The per-step CPU&harr;GPU sync a single mirror would force: <code>reset</code> waits on a slot whose H2D upload finished steps ago, not the in-flight one. Routing&rarr;forward stops being serialized.</td></tr>
-      <tr><td>W3</td><td><strong>Incremental egress</strong></td><td>The O(N&sup2;) per-step re-clone of the whole <code>k_all</code> prefix — now O(1) rows/step + flush-time reconstruction (§08). O(N) memory, byte-identical artifact.</td></tr>
-      <tr><td>W4</td><td><strong>Budget-driven drains</strong></td><td>GPU residency under heavy capture: drain GPU&rarr;pinned host on a dedicated copy stream when over a byte budget (default off &rarr; zero behavior change).</td></tr>
+      <tr><td>W3</td><td><strong>Incremental egress</strong></td><td>The O(N&sup2;) per-step re-clone of the whole <code>k_all</code> prefix — now O(1) rows/step + flush-time reconstruction (§09). O(N) memory, byte-identical artifact.</td></tr>
+      <tr><td>W4</td><td><strong>Budget-driven drains</strong></td><td>GPU residency under heavy capture: drain GPU&rarr;pinned host on a dedicated copy stream when over a <em>current-residency</em> budget (§11). Opt-in &rarr; zero behavior change when off.</td></tr>
     </tbody>
   </table>
 
   <h3>What is proven</h3>
   <table>
-    <thead><tr><th>Path</th><th>FULL (graph or eager per step)</th><th>chunked prefill</th><th>multi-request</th><th>AOT</th><th>TP&gt;1</th></tr></thead>
+    <thead><tr><th>Path</th><th>FULL (graph or eager / step)</th><th>chunked prefill</th><th>prefix cache (CB)</th><th>multi-request</th><th>AOT</th><th>TP&gt;1</th></tr></thead>
     <tbody>
-      <tr><td><strong>QK capture</strong></td><td class="good">✓ both configs</td><td class="good">✓ (§08)</td><td class="mut">M5*</td><td class="good">✓</td><td class="mut">M6</td></tr>
-      <tr><td><strong>HS capture</strong></td><td class="good">✓ both configs</td><td class="good">✓</td><td class="good">✓ (flat)</td><td class="good">✓</td><td class="mut">M6</td></tr>
-      <tr><td><strong>Steering</strong></td><td class="good">✓ both methods</td><td class="good">n/a</td><td class="good">✓ selectivity+churn</td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>QK capture</strong></td><td class="good">✓ both configs</td><td class="good">✓ (§09)</td><td class="good">✓ (§09, v0.5.2)</td><td class="mut">M5*</td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>HS capture</strong></td><td class="good">✓ both configs</td><td class="good">✓</td><td class="good">n/a†</td><td class="good">✓ (flat)</td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>Steering</strong></td><td class="good">✓ both methods</td><td class="good">n/a</td><td class="good">n/a</td><td class="good">✓ selectivity+churn</td><td class="good">✓</td><td class="mut">M6</td></tr>
+      <tr><td><strong>Streaming drains</strong> <span class="muted">(§11)</span></td><td class="mut">opt-in‡</td><td class="mut">—</td><td class="mut">—</td><td class="mut">—</td><td class="mut">—</td><td class="mut">M6</td></tr>
     </tbody>
   </table>
   <div class="legend" style="margin:12px 0 18px;">
     <span><i style="background:var(--good)"></i>shipped &amp; parity-proven</span>
-    <span><i style="background:var(--warn)"></i>open milestone</span>
+    <span><i style="background:var(--warn)"></i>open / pending validation</span>
   </div>
   <p class="muted">*QK multi-request: flat routing gives each request a disjoint column range and
   structurally dissolves the old shared-row collision; a chunked multi-request QK batch is not yet
-  separately parity-proven — M5&rsquo;s remaining surface. <strong>M6</strong>: TP&gt;1; and a known
-  watch item — the host-side routing+egress is O(num_layers&times;B), so at high concurrency the CPU,
-  not the GPU, can become the bound for capture; mitigations (batch the egress clone, enable QK W1
-  skip, on-device index) are scoped but unmeasured.</p>
+  separately parity-proven — M5&rsquo;s remaining surface. <strong>†</strong> HS cannot reconstruct a
+  prefix-trimmed residual (no cache stores it), so eager and buffer are equally limited — parity holds.
+  <strong>‡</strong> Streaming drains + ceiling (v0.5.3) and the current-residency trigger (v0.5.4) are
+  implemented, opt-in, and default-off; the CB-OOM GPU validation (drain value-preservation, peak
+  residency, throttle) and the fixed-shape regression re-run are pending. <strong>M6</strong>: TP&gt;1;
+  and a known watch item — host-side routing+egress is O(num_layers&times;B), so at high concurrency the
+  CPU, not the GPU, can become the bound for capture; mitigations (batched egress clone, QK W1 skip,
+  on-device index) are scoped.</p>
 
   <div class="call">
     <b class="lbl">Reference</b>
     Validated by a subprocess-isolated graph-vs-eager numerical oracle on LSF
-    (<code>capture &rarr; eager &rarr; compare</code>), Qwen2-1.5B. Plans/reports:
-    <code>docs/v0.4.0_full_cuda_graph_*.md</code>, <code>docs/v0.5.0_hooked_decode_perf_*.md</code>.
-    Ops: <code>graph/ops.py</code> · Hosts: <code>graph/hosts.py</code> · Routing/egress:
-    <code>graph/install.py</code>, <code>graph/install_hs.py</code>, <code>graph/install_steer.py</code> ·
-    Slabs/ring: <code>graph/registry.py</code>. Harnesses:
-    <code>tests/cuda_graph/tests/{qk_graph,hs_graph,steer_graph,capture_perf,chunked_prefill}/</code>.
+    (<code>capture &rarr; eager &rarr; compare</code>), Qwen2-1.5B + Granite-3.1-8B. Plans/reports:
+    <code>docs/v0.4.0_full_cuda_graph_*.md</code>, <code>docs/v0.5.0_hooked_decode_perf_*.md</code>,
+    <code>docs/v0.5.x_cb_oom_plan.md</code>. Ops: <code>graph/ops.py</code> · Hosts:
+    <code>graph/hosts.py</code> · Routing/egress: <code>graph/install.py</code>,
+    <code>graph/install_hs.py</code>, <code>graph/install_steer.py</code> · Slabs/ring:
+    <code>graph/registry.py</code> · Drains/throttle: <code>graph/drain.py</code>. Harnesses:
+    <code>tests/cuda_graph/tests/{qk_graph,hs_graph,steer_graph,capture_perf,chunked_prefill,prefix_cache,cb_oom}/</code>.
   </div>
 </section>
 
 <p class="muted" style="font-size:12.5px; border-top:1px solid var(--line); padding-top:18px;">
-vLLM-Hook · v0.5.0 FULL CUDA-graph design note · generated 2026-06-24 · mode:
-<span class="kbd">cudagraph_mode=FULL</span> (vLLM dispatches graph vs eager per step) on Qwen2-1.5B.</p>
+vLLM-Hook · v0.5.4 FULL CUDA-graph design note · generated 2026-06-26 · mode:
+<span class="kbd">cudagraph_mode=FULL</span> (vLLM dispatches graph vs eager per step) · buffers sized in
+§06 on Granite-3.1-8B (32 layers).</p>
 
 </main>
 </div>
