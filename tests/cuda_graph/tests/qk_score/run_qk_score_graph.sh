@@ -1,0 +1,51 @@
+#!/bin/bash
+# run_qk_score_graph.sh — v0.6.0 score-capture parity for the GRAPH paths.
+#
+# Captures the score under op-mode (PIECEWISE) and buffer-mode (FULL_DECODE_ONLY),
+# plus the eager QK ground truth, then compares each score against the recompute.
+# Five sequential processes in one job (GPU is exclusive_process).
+#
+# Submit:  bsub -G grp_exploratory < tests/cuda_graph/tests/qk_score/run_qk_score_graph.sh
+# Result:  grep 'score-parity] VERDICT' tests/cuda_graph/logs/qk_score_graph.*.out
+#
+#BSUB -J vllm_hook_qk_score_graph
+#BSUB -gpu "num=1:mode=exclusive_process"
+#BSUB -n 4
+#BSUB -R "rusage[ngpus=1,mem=32GB]"
+#BSUB -o tests/cuda_graph/logs/qk_score_graph.%J.out
+#BSUB -e tests/cuda_graph/logs/qk_score_graph.%J.err
+set -euo pipefail
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate vllm_hook_env
+cd ~/vLLM-Hook
+mkdir -p tests/cuda_graph/logs
+
+export VLLM_DISABLE_COMPILE_CACHE=1
+export VLLM_HOOK_DEMO_MODEL="${VLLM_HOOK_DEMO_MODEL:-Qwen/Qwen2-1.5B-Instruct}"
+export VLLM_HOOK_QK_SCORE_HEAD="${VLLM_HOOK_QK_SCORE_HEAD:-0}"
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+# >1 so the buffer (FULL_DECODE_ONLY) arm actually REPLAYS decode cudagraphs (not just eager
+# prefill) and the score path's multi-pass accumulation is exercised; the harness also
+# asserts the capture op fired (no silent eager fallback). compare still checks the prefill pass.
+export VLLM_HOOK_PARITY_MAX_TOKENS="${VLLM_HOOK_PARITY_MAX_TOKENS:-8}"
+
+WORK="/dev/shm/vllm_hook_${USER}/score_graph_${LSB_JOBID:-manual}"
+mkdir -p "$WORK"
+PY=tests/cuda_graph/tests/qk_score/qk_score_parity.py
+
+echo "[run_qk_score_graph] === 1/5 op-mode (PIECEWISE) score ==="
+VLLM_HOOK_SCORE_GRAPH=1 VLLM_HOOK_QK_CAPTURE=op VLLM_HOOK_CUDAGRAPH_MODE=PIECEWISE \
+    python -u "$PY" capture --mode score --out "$WORK/score_op.pkl"
+
+echo "[run_qk_score_graph] === 2/5 buffer-mode (FULL_DECODE_ONLY) score ==="
+VLLM_HOOK_SCORE_GRAPH=1 VLLM_HOOK_QK_CAPTURE=buffer VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY \
+    python -u "$PY" capture --mode score --out "$WORK/score_buffer.pkl"
+
+echo "[run_qk_score_graph] === 3/5 eager qk ground truth ==="
+python -u "$PY" capture --mode qk --out "$WORK/qk.pkl"
+
+echo "[run_qk_score_graph] === 4/5 compare op vs qk ==="
+python -u "$PY" compare --score "$WORK/score_op.pkl" --qk "$WORK/qk.pkl"
+echo "[run_qk_score_graph] === 5/5 compare buffer vs qk ==="
+python -u "$PY" compare --score "$WORK/score_buffer.pkl" --qk "$WORK/qk.pkl"

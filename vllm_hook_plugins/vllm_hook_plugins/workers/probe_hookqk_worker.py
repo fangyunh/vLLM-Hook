@@ -134,6 +134,77 @@ def _k_all_cpu_list(entry: dict) -> list:
     return [full[:int(L)] for L in prefix_ends]
 
 
+def compute_head_score(q_flat: torch.Tensor, k_flat: torch.Tensor, head: int,
+                       conf: dict, dtype: torch.dtype = torch.float16) -> torch.Tensor:
+    """One head's causal attention score: ``softmax((q_h·k_hᵀ)·mult + causal) -> [S_q, S_k]``.
+
+    The v0.6.0 GPU-side score capture: instead of cloning q/k (all heads) and recomputing
+    in the analyzer, compute the score for ONE head here and flush only that. Matches the
+    analyzer math exactly (``AttntrackerAnalyzer.compute_attention_from_qk`` /
+    ``CorerAnalyzer.get_attn_all``) so the captured score == analyzer recompute for the same
+    head:
+
+      * ``q_flat`` [S_q, H_q·d] — this pass's post-RoPE queries (all_tokens slice).
+      * ``k_flat`` [S_k, H_kv·d] — the FULL key history (prefix reconstructed upstream); S_k ≥ S_q.
+      * ``head``   q-head index in [0, H_q); its KV head under GQA is ``head // (H_q//H_kv)``.
+      * causal: query row r (absolute pos ``offset+r``, ``offset = S_k - S_q`` = prefix-cached
+        count) attends keys ``[0, offset+r]`` — ``tril(diagonal=offset)`` == the analyzer's
+        ``triu(diagonal=-(S_k-S_q))``.
+
+    Matmul/softmax in fp32 (accuracy), stored in ``dtype`` (default fp16: [0,1] values fit
+    fp16's mantissa better than bf16, same 2 bytes). ``conf`` is the worker ``_conf``.
+    """
+    H_q = int(conf["num_attention_heads"])
+    H_kv = int(conf["num_key_value_heads"])
+    d = int(conf["head_dim"])
+    mult = float(conf["attention_multiplier"])
+    S_q = q_flat.shape[0]
+    S_k = k_flat.shape[0]
+    g = max(1, H_q // H_kv)
+    h = int(head) % H_q
+    q_h = q_flat.view(S_q, H_q, d)[:, h, :].float()            # [S_q, d]
+    k_h = k_flat.view(S_k, H_kv, d)[:, h // g, :].float()      # [S_k, d]
+    s = torch.matmul(q_h, k_h.transpose(0, 1)) * mult          # [S_q, S_k] fp32
+    offset = S_k - S_q
+    if S_q > 1 or offset < 0:
+        # Mask non-causal entries. A single query row (decode / last token) at offset==S_k-1
+        # attends to every key, so the mask is a no-op and is skipped for speed.
+        mask = torch.ones(S_q, S_k, dtype=torch.bool, device=s.device).tril(diagonal=offset)
+        s = s.masked_fill(~mask, float("-inf"))
+    return torch.softmax(s, dim=-1).to(dtype)
+
+
+def _scores_from_qk_entry(entry: dict, conf: dict, dtype: torch.dtype = torch.float16) -> list:
+    """Compute per-pass head scores from an accumulated Q/K entry (buffer-mode score).
+
+    Buffer-mode egress stages Q/K exactly like QK capture (so it reuses the routing +
+    growing-``k_all`` reconstruction + prefix-K), then marks the entry ``capture="score"``.
+    Here, at retrieval, we recompute the one-head score ON GPU from those staged tensors and
+    flush only the score — the analyzer's work, moved to the worker. Mirrors
+    ``_k_all_cpu_list``'s prefix reconstruction (``full[:L]`` per recorded ``k_prefix_ends``)
+    so each pass's keys match the eager path; aligns 1:1 with the per-pass ``q`` list (both
+    appended on ``emit_q`` steps). Returns CPU score tensors.
+    """
+    head = int(entry.get("head", 0))
+    # .cpu() every staged tensor BEFORE the cat/compute: the streaming drain
+    # (graph/drain.py) replaces drained list elements in place with pinned-HOST tensors
+    # while post-drain clones stay on GPU, so entry["k_all"]/["q"] can be a CUDA/CPU MIX
+    # — torch.cat over mixed devices raises. Same fix _k_all_cpu_list uses; computing the
+    # score on host at retrieval is value-identical (buffer mode is not perf-profiled).
+    q_list = [t.cpu() for t in entry["q"]]
+    prefix_ends = entry.get("k_prefix_ends")
+    if prefix_ends:
+        full_k = torch.cat([t.cpu() for t in entry["k_all"]], dim=0)
+        k_list = [full_k[:int(L)] for L in prefix_ends]
+    else:
+        k_list = [t.cpu() for t in entry["k_all"]]
+    out = []
+    for q_p, k_p in zip(q_list, k_list):
+        q_p = q_p if q_p.dim() == 2 else q_p.unsqueeze(0)
+        out.append(compute_head_score(q_p, k_p, head, conf, dtype))
+    return out
+
+
 class ProbeHookQKWorker:
     """Mixin injected into vLLM's GPU Worker via worker_extension_cls.
 
@@ -174,6 +245,13 @@ class ProbeHookQKWorker:
 
         # Worker-wide fallback when extra_args["hookq_mode"] is missing.
         self.hookq_mode = "all_tokens"
+
+        # v0.6.0 score capture: worker-wide defaults (per-request extra_args override).
+        # VLLM_HOOK_QK_SCORE=1 flips the worker to flush per-head attention scores
+        # instead of Q/K; VLLM_HOOK_QK_SCORE_HEAD picks the (single) head per layer.
+        self._score_mode_default = os.environ.get("VLLM_HOOK_QK_SCORE", "0") == "1"
+        self._score_head_default = int(os.environ.get("VLLM_HOOK_QK_SCORE_HEAD", "0"))
+        self._score_dtype = torch.float16
 
         # Background I/O thread (shared by all disk-save requests on this worker).
         init_async_save_thread(self, self._background_save_loop, "vllm-hook-qk-io")
@@ -275,17 +353,55 @@ class ProbeHookQKWorker:
 
                 # Per-request mode: extra_args["hookq_mode"] overrides the worker default.
                 req_mode = extra.get("hookq_mode", self.hookq_mode)
+                # v0.6.0: per-request capture mode — "qk" (default) clones Q/K; "score"
+                # computes one head's attention score on-GPU and flushes only that.
+                cap_mode = extra.get("qk_capture",
+                                     "score" if self._score_mode_default else "qk")
 
                 start = int(last_indices[i].item())
                 end = int(last_indices[i + 1].item())
 
                 # With chunked-prefill, in last_token mode, only capture on the final chunk of the prefill
-                # i.e., when computed-after-step reaches num_prompt_tokens
-                if (is_prefill and req_mode == "last_token" and num_computed is not None and num_prompt is not None):
+                # i.e., when computed-after-step reaches num_prompt_tokens. Score mode is
+                # all_tokens (every query row is part of the [S_q,S_k] matrix), so it never
+                # skips a chunk.
+                if (cap_mode != "score" and is_prefill and req_mode == "last_token" and num_computed is not None and num_prompt is not None):
                     chunk_len = end - start
                     if int(num_computed[i]) + chunk_len < int(num_prompt[i]):
                         # Mid-prefill chunk doesn't need capture
                         continue
+
+                # ---- v0.6.0 score mode: flush one head's [S_q, S_k] score, not Q/K ----
+                if cap_mode == "score":
+                    score_head = int(extra.get("score_head", self._score_head_default))
+                    # q/k are views consumed immediately by the matmul — no clone needed.
+                    q_view = input[0][start:end, :].detach()
+                    k_view = input[1][start:end, :].detach()
+                    # Reconstruct the prefix-cache-trimmed keys so k is the FULL history
+                    # (same path as QK mode below); the score needs every key.
+                    if seq_lens is not None and attn_module is not None:
+                        try:
+                            total_len = int(seq_lens[i].item()) if hasattr(seq_lens[i], 'item') else int(seq_lens[i])
+                            num_cached = total_len - (end - start)
+                            if num_cached > 0:
+                                PROF.incr("kv.prefix_recon")
+                                with PROF.timed("kv.prefix_recon"):
+                                    prefix_k = _read_cached_keys(module_name, metadata if not isinstance(metadata, dict) else next(iter(metadata.values())), i, num_cached, total_len)
+                                if prefix_k is not None:
+                                    k_view = torch.cat([prefix_k.to(k_view.device, dtype=k_view.dtype), k_view], dim=0)
+                        except Exception:
+                            PROF.incr("kv.prefix_recon.errors")
+                    score = compute_head_score(q_view, k_view, score_head, self._conf, self._score_dtype)
+                    PROF.incr("hook.fire.qk")
+                    PROF.gauge("captured.bytes.qk", score.numel() * score.element_size())
+                    bucket = self._disk_states if extra.get("save_to_disk") else self._captured_states
+                    if req_id not in bucket:
+                        bucket[req_id] = {}
+                    layer_states = bucket[req_id]
+                    if module_name not in layer_states:
+                        layer_states[module_name] = {"scores": [], "head": score_head, "layer_num": layer_num, "hookq_mode": "all_tokens", "capture": "score"}
+                    layer_states[module_name]["scores"].append(score)
+                    continue
 
                 # Accumulate GPU tensors — clone() copies data immediately so we
                 # own the buffer; .cpu() is deferred to retrieval/flush.
@@ -414,6 +530,20 @@ class ProbeHookQKWorker:
             with PROF.timed("worker.cpu_transfer.qk"):
                 for mod_name, entry in layer_dict.items():
                     from torch.nn.utils.rnn import pad_sequence
+                    # v0.6.0 score entry. Two producers: eager/op store "scores" directly;
+                    # buffer mode stages Q/K + marks capture=="score", so recompute here.
+                    if "scores" in entry or entry.get("capture") == "score":
+                        scores = entry["scores"] if "scores" in entry \
+                            else _scores_from_qk_entry(entry, self._conf,
+                                                       getattr(self, "_score_dtype", torch.float16))
+                        cpu_dict[mod_name] = {
+                            "scores": [t.cpu() for t in scores],
+                            "head": entry.get("head", 0),
+                            "layer_num": entry["layer_num"],
+                            "hookq_mode": entry.get("hookq_mode", "all_tokens"),
+                            "capture": "score",
+                        }
+                        continue
                     mode = entry.get("hookq_mode", self.hookq_mode)
                     if mode == "all_tokens":
                         q_stacked = pad_sequence([t.cpu() for t in entry["q"]], batch_first=True)
@@ -474,6 +604,28 @@ class ProbeHookQKWorker:
                         continue
                     found_any = True
                     for mod_name, entry in layer_dict.items():
+                        # v0.6.0 score entry (eager/op store "scores"; buffer stages Q/K
+                        # + marks capture=="score" -> recompute). Merge per-pass lists.
+                        if "scores" in entry or entry.get("capture") == "score":
+                            scores = entry["scores"] if "scores" in entry \
+                                else _scores_from_qk_entry(entry, self._conf,
+                                                           getattr(self, "_score_dtype", torch.float16))
+                            cpu_entry = {
+                                "scores": [t.cpu() for t in scores],
+                                "head": entry.get("head", 0),
+                                "layer_num": entry["layer_num"],
+                                "hookq_mode": entry.get("hookq_mode", "all_tokens"),
+                                "capture": "score",
+                            }
+                            if mod_name in cpu_cache["qk_cache"]:
+                                if "scores" not in cpu_cache["qk_cache"][mod_name]:
+                                    raise ValueError(
+                                        f"mixed capture modes (score + qk) for module "
+                                        f"{mod_name} in one batch are not supported")
+                                cpu_cache["qk_cache"][mod_name]["scores"].extend(cpu_entry["scores"])
+                            else:
+                                cpu_cache["qk_cache"][mod_name] = cpu_entry
+                            continue
                         cpu_entry = {
                             "q": [t.cpu() for t in entry["q"]],
                             "k_all": _k_all_cpu_list(entry),
@@ -481,6 +633,10 @@ class ProbeHookQKWorker:
                             "hookq_mode": entry.get("hookq_mode", self.hookq_mode),
                         }
                         if mod_name in cpu_cache["qk_cache"]:
+                            if "q" not in cpu_cache["qk_cache"][mod_name]:
+                                raise ValueError(
+                                    f"mixed capture modes (qk + score) for module "
+                                    f"{mod_name} in one batch are not supported")
                             cpu_cache["qk_cache"][mod_name]["q"].extend(cpu_entry["q"])
                             cpu_cache["qk_cache"][mod_name]["k_all"].extend(cpu_entry["k_all"])
                         else:
@@ -493,17 +649,29 @@ class ProbeHookQKWorker:
         run_dir = os.path.join(hook_dir, run_id, f"tp_rank_{tp_rank}")
         os.makedirs(run_dir, exist_ok=True)
 
+        # v0.6.0 score artifacts are ragged [S_q,S_k] lists — the fixed-shape safetensors
+        # format doesn't fit them, so a score cache always saves as .pt (pickle handles
+        # the lists). The RPC/probes path is unaffected.
+        has_scores = any("scores" in e for e in cpu_cache["qk_cache"].values())
+
         if os.environ.get("VLLM_HOOK_ASYNC_SAVE", "0") == "1":
             PROF.gauge("async.queue_depth_before_put", self._save_queue.qsize())
             with PROF.timed("worker.queue_put"):
                 self._save_queue.put((run_id, cpu_cache, run_dir))
-        elif os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1":
+        elif os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1" and not has_scores:
             self._save_safetensors(cpu_cache, run_dir)
         else:
             save_pt_atomic(cpu_cache, os.path.join(run_dir, "qk.pt"))
         return found_any
 
     def _save_safetensors(self, cpu_cache: dict, run_dir: str):
+        # v0.6.0: score caches are ragged [S_q,S_k] lists that don't fit the fixed-shape
+        # safetensors format — fall back to .pt (pickle). Also covers the async
+        # background-save path, which calls this method directly.
+        if any("scores" in e or e.get("capture") == "score"
+               for e in cpu_cache["qk_cache"].values()):
+            save_pt_atomic(cpu_cache, os.path.join(run_dir, "qk.pt"))
+            return
         # safetensors stores fixed-shape tensors only, so per-request variable-length
         # q/k_all are padded into a single batched tensor and unpadded on load using
         # the seq_lens stored in the JSON sidecar. q and k_all may have different

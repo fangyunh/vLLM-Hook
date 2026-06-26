@@ -48,6 +48,8 @@ class HookLLM:
         self.layer_to_heads = {}
         self._output_layers = None       # set by load_config for HS worker
         self._hookq_mode = "all_tokens"  # default; overridable in config
+        self._qk_capture = "qk"          # v0.6.0: "qk" | "score"; overridable in config
+        self._score_head = 0             # v0.6.0: head index for score capture
         self._hs_mode = "last_token"     # default; overridable in config
         self._steering_config: Optional[Dict] = None  # set by load_config for steer worker
         if config_file:
@@ -100,7 +102,10 @@ class HookLLM:
                 self.layer_to_heads[layer_idx].append(head_idx)
 
         if "hookq" in config_data:
-            self._hookq_mode = config_data["hookq"]["hookq_mode"]
+            self._hookq_mode = config_data["hookq"].get("hookq_mode", self._hookq_mode)
+            # v0.6.0: capture="score" flushes one head's attention score instead of Q/K.
+            self._qk_capture = config_data["hookq"].get("capture", self._qk_capture)
+            self._score_head = int(config_data["hookq"].get("score_head", self._score_head))
 
         if "steering" in config_data:
             # vector_path is taken as-is from the config (legacy: usually relative
@@ -125,6 +130,10 @@ class HookLLM:
             # Pass layer_to_heads dict for head-level metadata; worker uses keys for layer filtering.
             extra["output_qk"] = self.layer_to_heads if self.layer_to_heads else True
             extra["hookq_mode"] = self._hookq_mode
+            # v0.6.0: score capture flushes one head's attention score instead of Q/K.
+            if self._qk_capture == "score":
+                extra["qk_capture"] = "score"
+                extra["score_head"] = self._score_head
         elif self.worker_name == "steer_hook_act":
             # Start from the instance-default steer config (loaded from config_file),
             # then apply any per-request overrides from extra_args["steer"].
@@ -225,11 +234,24 @@ class HookLLM:
                     merged[cache_key] = {}
                     for layer in all_probes[0][cache_key]:
                         first = all_probes[0][cache_key][layer]
-                        entry = {k: v for k, v in first.items() if k not in ("q", "k_all", "hidden_states")}
-                        for tensor_key in ("q", "k_all", "hidden_states"):
+                        # "scores" (v0.6.0) joins q/k_all/hidden_states as a per-request
+                        # per-pass tensor list; take pass [0] from each request, same as q/k.
+                        entry = {k: v for k, v in first.items() if k not in ("q", "k_all", "hidden_states", "scores")}
+                        for tensor_key in ("q", "k_all", "hidden_states", "scores"):
                             if tensor_key not in first:
                                 continue
-                            entry[tensor_key] = [p[cache_key][layer][tensor_key][0] for p in all_probes]
+                            vals = []
+                            for p in all_probes:
+                                le = p[cache_key].get(layer, {})
+                                if tensor_key not in le:
+                                    # All batch requests must share the capture shape for a
+                                    # module (e.g. all "scores" or all q/k); a mixed qk+score
+                                    # batch on the same module is unsupported — fail clearly.
+                                    raise ValueError(
+                                        f"mixed capture shapes across batch requests for "
+                                        f"{cache_key}/{layer}: missing '{tensor_key}'")
+                                vals.append(le[tensor_key][0])
+                            entry[tensor_key] = vals
                         merged[cache_key][layer] = entry
                 outputs[0].probes = merged
 

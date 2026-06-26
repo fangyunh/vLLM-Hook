@@ -44,6 +44,25 @@ class AttntrackerAnalyzer:
 
         for layer_name, qk_data in qk_cache.items():
             layer_num = qk_data['layer_num']
+
+            # v0.6.0 score fast-path: the worker already computed softmax(QK·mult) on-GPU
+            # for one head, so skip the QK→score recompute. ``scores`` is a per-pass list
+            # of [S_q, S_k]; the attention tracker uses the LAST query row (the final
+            # token's attention over all keys), matching the eager ``q_last`` path.
+            if "scores" in qk_data:
+                scores_list = qk_data["scores"]
+                head = qk_data.get("head", 0)
+                if batch_attention_weights is None:
+                    batch_attention_weights = [dict() for _ in range(len(scores_list))]
+                for i, score_t in enumerate(scores_list):
+                    attn = score_t[-1:, :] if score_t.dim() == 2 else score_t.reshape(1, -1)
+                    batch_attention_weights[i][layer_name] = {
+                        'attention': attn,                 # [1, seq_len] (single captured head)
+                        'head_indices': [head],
+                        'layer_index': layer_num,
+                    }
+                continue
+
             important_head_indices = self.layer_to_heads[layer_num]
             q_list, k_list = unpack_qk(qk_data)
 

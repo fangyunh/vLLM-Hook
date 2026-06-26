@@ -20,6 +20,7 @@ from vllm_hook_plugins.workers._common import (
 )
 from vllm_hook_plugins.workers.probe_hookqk_worker import (
     _read_cached_keys,
+    compute_head_score,
     key_cache_from_layer_kv,
     match_attn,
 )
@@ -262,8 +263,47 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
                 continue
 
         req_mode = extra.get("hookq_mode", default_mode)
+        cap_mode = extra.get("qk_capture",
+                             "score" if getattr(worker, "_score_mode_default", False) else "qk")
         start = int(last_indices[i].item())
         end = int(last_indices[i + 1].item())
+
+        # ---- v0.6.0 score mode: flush one head's [S_q, S_k] score, not Q/K ----
+        if cap_mode == "score":
+            score_head = int(extra.get("score_head", getattr(worker, "_score_head_default", 0)))
+            q_view = q_in[start:end, :].detach()
+            k_view = k_in[start:end, :].detach()
+            if seq_lens is not None and metadata is not None and not _NO_PREFIXK:
+                try:
+                    sv = seq_lens[i]
+                    total_len = int(sv.item()) if hasattr(sv, "item") else int(sv)
+                    num_cached = total_len - (end - start)
+                    if num_cached > 0:
+                        meta_kv = metadata if not isinstance(metadata, dict) \
+                            else next(iter(metadata.values()))
+                        with PROF.timed("kv.prefix_recon"):
+                            prefix_k = _read_cached_keys(
+                                module_name, meta_kv, i, num_cached, total_len)
+                        if prefix_k is not None:
+                            k_view = torch.cat(
+                                [prefix_k.to(k_view.device, dtype=k_view.dtype), k_view], dim=0)
+                except Exception:  # noqa: BLE001
+                    PROF.incr("kv.prefix_recon.errors")
+            score = compute_head_score(q_view, k_view, score_head, worker._conf,
+                                       getattr(worker, "_score_dtype", torch.float16))
+            PROF.incr("hook.fire.qk")
+            bucket = worker._disk_states if extra.get("save_to_disk") \
+                else worker._captured_states
+            if req_id not in bucket:
+                bucket[req_id] = {}
+            layer_states = bucket[req_id]
+            if module_name not in layer_states:
+                layer_states[module_name] = {
+                    "scores": [], "head": score_head, "layer_num": layer_idx,
+                    "hookq_mode": "all_tokens", "capture": "score",
+                }
+            layer_states[module_name]["scores"].append(score)
+            continue
 
         if req_mode == "all_tokens":
             q_tok = q_in[start:end, :].detach().clone()
@@ -537,6 +577,10 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
     # Worker-wide fallback for hookq_mode when a request omits it (matches eager).
     if not hasattr(worker, "hookq_mode"):
         worker.hookq_mode = "all_tokens"
+    # v0.6.0 score-capture defaults (graph mode skips install_hooks, so set them here too).
+    worker._score_mode_default = os.environ.get("VLLM_HOOK_QK_SCORE", "0") == "1"
+    worker._score_head_default = int(os.environ.get("VLLM_HOOK_QK_SCORE_HEAD", "0"))
+    worker._score_dtype = torch.float16
 
     # Egress buckets — same dicts the eager path / RPC retrieval consume.
     if not hasattr(worker, "_captured_states") or worker._captured_states is None:
@@ -759,6 +803,13 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
                 continue
 
         req_mode = extra.get("hookq_mode", getattr(model_runner, "_worker_hookq_mode", "all_tokens"))
+        # v0.6.0 score capture: stage Q/K like all_tokens (every query row feeds the
+        # [S_q,S_k] matrix); the per-head score is computed at retrieval from the staged Q/K.
+        cap_mode = extra.get("qk_capture",
+                             "score" if getattr(model_runner, "_worker_score_mode", False) else "qk")
+        score_head = int(extra.get("score_head", getattr(model_runner, "_worker_score_head", 0)))
+        if cap_mode == "score":
+            req_mode = "all_tokens"
 
         start = int(qsl_cpu[i])
         end = int(qsl_cpu[i + 1])
@@ -830,6 +881,8 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
             "num_computed": num_computed,
             "layers": req_layers,
             "hookq_mode": req_mode,
+            "cap_mode": cap_mode,
+            "score_head": score_head,
             "bucket_key": bucket_key,
             "req_state": req_state,
         })
@@ -1026,6 +1079,11 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                     "q": [], "k_all": [], "k_prefix_ends": [],
                     "layer_num": layer_num, "hookq_mode": req_mode,
                 }
+                # v0.6.0: mark a score entry so retrieval recomputes the per-head score on
+                # GPU from the staged Q/K and flushes only the score (the bandwidth win).
+                if plan.get("cap_mode") == "score":
+                    layer_states[module_name]["capture"] = "score"
+                    layer_states[module_name]["head"] = plan.get("score_head", 0)
                 # FIRST capture step for this (request, layer). Prefix caching trims a
                 # shared prompt prefix (num_computed > 0) so those keys were never
                 # forwarded into the buffer — read them back from paged KV ONCE and
@@ -1319,6 +1377,9 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     # helper reads them without reaching through the worker.
     model_runner._worker_hookq_mode = getattr(worker, "hookq_mode", "all_tokens")
     model_runner._default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
+    # v0.6.0 score-capture worker defaults (routing reads these without the worker ref).
+    model_runner._worker_score_mode = getattr(worker, "_score_mode_default", False)
+    model_runner._worker_score_head = getattr(worker, "_score_head_default", 0)
 
     # Routing — runs after _update_states + input prep, so prefill routes correctly.
     install_prepare_inputs_routing(model_runner, worker, _build_routing, label="qk")
@@ -1348,6 +1409,8 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         # Refresh mode/phase each step so a later worker mutation can't desync routing.
         model_runner._worker_hookq_mode = getattr(worker, "hookq_mode", "all_tokens")
         model_runner._default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
+        model_runner._worker_score_mode = getattr(worker, "_score_mode_default", False)
+        model_runner._worker_score_head = getattr(worker, "_score_head_default", 0)
 
         from vllm_hook_plugins.graph.ops import get_fire_count
         fire_before = get_fire_count()

@@ -410,6 +410,11 @@ def _serialize_probes(probes: dict) -> dict:
                         n_tensors += 1
                         n_elems += v.numel()
                         new_entry[k] = v.tolist()
+                    elif isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
+                        # v0.6.0 "scores": a per-pass list of [S_q,S_k] tensors.
+                        n_tensors += len(v)
+                        n_elems += sum(t.numel() for t in v)
+                        new_entry[k] = [t.tolist() for t in v]
                     else:
                         new_entry[k] = v
                 result[key][mod_name] = new_entry

@@ -90,6 +90,13 @@ class CorerAnalyzer:
         
         cache = load_and_merge_qk_cache(self.hook_dir, run_id)
         config = cache["config"]
+        # v0.6.0 score capture is not supported by CoRe: its two-pass calibration needs the
+        # query-span × key reshape from raw Q/K (and prefix-merge), not a pre-softmaxed
+        # single-head score. Use QK capture (the default) for CoRe reranking.
+        if any("scores" in e for e in cache["qk_cache"].values()):
+            raise NotImplementedError(
+                "CorerAnalyzer requires QK capture (qk_capture='qk'); attention-score "
+                "capture (v0.6.0) is only consumed by AttntrackerAnalyzer.")
         bs = len(next(iter(cache["qk_cache"].values()))['q'])
 
         # Check if k_all is already fully reconstructed (worker did prefix cache reconstruction).

@@ -353,11 +353,12 @@ def load_and_merge_qk_cache(hook_dir: str, run_id: str):
 
     if os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1":
         st_paths = _artifact_glob(hook_dir, run_id, "qk.safetensors", timeout=poll_timeout)
-        if not st_paths:
-            raise FileNotFoundError(
-               f"No safetensors artifacts found for run_id={run_id} under {hook_dir}"
-            )
-        return _load_and_merge_qk_safetensors(hook_dir, run_id, st_paths)
+        if st_paths:
+            return _load_and_merge_qk_safetensors(hook_dir, run_id, st_paths)
+        # v0.6.0: score caches are ragged [S_q,S_k] and ALWAYS save as .pt even when
+        # safetensors is on (see ProbeHookQKWorker._save_safetensors), so a missing
+        # qk.safetensors is expected for a score run — fall through to the .pt loader
+        # below rather than failing.
 
     paths = _artifact_glob(hook_dir, run_id, "qk.pt", timeout=poll_timeout)
     if not paths:
