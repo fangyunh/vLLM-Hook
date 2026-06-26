@@ -79,8 +79,13 @@ def _chat_text(tokenizer, instruction, data):
 
 
 def _first(t):
+    # Return the FIRST forward pass. Disk format = a per-pass list -> t[0]. RPC format
+    # stacks all_tokens q/k into [n_pass, S, hidden] (pad_sequence) -> strip the pass dim
+    # with t[0]; a score entry comes back as a list so the list branch handles it.
     if isinstance(t, (list, tuple)):
         return t[0] if t else None
+    if isinstance(t, torch.Tensor):
+        return t[0] if t.dim() == 3 else t
     return t
 
 
@@ -151,27 +156,24 @@ def capture(mode, out_path):
         temperature=0.0, max_tokens=_MAX_TOKENS,
         extra_args=({"hooks_on": "both"} if _MAX_TOKENS > 1 else None))
 
-    # Graph-engaged guard: a score arm under graph mode MUST fire the capture op; if the
-    # plugin silently fell back to eager (compile-cache poison, mis-plumbed env) the op
-    # never fires and a graph arm would vacuously "pass". get_fire_count counts real op
-    # impls (qk_probe / capture_qk), 0 in eager.
-    from vllm_hook_plugins.graph.ops import get_fire_count
+    # Graph-engaged guard: under graph mode the plugin installs the op/buffer path, NOT the
+    # eager register_forward_hook, so a graph arm that captures >0 layers proves the graph
+    # path fired (a silent eager fallback would install nothing and capture 0). NOTE: the
+    # graph/ops get_fire_count counter lives in the WORKER subprocess and is unreadable from
+    # this driver, so we assert on captured layers (which DO cross back via probes), not it.
     graph_arm = (mode == "score" and not enforce_eager)
 
     result = {}
     for case in _CASES:
         text = _chat_text(llm.tokenizer, case["instruction"], case["data"])
-        fire_before = get_fire_count()
         out = llm.generate(text, sp, save_to_disk=False)
-        fired = get_fire_count() - fire_before
-        if graph_arm and fired <= 0:
-            print(f"[score-parity:{mode}] FATAL case={case['name']}: graph capture op did "
-                  f"NOT fire (fired={fired}) — silent eager fallback, aborting", flush=True)
-            return 1
         result[case["name"]] = _capture_store(out, mode)
         n = len([k for k in result[case["name"]] if k != "__config__"])
-        print(f"[score-parity:{mode}] case={case['name']} captured {n} layers "
-              f"(op_fired={fired})", flush=True)
+        if graph_arm and n == 0:
+            print(f"[score-parity:{mode}] FATAL case={case['name']}: graph path captured 0 "
+                  f"layers — op/scatter did not fire, aborting", flush=True)
+            return 1
+        print(f"[score-parity:{mode}] case={case['name']} captured {n} layers", flush=True)
         try:
             llm.llm_engine.reset_prefix_cache()
         except Exception:  # noqa: BLE001
@@ -204,6 +206,14 @@ def compare(score_path, qk_path, rtol, atol):
                       f"(score={sc is not None} q={qv is not None} k={kv is not None})")
                 overall_ok = False; continue
             head = sl[layer].get("head", 0)
+            # Under max_tokens>1 the eager QK ground truth stacks q/k_all across passes with
+            # pad_sequence: q's widest pass IS the prefill (so q is unpadded), but k_all grows
+            # over decode, so _first(k_all)=pass0 comes back padded to the LONGEST pass's width
+            # (real prefill keys front-aligned, zero pad at the tail). The captured score is the
+            # prefill [S_q, S_k]; trim q/k_all to its dims (front-aligned real tokens) before the
+            # recompute. No-op at max_tokens=1 (kv real length == S_k already).
+            qv = qv[:sc.shape[0]]
+            kv = kv[:sc.shape[1]]
             ref = reference_score(qv, kv, head, conf)
             total += 1
             if sc.shape != ref.shape:
