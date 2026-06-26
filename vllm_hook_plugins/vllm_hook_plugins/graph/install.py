@@ -973,17 +973,15 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             # Snapshot index j == buffer row j+1 == flat column j, so a plan's flat span
             # [start, end) maps to snapshot[start:end]. W bounds it by the furthest column
             # any capturing request used (<= cap). Sentinel-routed gaps are copied but
-            # never sliced into a bucket. The snapshot IS the GPU residency (views share
-            # its storage), so the DRAIN budget is noted ONCE per layer here. The work
-            # metric (captured.bytes.qk) instead counts the SAVED reduced views per request
-            # below — matching the per-request + eager paths. Charging the W-row snapshot
-            # here would over-report it (~Wx for last_token, which saves only 1 q row).
+            # never sliced into a bucket. The per-step snapshot is transient scratch kept
+            # alive only by the reduced views the requests slice from it below; the DRAIN
+            # budget is charged those reduced view bytes PER REQUEST (decremented on pop),
+            # so gpu_bytes tracks current residency, not this scratch. Under packed batches
+            # the reduced views tile the snapshot exactly (sum == W rows), so the budget
+            # magnitude is unchanged — only the per-request accounting + pop-decrement are.
             W = max(p["end"] for p in layer_plans)
             snap_k = k_buf[1:W + 1, :].detach().clone()
             snap_q = q_buf[1:W + 1, :].detach().clone()
-            if dm is not None:
-                dm.note(snap_k.numel() * snap_k.element_size()
-                        + snap_q.numel() * snap_q.element_size())
 
         for plan in layer_plans:
             start = plan["start"]
@@ -1073,13 +1071,12 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
 
             PROF.incr("hook.fire.qk")
             PROF.gauge("captured.bytes.qk", nbytes)
-            # Stage 3: accrue the per-request REDUCED bytes (batching-invariant; matches
-            # the decrement-on-pop at flush). NOT the W-row snapshot dm.note charges.
+            # Both the throttle ceiling (resident_bytes) and the drain trigger (gpu_bytes)
+            # accrue the per-request REDUCED bytes (batching-invariant; matches the
+            # decrement-on-pop at flush). This makes gpu_bytes a CURRENT-residency gauge:
+            # a workload whose live capture stays under budget never drains.
             if dm is not None:
                 dm.note_resident(nbytes)
-            # Batched already noted the snapshot's GPU residency once per layer above;
-            # the per-request path drains the reduced clone it just made.
-            if not _BATCHED_EGRESS and dm is not None:
                 dm.note(nbytes)
 
 

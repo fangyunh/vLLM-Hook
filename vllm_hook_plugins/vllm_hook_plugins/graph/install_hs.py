@@ -510,15 +510,12 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
         snap = None
         if _BATCHED_EGRESS:
             # Snapshot index j == buffer row j+1 == flat column j; plan span [start, end)
-            # → snap[start:end], last_token row → snap[end-1]. The snapshot is the GPU
-            # residency (views share it), so note the DRAIN budget ONCE per layer. The
-            # work metric (captured.bytes.hs) instead counts the SAVED reduced views per
-            # request below — charging the W-row snapshot here would over-report it (~Wx
-            # for last_token, which saves only the single final row).
+            # → snap[start:end], last_token row → snap[end-1]. The per-step snapshot is
+            # transient scratch kept alive only by the reduced views requests slice below;
+            # the DRAIN budget is charged those reduced view bytes PER REQUEST (decremented
+            # on pop), so gpu_bytes tracks current residency, not this scratch.
             W = max(p["end"] for p in layer_plans)
             snap = hs_buf[1:W + 1, :].detach().clone()
-            if dm is not None:
-                dm.note(snap.numel() * snap.element_size())
 
         for plan in layer_plans:
             start = plan["start"]
@@ -559,12 +556,11 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
             # eager paths regardless of batching.
             nbytes = hs_tok.numel() * hs_tok.element_size()
             PROF.gauge("captured.bytes.hs", nbytes)
-            # Stage 3: accrue the per-request REDUCED bytes (batching-invariant; matches
-            # the decrement-on-pop at flush). NOT the W-row snapshot dm.note charges.
+            # Both the throttle ceiling (resident_bytes) and the drain trigger (gpu_bytes)
+            # accrue the per-request REDUCED bytes (batching-invariant; matches the
+            # decrement-on-pop at flush), making gpu_bytes a CURRENT-residency gauge.
             if dm is not None:
                 dm.note_resident(nbytes)
-            # Batched already noted the snapshot's GPU residency once per layer above.
-            if not _BATCHED_EGRESS and dm is not None:
                 dm.note(nbytes)
 
             if req_id not in bucket:

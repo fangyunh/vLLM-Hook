@@ -132,6 +132,28 @@ def bucket_bytes(layer_dict: dict) -> int:
     return total
 
 
+def bucket_gpu_bytes(layer_dict: dict) -> int:
+    """Bytes of the STILL-GPU-resident capture tensors in a popped bucket.
+
+    Same walk as ``bucket_bytes`` but counts only ``t.is_cuda`` tensors, so a tensor
+    already drained to pinned host (``val[i] = dst``) is skipped. This is exactly the
+    GPU residency to credit back to ``gpu_bytes`` (the drain trigger) at pop: a
+    host-drained tensor left the GPU — and was zeroed out of ``gpu_bytes`` — at its
+    drain, so crediting it again would double-count.
+    """
+    total = 0
+    for entry in layer_dict.values():
+        if not isinstance(entry, dict):
+            continue
+        for val in entry.values():
+            if not isinstance(val, list):
+                continue
+            for t in val:
+                if torch.is_tensor(t) and t.is_cuda:
+                    total += t.numel() * t.element_size()
+    return total
+
+
 class CaptureDrainManager:
     """Per-worker budget tracker + dedicated-stream GPU->pinned drainer.
 
@@ -204,12 +226,16 @@ class CaptureDrainManager:
     # ------------------------------------------------------------------
 
     def note(self, nbytes: int) -> None:
-        """Accrue ``nbytes`` of freshly-cloned GPU capture data this step.
+        """Accrue this request's freshly-cloned GPU-resident capture bytes (reduced).
 
-        ``gpu_bytes`` is a soft accrue-and-reset heuristic: it is NOT decremented when a
-        request flushes (pops its bucket), so after a request completes the next drain
-        may fire slightly early. This affects drain FREQUENCY (perf) only, never captured
-        values — a follow-up could decrement on pop or recompute from the live buckets.
+        ``gpu_bytes`` tracks CURRENT GPU residency of held capture clones: incremented
+        here at egress, reset to 0 on ``_drain`` (all clones moved to pinned host), and
+        decremented on ``on_pop`` (a request's still-GPU bytes released at flush/abort).
+        So a workload whose live capture never approaches the budget (fixed-shape,
+        bounded concurrency) never drains -> zero added cost; under real memory pressure
+        it climbs to the budget and drains. (Before v0.5.x this was monotonic — never
+        decremented on flush — so it crossed the budget from cumulative throughput alone
+        and drained on workloads with NO memory pressure, taxing decode for no benefit.)
         """
         if self.enabled:
             self.gpu_bytes += int(nbytes)
@@ -243,18 +269,28 @@ class CaptureDrainManager:
             return False
         return True
 
-    def on_pop(self, req_id, nbytes: int) -> None:
-        """Release a request's resident bytes when its bucket is popped at flush/abort.
+    def on_pop(self, req_id, layer_dict) -> None:
+        """Release a popped request's held bytes at flush/abort (both counters).
 
-        Decrement-on-pop closes the soft-accrue gap in ``note`` for the resident
-        counter (clamped at 0), so the ceiling reflects only in-flight capture.
+        Decrements each from the SAME bucket so each reflects only in-flight capture
+        (clamped at 0):
+        - ``resident_bytes`` (throttle ceiling) by ALL held bytes (``bucket_bytes``) —
+          a tensor drained to pinned host still occupies host RAM, which the ceiling
+          guards, so it stays counted until the bucket is popped here.
+        - ``gpu_bytes`` (drain trigger) by only the STILL-GPU bytes
+          (``bucket_gpu_bytes``) — tensors moved to pinned host at a prior drain already
+          left the GPU (and were zeroed from ``gpu_bytes`` then), so crediting them again
+          would push the trigger negative and suppress future drains.
         """
-        if not self.throttle_enabled:
-            return
-        self.resident_bytes -= int(nbytes)
-        if self.resident_bytes < 0:
-            self.resident_bytes = 0
-        self._throttled.discard(req_id)
+        if self.throttle_enabled:
+            self.resident_bytes -= bucket_bytes(layer_dict)
+            if self.resident_bytes < 0:
+                self.resident_bytes = 0
+            self._throttled.discard(req_id)
+        if self.enabled:
+            self.gpu_bytes -= bucket_gpu_bytes(layer_dict)
+            if self.gpu_bytes < 0:
+                self.gpu_bytes = 0
 
     def forget(self, external_req_id) -> None:
         """Drop any throttled req_ids for a terminated external request.
@@ -350,4 +386,4 @@ def drain_barrier(worker) -> None:
         dm.synchronize()
 
 
-__all__ = ["CaptureDrainManager", "drain_barrier", "bucket_bytes"]
+__all__ = ["CaptureDrainManager", "drain_barrier", "bucket_bytes", "bucket_gpu_bytes"]

@@ -400,7 +400,7 @@ class ProbeHookQKWorker:
         CPU transfer happens here (once per request, not per hook).
         Returns zstd-compressed pickle, or None if nothing was captured.
         """
-        from vllm_hook_plugins.graph.drain import drain_barrier, bucket_bytes
+        from vllm_hook_plugins.graph.drain import drain_barrier
         drain_barrier(self)  # wait for any pending W4 drain before reading buckets
         dm = getattr(self, "_capture_drain", None)
         if dm is not None:
@@ -409,7 +409,7 @@ class ProbeHookQKWorker:
             layer_dict = self._captured_states.pop(req_id)
             # Stage 3: release the request's resident bytes (counted at egress) on pop.
             if dm is not None:
-                dm.on_pop(req_id, bucket_bytes(layer_dict))
+                dm.on_pop(req_id, layer_dict)
             cpu_dict = {}
             with PROF.timed("worker.cpu_transfer.qk"):
                 for mod_name, entry in layer_dict.items():
@@ -432,7 +432,6 @@ class ProbeHookQKWorker:
 
     def clear_captured_states(self, external_req_id: str) -> None:
         """Remove captured states without returning them (cleanup on abort/disconnect)."""
-        from vllm_hook_plugins.graph.drain import bucket_bytes
         dm = getattr(self, "_capture_drain", None)
         if dm is None:
             clear_states_for_req(self._captured_states, external_req_id)
@@ -443,7 +442,7 @@ class ProbeHookQKWorker:
         # disk-mode abort must release too, else resident_bytes ratchets up monotonically.
         for bucket in (self._captured_states, self._disk_states):
             for req_id in iter_matching_req_ids(bucket, external_req_id):
-                dm.on_pop(req_id, bucket_bytes(bucket.pop(req_id)))
+                dm.on_pop(req_id, bucket.pop(req_id))
         dm.forget(external_req_id)  # prune a throttled (never-bucketed) id for this req
 
     def flush_disk(self, external_req_ids: list, run_id: str, hook_dir: str) -> bool:
@@ -455,7 +454,7 @@ class ProbeHookQKWorker:
 
         Returns True if any artifacts were written, False if nothing captured.
         """
-        from vllm_hook_plugins.graph.drain import drain_barrier, bucket_bytes
+        from vllm_hook_plugins.graph.drain import drain_barrier
         drain_barrier(self)  # wait for any pending W4 drain before reading buckets
         dm = getattr(self, "_capture_drain", None)
         if dm is not None:
@@ -470,7 +469,7 @@ class ProbeHookQKWorker:
                     layer_dict = self._disk_states.pop(req_id)
                     # Stage 3: release the request's resident bytes on pop.
                     if dm is not None:
-                        dm.on_pop(req_id, bucket_bytes(layer_dict))
+                        dm.on_pop(req_id, layer_dict)
                     if not layer_dict:
                         continue
                     found_any = True
