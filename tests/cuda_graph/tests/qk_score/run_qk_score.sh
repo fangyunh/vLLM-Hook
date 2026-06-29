@@ -33,9 +33,13 @@ WORK="/dev/shm/vllm_hook_${USER}/score_${LSB_JOBID:-manual}"
 mkdir -p "$WORK"
 PY=tests/cuda_graph/tests/qk_score/qk_score_parity.py
 
-echo "[run_qk_score] === 1/3 eager score capture ==="
-python -u "$PY" capture --mode score --out "$WORK/score.pkl"
-echo "[run_qk_score] === 2/3 eager qk ground truth ==="
+echo "[run_qk_score] === 1/5 eager all_tokens score capture ==="
+python -u "$PY" capture --mode score --hookq all_tokens --out "$WORK/score.pkl"
+echo "[run_qk_score] === 2/5 eager last_token score capture ==="
+python -u "$PY" capture --mode score --hookq last_token --out "$WORK/score_lt.pkl"
+echo "[run_qk_score] === 3/5 eager qk ground truth (all_tokens) ==="
 python -u "$PY" capture --mode qk --out "$WORK/qk.pkl"
-echo "[run_qk_score] === 3/3 compare ==="
+echo "[run_qk_score] === 4/5 compare all_tokens score vs qk recompute ==="
 python -u "$PY" compare --score "$WORK/score.pkl" --qk "$WORK/qk.pkl"
+echo "[run_qk_score] === 5/5 compare last_token score vs last row of qk recompute ==="
+python -u "$PY" compare --score "$WORK/score_lt.pkl" --qk "$WORK/qk.pkl" --score-lasttok

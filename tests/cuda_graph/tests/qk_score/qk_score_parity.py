@@ -114,7 +114,7 @@ def _capture_store(out, mode):
     return store
 
 
-def capture(mode, out_path):
+def capture(mode, out_path, hookq="all_tokens"):
     if mode == "score":
         os.environ["VLLM_HOOK_QK_SCORE"] = "1"
         if os.environ.get("VLLM_HOOK_SCORE_GRAPH") == "1":
@@ -129,10 +129,14 @@ def capture(mode, out_path):
         enforce_eager = True
 
     cudagraph_mode = os.environ.get("VLLM_HOOK_CUDAGRAPH_MODE", "PIECEWISE")
-    # all_tokens config (one head/layer needed downstream; score forces all_tokens).
+    # Config selects hookq_mode. The qk ground truth is ALWAYS all_tokens (compare recomputes
+    # the full [S_q,S_k] matrix and, for the last_token score leg, takes its last row). The
+    # score arm follows --hookq: all_tokens -> _alltok.json (full matrix), last_token ->
+    # _lasttok.json (final query row [1,S_k] only). Both configs capture ALL layers.
+    _suffix = "_lasttok" if (mode == "score" and hookq == "last_token") else "_alltok"
     config_file = os.environ.get(
         "VLLM_HOOK_CONFIG_FILE",
-        f'model_configs/attention_tracker/{_MODEL.split("/")[-1]}_alltok.json')
+        f'model_configs/attention_tracker/{_MODEL.split("/")[-1]}{_suffix}.json')
 
     from vllm import SamplingParams
     from vllm_hook_plugins import HookLLM
@@ -141,8 +145,8 @@ def capture(mode, out_path):
     if mode == "score" and not enforce_eager and cudagraph_mode.upper() != "NONE":
         extra["compilation_config"] = {"cudagraph_mode": cudagraph_mode}
 
-    print(f"[score-parity:{mode}] model={_MODEL} enforce_eager={enforce_eager} "
-          f"score_head={_SCORE_HEAD} cap={os.environ.get('VLLM_HOOK_QK_CAPTURE','op')}", flush=True)
+    print(f"[score-parity:{mode}] model={_MODEL} enforce_eager={enforce_eager} hookq={hookq} "
+          f"score_head={_SCORE_HEAD} cap={os.environ.get('VLLM_HOOK_QK_CAPTURE','op')} cfg={config_file}", flush=True)
 
     llm = HookLLM(
         model=_MODEL, worker_name="probe_hook_qk", analyzer_name="attn_tracker",
@@ -185,7 +189,7 @@ def capture(mode, out_path):
     return 0
 
 
-def compare(score_path, qk_path, rtol, atol):
+def compare(score_path, qk_path, rtol, atol, score_lasttok=False):
     with open(score_path, "rb") as f:
         s = pickle.load(f)
     with open(qk_path, "rb") as f:
@@ -206,15 +210,22 @@ def compare(score_path, qk_path, rtol, atol):
                       f"(score={sc is not None} q={qv is not None} k={kv is not None})")
                 overall_ok = False; continue
             head = sl[layer].get("head", 0)
-            # Under max_tokens>1 the eager QK ground truth stacks q/k_all across passes with
-            # pad_sequence: q's widest pass IS the prefill (so q is unpadded), but k_all grows
-            # over decode, so _first(k_all)=pass0 comes back padded to the LONGEST pass's width
-            # (real prefill keys front-aligned, zero pad at the tail). The captured score is the
-            # prefill [S_q, S_k]; trim q/k_all to its dims (front-aligned real tokens) before the
-            # recompute. No-op at max_tokens=1 (kv real length == S_k already).
-            qv = qv[:sc.shape[0]]
-            kv = kv[:sc.shape[1]]
-            ref = reference_score(qv, kv, head, conf)
+            if score_lasttok:
+                # last_token score = ONE row [1, S_k] = the final query token's attention over
+                # all keys. Recompute the full causal matrix from the all_tokens QK ground truth
+                # and take its LAST row. kv (prefill keys, max_tokens=1 -> unpadded) spans the
+                # full S_k; qv is the full prefill q. Falsifies a wrong-row / off-by-one slice.
+                ref = reference_score(qv, kv, head, conf)[-1:, :]
+            else:
+                # Under max_tokens>1 the eager QK ground truth stacks q/k_all across passes with
+                # pad_sequence: q's widest pass IS the prefill (so q is unpadded), but k_all grows
+                # over decode, so _first(k_all)=pass0 comes back padded to the LONGEST pass's width
+                # (real prefill keys front-aligned, zero pad at the tail). The captured score is the
+                # prefill [S_q, S_k]; trim q/k_all to its dims (front-aligned real tokens) before the
+                # recompute. No-op at max_tokens=1 (kv real length == S_k already).
+                qv = qv[:sc.shape[0]]
+                kv = kv[:sc.shape[1]]
+                ref = reference_score(qv, kv, head, conf)
             total += 1
             if sc.shape != ref.shape:
                 print(f"[score-parity] case={case} layer={layer}: SHAPE MISMATCH "
@@ -245,17 +256,21 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     pc = sub.add_parser("capture")
     pc.add_argument("--mode", choices=["score", "qk"], required=True)
+    pc.add_argument("--hookq", choices=["all_tokens", "last_token"], default="all_tokens",
+                    help="score capture mode (qk ground truth is always all_tokens)")
     pc.add_argument("--out", required=True)
     pk = sub.add_parser("compare")
     pk.add_argument("--score", required=True)
     pk.add_argument("--qk", required=True)
     pk.add_argument("--rtol", type=float, default=1e-2)
     pk.add_argument("--atol", type=float, default=1e-2)
+    pk.add_argument("--score-lasttok", action="store_true",
+                    help="score is [1,S_k] last_token capture; compare vs the last row of the recompute")
     args = p.parse_args()
     if args.cmd == "capture":
-        sys.exit(capture(args.mode, args.out))
+        sys.exit(capture(args.mode, args.out, args.hookq))
     else:
-        sys.exit(compare(args.score, args.qk, args.rtol, args.atol))
+        sys.exit(compare(args.score, args.qk, args.rtol, args.atol, args.score_lasttok))
 
 
 if __name__ == "__main__":

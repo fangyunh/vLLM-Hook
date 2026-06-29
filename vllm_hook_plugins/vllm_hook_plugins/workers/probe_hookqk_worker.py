@@ -361,21 +361,28 @@ class ProbeHookQKWorker:
                 start = int(last_indices[i].item())
                 end = int(last_indices[i + 1].item())
 
-                # With chunked-prefill, in last_token mode, only capture on the final chunk of the prefill
-                # i.e., when computed-after-step reaches num_prompt_tokens. Score mode is
-                # all_tokens (every query row is part of the [S_q,S_k] matrix), so it never
-                # skips a chunk.
-                if (cap_mode != "score" and is_prefill and req_mode == "last_token" and num_computed is not None and num_prompt is not None):
+                # With chunked-prefill, in last_token mode, only capture on the final chunk of the
+                # prefill (when computed-after-step reaches num_prompt_tokens). Applies to BOTH
+                # qk and score capture: last_token score flushes only the final query row
+                # [1, S_k], so mid-prefill chunks are skipped exactly like qk mode. all_tokens
+                # (either capture) never enters this gate (req_mode check) and captures every chunk.
+                if (is_prefill and req_mode == "last_token" and num_computed is not None and num_prompt is not None):
                     chunk_len = end - start
                     if int(num_computed[i]) + chunk_len < int(num_prompt[i]):
                         # Mid-prefill chunk doesn't need capture
                         continue
 
-                # ---- v0.6.0 score mode: flush one head's [S_q, S_k] score, not Q/K ----
+                # ---- v0.6.0 score mode: flush one head's score, not Q/K ----
+                # all_tokens -> the full causal [S_q, S_k] matrix; last_token -> only the final
+                # query row [1, S_k] (the last token's attention over the whole context). Decode
+                # passes are [1, S_k] in either mode. k is always the FULL history (every key).
                 if cap_mode == "score":
                     score_head = int(extra.get("score_head", self._score_head_default))
                     # q/k are views consumed immediately by the matmul — no clone needed.
-                    q_view = input[0][start:end, :].detach()
+                    if req_mode == "last_token":
+                        q_view = input[0][end - 1:end, :].detach()
+                    else:
+                        q_view = input[0][start:end, :].detach()
                     k_view = input[1][start:end, :].detach()
                     # Reconstruct the prefix-cache-trimmed keys so k is the FULL history
                     # (same path as QK mode below); the score needs every key.
@@ -399,7 +406,7 @@ class ProbeHookQKWorker:
                         bucket[req_id] = {}
                     layer_states = bucket[req_id]
                     if module_name not in layer_states:
-                        layer_states[module_name] = {"scores": [], "head": score_head, "layer_num": layer_num, "hookq_mode": "all_tokens", "capture": "score"}
+                        layer_states[module_name] = {"scores": [], "head": score_head, "layer_num": layer_num, "hookq_mode": req_mode, "capture": "score"}
                     layer_states[module_name]["scores"].append(score)
                     continue
 
