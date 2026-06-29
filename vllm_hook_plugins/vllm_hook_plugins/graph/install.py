@@ -999,12 +999,15 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
     slice ``q_buf[start+1:end+1]`` (all_tokens) or its last row ``q_buf[end]``
     (last_token).
 
-    With ``VLLM_HOOK_BATCHED_EGRESS=1`` the per-(layer, request) clones become ONE clone
-    per layer of the active flat-column prefix (a per-step SNAPSHOT) plus per-request
-    VIEWS into it — same data captured, O(num_layers) launches instead of
-    O(num_layers * num_requests). The snapshot is cloned every step (stream-ordered
-    before the next scatter), so it is byte-identical to the per-request path; views
-    reference the snapshot, not the scratch buffer, so they survive buffer reuse.
+    With ``VLLM_HOOK_BATCHED_EGRESS=1`` (Lever A: reduce-then-free) the per-(layer,
+    request) clones become ONE ``index_select`` for k and ONE for q per layer, each
+    gathering only the rows being saved into a compact own-storage tensor; requests take
+    VIEWS into them — same data captured, O(num_layers) launches instead of
+    O(num_layers * num_requests). index_select copies into fresh storage (stream-ordered
+    before the next scatter), so it is byte-identical to the per-request path and the
+    views survive buffer reuse. Unlike a wide [1:W+1] snapshot, each gather's size equals
+    the saved bytes, so a sparse last_token q view pins only its own row (no W-row
+    snapshot OOM) and the drain guard's per-request bytes are exact.
     """
     if not plans:
         return
@@ -1020,21 +1023,41 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
         if not layer_plans:
             continue
 
-        # ---- batched: ONE q + ONE k clone for the whole layer, sliced as views ----
-        snap_q = snap_k = None
+        # ---- batched (Lever A: reduce-then-free) — ONE index_select for k, ONE for q,
+        # each gathering only the rows being saved into a compact own-storage tensor;
+        # requests take VIEWS into them. O(num_layers) launches, same data. k_new is
+        # saved every step ([start+1,end+1) per plan) so k_reduced tiles densely (~W rows,
+        # the genuinely-wanted key history — bounded by the drain budget, Lever B); q is
+        # saved only on emit_q, and for last_token it is a SINGLE row per request, so
+        # q_reduced is sparse — no W-row snapshot pin (the OOM blind spot) and the drain
+        # guard's per-request bytes are exact. index_select copies into fresh storage so
+        # the views survive buffer reuse. The throttle gate stays inline below; under
+        # active throttling this gathers a few unreferenced rows (freed at end of layer),
+        # bounded by W — no worse than the old snapshot. ----
+        k_reduced = q_reduced = None
+        k_off = {}  # req_idx -> (lo, hi) into k_reduced
+        q_off = {}  # req_idx -> (lo, hi) into q_reduced; last_token uses q_reduced[lo]
         if _BATCHED_EGRESS:
-            # Snapshot index j == buffer row j+1 == flat column j, so a plan's flat span
-            # [start, end) maps to snapshot[start:end]. W bounds it by the furthest column
-            # any capturing request used (<= cap). Sentinel-routed gaps are copied but
-            # never sliced into a bucket. The per-step snapshot is transient scratch kept
-            # alive only by the reduced views the requests slice from it below; the DRAIN
-            # budget is charged those reduced view bytes PER REQUEST (decremented on pop),
-            # so gpu_bytes tracks current residency, not this scratch. Under packed batches
-            # the reduced views tile the snapshot exactly (sum == W rows), so the budget
-            # magnitude is unchanged — only the per-request accounting + pop-decrement are.
-            W = max(p["end"] for p in layer_plans)
-            snap_k = k_buf[1:W + 1, :].detach().clone()
-            snap_q = q_buf[1:W + 1, :].detach().clone()
+            k_rows = []
+            q_rows = []
+            for p in layer_plans:
+                s, e = p["start"], p["end"]
+                klo = len(k_rows)
+                k_rows.extend(range(s + 1, e + 1))
+                k_off[p["req_idx"]] = (klo, len(k_rows))
+                if p["emit_q"]:
+                    qlo = len(q_rows)
+                    if p["hookq_mode"] == "all_tokens":
+                        q_rows.extend(range(s + 1, e + 1))
+                        q_off[p["req_idx"]] = (qlo, len(q_rows))
+                    else:
+                        q_rows.append(e)
+                        q_off[p["req_idx"]] = (qlo, qlo + 1)
+            k_reduced = k_buf.index_select(
+                0, torch.tensor(k_rows, dtype=torch.int64, device=k_buf.device))
+            if q_rows:
+                q_reduced = q_buf.index_select(
+                    0, torch.tensor(q_rows, dtype=torch.int64, device=q_buf.device))
 
         for plan in layer_plans:
             start = plan["start"]
@@ -1066,7 +1089,8 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             # that emits no q) so the k_all list is the complete in-order history; flush
             # reconstructs the growing prefixes from it + k_prefix_ends, byte-identical.
             if _BATCHED_EGRESS:
-                k_new = snap_k[start:end]                       # view into the snapshot
+                klo, khi = k_off[plan["req_idx"]]
+                k_new = k_reduced[klo:khi]                      # view into the compact gather
             else:
                 k_new = k_buf[start + 1:end + 1, :].detach().clone()
 
@@ -1115,14 +1139,20 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             nbytes += k_new.numel() * k_new.element_size()
 
             if emit_q:
-                # q = this step's queries (all_tokens) or its last token (last_token);
-                # flat row `end` is the last scattered column (end-1) + 1 → snapshot[end-1].
+                # q = this step's queries (all_tokens) or its last token (last_token).
+                # Batched: a view into the compact q gather; per-request: clone from buffer.
                 if req_mode == "all_tokens":
-                    q_tok = snap_q[start:end] if _BATCHED_EGRESS \
-                        else q_buf[start + 1:end + 1, :].detach().clone()
+                    if _BATCHED_EGRESS:
+                        qlo, qhi = q_off[plan["req_idx"]]
+                        q_tok = q_reduced[qlo:qhi]
+                    else:
+                        q_tok = q_buf[start + 1:end + 1, :].detach().clone()
                 else:
-                    q_tok = snap_q[end - 1] if _BATCHED_EGRESS \
-                        else q_buf[end, :].detach().clone()
+                    if _BATCHED_EGRESS:
+                        qlo, _ = q_off[plan["req_idx"]]
+                        q_tok = q_reduced[qlo]
+                    else:
+                        q_tok = q_buf[end, :].detach().clone()
                 layer_states[module_name]["q"].append(q_tok)
                 layer_states[module_name]["k_prefix_ends"].append(int(abs_end))
                 nbytes += q_tok.numel() * q_tok.element_size()

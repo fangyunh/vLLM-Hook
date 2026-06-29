@@ -489,9 +489,13 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
     No prefix-K — the residual stream is per-token, so the scattered rows ARE the
     artifact (contrast QK, where k_all reconstructs the cached key history).
 
-    With ``VLLM_HOOK_BATCHED_EGRESS=1`` the per-(layer, request) clones become ONE clone
-    per layer (a per-step SNAPSHOT of the active flat-column prefix) plus per-request
-    VIEWS — O(num_layers) launches instead of O(num_layers * num_requests), same data.
+    With ``VLLM_HOOK_BATCHED_EGRESS=1`` (Lever A: reduce-then-free) the per-(layer,
+    request) clones become ONE ``index_select`` per layer that gathers only the rows
+    being saved into a compact own-storage tensor; requests take VIEWS into it —
+    O(num_layers) launches instead of O(num_layers * num_requests), same data. Unlike a
+    wide [1:W+1] snapshot, the gather's size equals the saved bytes, so a sparse
+    last_token view pins only its own row (no W-row snapshot OOM) and the drain guard's
+    per-request bytes are exact.
     """
     if not plans:
         return
@@ -506,16 +510,30 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
         if not layer_plans:
             continue
 
-        # ---- batched: ONE clone for the layer; requests take views ----
-        snap = None
+        # ---- batched (Lever A: reduce-then-free) — ONE index_select of ONLY the rows
+        # we will save, into a compact own-storage tensor per layer, instead of cloning
+        # the wide [1:W+1] snapshot and handing out views. A last_token request
+        # contributes its single row; all_tokens its [start+1, end+1) span. The gathered
+        # tensor's size == the saved bytes, so a sparse last_token view no longer pins a
+        # W-row snapshot (the OOM blind spot) and the drain guard's per-request bytes are
+        # exact. Still ONE launch per layer (index_select copies into fresh storage, so
+        # the views survive buffer reuse, exactly like the old .clone()). The throttle
+        # gate stays inline below; under active throttling this gathers a few extra rows
+        # (never referenced, freed at end of layer) — bounded by W, no worse than before.
+        reduced = None
+        red_off = {}  # req_idx -> (lo, hi) into `reduced`; last_token uses reduced[lo]
         if _BATCHED_EGRESS:
-            # Snapshot index j == buffer row j+1 == flat column j; plan span [start, end)
-            # → snap[start:end], last_token row → snap[end-1]. The per-step snapshot is
-            # transient scratch kept alive only by the reduced views requests slice below;
-            # the DRAIN budget is charged those reduced view bytes PER REQUEST (decremented
-            # on pop), so gpu_bytes tracks current residency, not this scratch.
-            W = max(p["end"] for p in layer_plans)
-            snap = hs_buf[1:W + 1, :].detach().clone()
+            row_idx = []
+            for p in layer_plans:
+                lo = len(row_idx)
+                if p["hs_mode"] == "last_token":
+                    row_idx.append(min(p["end"], cap))
+                    red_off[p["req_idx"]] = (lo, lo + 1)
+                else:
+                    row_idx.extend(range(p["start"] + 1, p["end"] + 1))
+                    red_off[p["req_idx"]] = (lo, len(row_idx))
+            rows_t = torch.tensor(row_idx, dtype=torch.int64, device=hs_buf.device)
+            reduced = hs_buf.index_select(0, rows_t)
 
         for plan in layer_plans:
             start = plan["start"]
@@ -541,9 +559,10 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
                     continue
 
             # Rows are start+1 .. end (sentinel-offset). Per-request path clones so we own
-            # the data; batched path takes a view into the per-step snapshot.
+            # the data; batched path takes a view into the compact reduced gather.
             if _BATCHED_EGRESS:
-                hs_tok = snap[end - 1] if req_mode == "last_token" else snap[start:end]
+                lo, hi = red_off[plan["req_idx"]]
+                hs_tok = reduced[lo] if req_mode == "last_token" else reduced[lo:hi]
             elif req_mode == "last_token":
                 last_row = min(end, cap)  # row (end-1)+1 == end, bounded by cap
                 hs_tok = hs_buf[last_row, :].detach().clone()

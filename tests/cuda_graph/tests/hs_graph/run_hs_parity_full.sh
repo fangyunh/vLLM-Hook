@@ -49,13 +49,15 @@ PY=tests/cuda_graph/tests/hs_graph/hs_parity.py
 echo "[run_hs_parity_full] cudagraph_mode=FULL_DECODE_ONLY capture=buffer"
 
 run_leg () {
-  local name="$1" cfg="$2" hooks_on="$3" mt="$4"
+  # batched (arg 5, default 0) sets VLLM_HOOK_BATCHED_EGRESS=1 on the GRAPH capture only
+  # (Lever A reduce-then-free egress). Eager is op mode and ignores it -> still ground truth.
+  local name="$1" cfg="$2" hooks_on="$3" mt="$4" batched="${5:-0}"
   local g="$WORK/${name}_graph.pkl" e="$WORK/${name}_eager.pkl"
   echo "============================================================"
-  echo "[run_hs_parity_full] LEG=$name config=$cfg hooks_on=$hooks_on max_tokens=$mt"
+  echo "[run_hs_parity_full] LEG=$name config=$cfg hooks_on=$hooks_on max_tokens=$mt batched=$batched"
   echo "============================================================"
-  echo "[run_hs_parity_full] === ${name} 1/3 graph capture (FULL_DECODE_ONLY, buffer) ==="
-  VLLM_HOOK_CONFIG_FILE="$cfg" VLLM_HOOK_HS_CAPTURE=buffer \
+  echo "[run_hs_parity_full] === ${name} 1/3 graph capture (FULL_DECODE_ONLY, buffer, batched=$batched) ==="
+  VLLM_HOOK_CONFIG_FILE="$cfg" VLLM_HOOK_HS_CAPTURE=buffer VLLM_HOOK_BATCHED_EGRESS="$batched" \
     VLLM_HOOK_PARITY_HOOKS_ON="$hooks_on" VLLM_HOOK_PARITY_MAX_TOKENS="$mt" \
     python -u "$PY" capture --mode graph --out "$g"
   echo "[run_hs_parity_full] === ${name} 2/3 eager capture (ground truth) ==="
@@ -66,10 +68,20 @@ run_leg () {
   python -u "$PY" compare --graph "$g" --eager "$e" || echo "[run_hs_parity_full] LEG $name FAILED"
 }
 
+# ---- regression legs (default per-request egress, batched OFF) ----
 # Leg A: prefill-only, last_token — decode is a baked no-op under the full decode graph.
 run_leg prefillonly_lasttok "model_configs/hidden_states/Qwen2-1.5B-Instruct.json" prefill 12
 
 # Leg B: both (prefill+decode), all_tokens over all layers — full-graph decode capture.
 run_leg both_alltok "model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json" both 12
+
+# ---- Lever A legs (VLLM_HOOK_BATCHED_EGRESS=1, reduce-then-free index_select) ----
+# Leg C: both, LAST_TOKEN — the blind-spot case (sparse 1-row-per-step save). Lever A must
+# gather only the saved rows so a last_token view no longer pins the wide snapshot; output
+# must stay byte-identical to eager across all 12 decode steps.
+run_leg both_lasttok_batched "model_configs/hidden_states/Qwen2-1.5B-Instruct.json" both 12 1
+
+# Leg D: both, ALL_TOKENS — the dense case under Lever A (gather tiles the snapshot).
+run_leg both_alltok_batched "model_configs/hidden_states/Qwen2-1.5B-Instruct_alltok.json" both 12 1
 
 echo "[run_hs_parity_full] DONE — see VERDICT lines above per leg."

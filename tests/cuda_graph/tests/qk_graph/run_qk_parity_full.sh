@@ -85,4 +85,18 @@ VLLM_HOOK_PARITY_HOOKS_ON=both VLLM_HOOK_QK_CAPTURE=op \
 echo "[run_qk_parity_full] === B 3/3 compare (strict full-shape: prefill+decode, q+k_all) ==="
 python -u "$PY" compare --graph "$GB" --eager "$EB" || echo "[run_qk_parity_full] LEG B FAILED"
 
+# ---- leg C: Lever A — same as leg B but VLLM_HOOK_BATCHED_EGRESS=1 (reduce-then-free
+# index_select gather). Re-captures graph with batched egress ON and compares vs the SAME
+# eager ground truth EB (eager uses op mode, which ignores _BATCHED_EGRESS), proving the
+# reduce-then-free path is byte-identical to eager for q (incl. last-token sparsity) + k_all.
+GC="$WORK/both_graph_batched.pkl"
+echo "============================================================"
+echo "[run_qk_parity_full] LEG C = Lever A (hooks_on=both, VLLM_HOOK_BATCHED_EGRESS=1)"
+echo "============================================================"
+echo "[run_qk_parity_full] === C 1/2 graph capture (FULL_DECODE_ONLY, buffer, batched egress) ==="
+VLLM_HOOK_PARITY_HOOKS_ON=both VLLM_HOOK_QK_CAPTURE=buffer VLLM_HOOK_BATCHED_EGRESS=1 \
+  python -u "$PY" capture --mode graph --out "$GC"
+echo "[run_qk_parity_full] === C 2/2 compare batched-graph vs eager ==="
+python -u "$PY" compare --graph "$GC" --eager "$EB" || echo "[run_qk_parity_full] LEG C FAILED"
+
 echo "[run_qk_parity_full] DONE — see VERDICT lines above per leg."

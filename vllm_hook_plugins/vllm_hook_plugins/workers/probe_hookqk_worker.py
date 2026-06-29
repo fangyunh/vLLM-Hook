@@ -560,6 +560,58 @@ class ProbeHookQKWorker:
             return compressed
         return None
 
+    def reset_capture_peak_mem(self) -> int:
+        """collective_rpc-callable: reset the CUDA peak-allocated high-water mark and return
+        current allocated bytes. Read-only test/monitoring introspection (the CB-OOM oracle
+        measures peak GPU residency this way; worker-internal CUDA stats have no other
+        channel to the driver). Called by string name so no function payload is serialized."""
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            return int(torch.cuda.memory_allocated())
+        return 0
+
+    def capture_drain_stats(self) -> dict:
+        """collective_rpc-callable: snapshot the drain/throttle manager counters, PROF
+        capture counters, and CUDA mem high-water. Read-only introspection for the CB-OOM
+        oracle. Called by string name (no cloudpickled function payload)."""
+        out = {
+            "drain_present": False, "drain_enabled": False, "num_drains": 0,
+            "gpu_bytes": 0, "resident_bytes": 0, "ceiling_bytes": 0, "budget_bytes": 0,
+            "throttled_set": 0, "max_inflight": 0, "admitted_set": 0,
+            "prof_throttled": 0, "prof_hookfire": 0,
+            "max_mem_allocated": 0, "mem_allocated": 0, "total_gpu": 0,
+        }
+        dm = getattr(self, "_capture_drain", None)
+        if dm is not None:
+            out["drain_present"] = True
+            out["drain_enabled"] = bool(getattr(dm, "enabled", False))
+            out["num_drains"] = int(getattr(dm, "num_drains", 0))
+            out["gpu_bytes"] = int(getattr(dm, "gpu_bytes", 0))
+            out["resident_bytes"] = int(getattr(dm, "resident_bytes", 0))
+            out["ceiling_bytes"] = int(getattr(dm, "ceiling_bytes", 0))
+            out["budget_bytes"] = int(getattr(dm, "budget_bytes", 0))
+            out["throttled_set"] = int(len(getattr(dm, "_throttled", ()) or ()))
+            out["max_inflight"] = int(getattr(dm, "max_inflight", 0))
+            out["admitted_set"] = int(len(getattr(dm, "_admitted", ()) or ()))
+        try:
+            from vllm_hook_plugins._profiler import PROF
+            counters = PROF.snapshot().get("counters", {})
+            out["prof_throttled"] = int(counters.get("capture.throttled", 0))
+            out["prof_hookfire"] = int(counters.get("hook.fire.qk", 0))
+        except Exception:  # noqa: BLE001
+            pass
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            out["max_mem_allocated"] = int(torch.cuda.max_memory_allocated())
+            out["mem_allocated"] = int(torch.cuda.memory_allocated())
+            try:
+                _free, _total = torch.cuda.mem_get_info()
+                out["total_gpu"] = int(_total)
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
     def clear_captured_states(self, external_req_id: str) -> None:
         """Remove captured states without returning them (cleanup on abort/disconnect)."""
         dm = getattr(self, "_capture_drain", None)

@@ -125,4 +125,50 @@ echo "[run_cb_oom] === throttle-compare ==="
 VLLM_HOOK_CONFIG_FILE="$ALLTOK" python -u "$PY" throttle-compare --throttle "$TGR" --eager "$TEA" \
   || echo "[run_cb_oom] throttle-compare returned non-zero (see VERDICT above)"
 
+# ============================================================
+# (d) NODRAIN — drain ARMED with a generous budget must fire 0 times on a benign
+#     fixed-shape workload (guards the v0.5.4 monotonic-cumulative regression).
+# ============================================================
+echo "============================================================"
+echo "[run_cb_oom] (d) NODRAIN  generous budget, benign workload -> expect num_drains==0"
+echo "============================================================"
+TND="$WORK/nodrain.pkl"
+echo "[run_cb_oom] === nodrain (graph, generous budget) ==="
+VLLM_HOOK_CONFIG_FILE="$ALLTOK" VLLM_HOOK_QK_CAPTURE=buffer \
+  python -u "$PY" nodrain --out "$TND" \
+  || echo "[run_cb_oom] nodrain leg FAILED"
+echo "[run_cb_oom] === nodrain-verify ==="
+python -u "$PY" nodrain-verify --out "$TND" \
+  || echo "[run_cb_oom] nodrain-verify returned non-zero (see VERDICT above)"
+
+# ============================================================
+# (e) INFLIGHT — proactive admission cap (VLLM_HOOK_CAPTURE_MAX_INFLIGHT)
+# ============================================================
+echo "============================================================"
+echo "[run_cb_oom] (e) INFLIGHT  proactive concurrently-capturing cap"
+echo "============================================================"
+TIN="$WORK/inflight_graph.pkl"
+echo "[run_cb_oom] === inflight (graph, max_inflight=1, ceiling off) ==="
+VLLM_HOOK_CONFIG_FILE="$ALLTOK" VLLM_HOOK_QK_CAPTURE=buffer \
+  python -u "$PY" inflight --out "$TIN" \
+  || echo "[run_cb_oom] inflight leg FAILED"
+echo "[run_cb_oom] === inflight-compare (admitted vs throttle-eager ground truth) ==="
+python -u "$PY" inflight-compare --inflight "$TIN" --eager "$TEA" \
+  || echo "[run_cb_oom] inflight-compare returned non-zero (see VERDICT above)"
+
+# ============================================================
+# (f) FRACTION — VLLM_HOOK_CAPTURE_GPU_BUDGET resolves lazily post-KV-carve
+# ============================================================
+echo "============================================================"
+echo "[run_cb_oom] (f) FRACTION  fraction budget resolves post-KV (not free-at-install)"
+echo "============================================================"
+TFR="$WORK/fraction.pkl"
+echo "[run_cb_oom] === fraction (graph, GPU_BUDGET=0.01) ==="
+VLLM_HOOK_CONFIG_FILE="$ALLTOK" VLLM_HOOK_QK_CAPTURE=buffer \
+  python -u "$PY" fraction --out "$TFR" \
+  || echo "[run_cb_oom] fraction leg FAILED"
+echo "[run_cb_oom] === fraction-verify ==="
+python -u "$PY" fraction-verify --out "$TFR" \
+  || echo "[run_cb_oom] fraction-verify returned non-zero (see VERDICT above)"
+
 echo "[run_cb_oom] DONE — VERDICT lines above (PARITY x2, GPUBOUND, THROTTLE)."

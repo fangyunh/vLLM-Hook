@@ -33,14 +33,24 @@ existing parity oracles are byte-for-byte unchanged. Setting an explicit budget/
 enables the respective half on its own (back-compat with the drain parity sweep). The
 ceiling is a SOFT gate on NEW requests: in-flight admitted requests still grow with decode
 length, so peak ~= ceiling + in-flight overshoot (bounded by concurrency, not the ceiling).
-Stage 2 (incremental sink + free, deferred) collapses the pinned host retention window from
-request-lifetime to N steps.
+Stage 2 (incremental sink + free) would collapse the pinned host retention window from
+request-lifetime to N steps, but is DEFERRED — it is architecturally blocked on most paths:
+the RPC sink delivers capture only at ``get_captured_states`` return (cannot free early);
+the QK disk sink reconstructs ``k_all`` by concatenating ALL steps at flush, sliced by
+``k_prefix_ends`` (incremental write = read-back-to-concatenate, a net loss); and
+``save_pt_atomic``/safetensors are single-shot atomic writes (not append-friendly). It would
+need a new chunked artifact format + reworked drain accounting (track freed-but-not-popped)
++ its own oracle, for a DISK-only goodput gain. Host RAM is already bounded by load via the
+resident ceiling + the ``VLLM_HOOK_CAPTURE_MAX_INFLIGHT`` admission cap below, and the
+binding HS ``last_token`` OOM is fixed by Lever A (reduce-then-free egress), so the value is
+bounded. See CLAUDE.md "Next steps" for the full plan if revisited.
 
 Env:
   VLLM_HOOK_CAPTURE_STREAMING   master opt-in (default 0 = OFF). When 1, enables BOTH the
                                 auto drain budget AND the resident-ceiling throttle.
-  VLLM_HOOK_CAPTURE_GPU_BUDGET  fraction of FREE GPU memory (at install) capture clones may
-                                occupy before draining. Auto 0.05 under STREAMING=1, or set
+  VLLM_HOOK_CAPTURE_GPU_BUDGET  fraction of FREE GPU memory capture clones may occupy before
+                                draining, resolved at the FIRST drain check (post-KV-carve),
+                                NOT at install. Auto 0.05 under STREAMING=1, or set
                                 explicitly. Explicit 0 = drain DISABLED (escape hatch).
   VLLM_HOOK_CAPTURE_DRAIN_BYTES absolute drain budget; overrides the fraction and enables the
                                 drain on its own (used by the parity sweep to FORCE drains).
@@ -52,6 +62,10 @@ Env:
                                            enables the throttle on its own. <=0 = no ceiling.
   VLLM_HOOK_CAPTURE_RESIDENT_CEILING_FRAC  fraction of total host RAM for the ceiling when no
                                            absolute value is set (default 0.5, generous).
+  VLLM_HOOK_CAPTURE_MAX_INFLIGHT           proactive cap on the NUMBER of concurrently-
+                                           capturing requests (bounds capture memory by load
+                                           before the resident ceiling is approached). Setting
+                                           it (>0) enables the throttle on its own. 0 = no cap.
 """
 from __future__ import annotations
 
@@ -167,10 +181,20 @@ class CaptureDrainManager:
     # where some values are LISTS of captured tensors (q / k_all / hidden_states).
     _BUCKET_ATTRS = ("_captured_states", "_disk_states")
 
-    def __init__(self, device, budget_bytes: int, throttle_enabled: bool = False) -> None:
+    def __init__(self, device, budget_bytes: int, throttle_enabled: bool = False,
+                 budget_frac: float = 0.0, max_inflight: int = 0) -> None:
         self.device = torch.device(device)
+        self.budget_frac = float(budget_frac)
         self.budget_bytes = int(budget_bytes)
-        self.enabled = self.budget_bytes > 0 and self.device.type == "cuda"
+        # A FRACTION budget is resolved LAZILY at the first drain check, not here: at
+        # install the KV-cache pool is not yet carved, so free GPU still counts the space
+        # KV will claim -> a budget so large the drain fires once then OOMs (the documented
+        # VLLM_HOOK_CAPTURE_GPU_BUDGET bug, which also bit the STREAMING auto-default since
+        # it measured free-at-install too). Resolving on the first post-forward step (KV
+        # already allocated) makes "fraction of free GPU" mean what it says.
+        self._budget_pending = self.budget_frac > 0 and self.budget_bytes <= 0
+        self.enabled = (self.device.type == "cuda"
+                        and (self.budget_bytes > 0 or self._budget_pending))
         self.gpu_bytes = 0
         self._drains = 0
         # SINGLE dedicated copy stream (device clones stay single); only the host-side
@@ -191,6 +215,12 @@ class CaptureDrainManager:
         self.throttle_enabled = bool(throttle_enabled) and self.device.type == "cuda"
         self.ceiling_bytes = _ceiling_from_env()
         self._throttled: set = set()  # req_ids refused admission (skip every later step)
+        # Proactive admission cap: bound the NUMBER of concurrently-capturing requests so
+        # capture memory is bounded by LOAD before the (reactive) resident ceiling is even
+        # approached. 0 = no cap. ``_admitted`` is the set of req_ids currently capturing
+        # (added on first admit, dropped on pop/forget).
+        self.max_inflight = max(0, int(max_inflight))
+        self._admitted: set = set()
 
     @classmethod
     def from_env(cls, device) -> "CaptureDrainManager":
@@ -207,19 +237,23 @@ class CaptureDrainManager:
         streaming = os.environ.get("VLLM_HOOK_CAPTURE_STREAMING", "0") == "1"
         abs_bytes = os.environ.get("VLLM_HOOK_CAPTURE_DRAIN_BYTES")
         gpu_budget = os.environ.get("VLLM_HOOK_CAPTURE_GPU_BUDGET")
+        # A fraction budget (explicit knob or the streaming auto-default) is passed through
+        # as a FRACTION and resolved lazily post-KV-carve (see __init__) — never measured
+        # against free-at-install here, which is the documented fraction-knob OOM bug.
+        budget = 0
+        frac = 0.0
         if abs_bytes:
             budget = int(abs_bytes)
         elif gpu_budget is not None and gpu_budget != "":
-            frac = float(gpu_budget or "0")
-            budget = int(frac * _free_gpu_bytes(dev)) if frac > 0 else 0
+            frac = max(0.0, float(gpu_budget or "0"))  # 0 = drain DISABLED (escape hatch)
         elif streaming:
-            budget = int(0.05 * _free_gpu_bytes(dev))
-        else:
-            budget = 0
-        # Throttle enables with the master switch OR an explicit ceiling env.
+            frac = 0.05  # auto default
+        # Throttle enables with the master switch, an explicit ceiling, OR an inflight cap.
         ceiling_set = bool(os.environ.get("VLLM_HOOK_CAPTURE_RESIDENT_CEILING")
                            or os.environ.get("VLLM_HOOK_CAPTURE_RESIDENT_CEILING_FRAC"))
-        return cls(dev, budget, throttle_enabled=streaming or ceiling_set)
+        max_inflight = max(0, int(os.environ.get("VLLM_HOOK_CAPTURE_MAX_INFLIGHT", "0") or "0"))
+        return cls(dev, budget, throttle_enabled=streaming or ceiling_set or max_inflight > 0,
+                   budget_frac=frac, max_inflight=max_inflight)
 
     # ------------------------------------------------------------------
     # Accounting (hot path — cheap when disabled).
@@ -257,16 +291,27 @@ class CaptureDrainManager:
     def admit(self, req_id, already_capturing: bool) -> bool:
         """Whether egress may START capturing this request this step.
 
-        Refuses ONLY when total resident capture bytes exceed the ceiling AND the
-        request is not already being captured — an admitted request always runs to
-        completion (never throttled mid-stream → no half-captured artifact). A refused
-        req_id is remembered so every later step/layer skips it uniformly.
+        Two gates, both applied only to a NEW request (an admitted one always runs to
+        completion — never throttled mid-stream, so no half-captured artifact):
+        1. PROACTIVE inflight cap (``max_inflight``): refuse once the number of
+           concurrently-capturing requests hits the cap, bounding capture memory by LOAD
+           before the resident ceiling is even approached.
+        2. REACTIVE resident-byte ceiling: refuse when total held capture bytes exceed the
+           host-RAM ceiling.
+        A refused req_id is remembered so every later step/layer skips it uniformly; an
+        admitted one is tracked in ``_admitted`` (dropped on pop/forget).
         """
         if not self.throttle_enabled or already_capturing:
             return True
+        if req_id in self._admitted:
+            return True  # already counted as in-flight
+        if self.max_inflight > 0 and len(self._admitted) >= self.max_inflight:
+            self._throttled.add(req_id)
+            return False
         if self.resident_bytes > self.ceiling_bytes:
             self._throttled.add(req_id)
             return False
+        self._admitted.add(req_id)
         return True
 
     def on_pop(self, req_id, layer_dict) -> None:
@@ -287,6 +332,7 @@ class CaptureDrainManager:
             if self.resident_bytes < 0:
                 self.resident_bytes = 0
             self._throttled.discard(req_id)
+            self._admitted.discard(req_id)  # frees an inflight-cap slot
         if self.enabled:
             self.gpu_bytes -= bucket_gpu_bytes(layer_dict)
             if self.gpu_bytes < 0:
@@ -300,20 +346,49 @@ class CaptureDrainManager:
         sustained throttling. Called from the worker retrieval/cleanup paths. Matches the
         same exact-or-``{id}-``prefix rule as ``iter_matching_req_ids``.
         """
-        if not self.throttle_enabled or not self._throttled:
+        if not self.throttle_enabled:
             return
         prefix = f"{external_req_id}-"
-        self._throttled = {
-            r for r in self._throttled
-            if not (r == external_req_id or (isinstance(r, str) and r.startswith(prefix)))
-        }
+
+        def _matches(r):
+            return r == external_req_id or (isinstance(r, str) and r.startswith(prefix))
+
+        if self._throttled:
+            self._throttled = {r for r in self._throttled if not _matches(r)}
+        # An admitted request normally leaves _admitted via on_pop; clear here too so a
+        # terminated/aborted request that skipped pop never permanently holds a cap slot.
+        if self._admitted:
+            self._admitted = {r for r in self._admitted if not _matches(r)}
+
+    def _resolve_budget(self) -> None:
+        """Resolve a deferred fraction budget against free GPU measured NOW.
+
+        Called lazily at the first drain check (post-forward, so the KV-cache pool is
+        already carved). If free GPU is unreadable the manager disables itself rather than
+        treat a 0 budget as "drain every step".
+        """
+        free = _free_gpu_bytes(self.device)
+        self.budget_bytes = int(self.budget_frac * free) if free > 0 else 0
+        self._budget_pending = False
+        if self.budget_bytes <= 0:
+            self.enabled = False
+        if _DRAIN_DEBUG:
+            print(f"[graph/drain] resolved fraction budget = {self.budget_bytes}B "
+                  f"({self.budget_frac:.3g} x {free}B free, post-KV-carve)", flush=True)
 
     def maybe_drain(self, worker) -> None:
         """Drain to pinned host if the accrued GPU capture bytes exceed the budget.
 
-        Called once per step after egress. A no-op when disabled or under budget.
+        Called once per step after egress. A no-op when disabled or under budget. A
+        deferred fraction budget is resolved here on the first call (post-KV-carve).
         """
-        if not self.enabled or self.gpu_bytes <= self.budget_bytes:
+        if not self.enabled:
+            return
+        if self._budget_pending:
+            self._resolve_budget()
+            if not self.enabled:
+                return
+        if self.gpu_bytes <= self.budget_bytes:
             return
         self._drain(worker)
 

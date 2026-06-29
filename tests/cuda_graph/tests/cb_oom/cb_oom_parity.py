@@ -108,66 +108,16 @@ def _capture_store(out):
 
 
 # ---------------------------------------------------------------------------
-# collective_rpc payloads — these run IN THE WORKER (self == Worker), so they can
-# read the per-worker drain manager + PROF counters that never cross to the driver
-# on the normal probe path.  cloudpickle ships them by value (vLLM v1
-# multiproc_executor), so a __main__-defined function reaches the worker intact.
+# Worker-internal state (drain manager + PROF counters + CUDA mem) is read via
+# collective_rpc by STRING METHOD NAME — matching the step0 harnesses and the repo
+# convention. The methods live on the QK worker (ProbeHookQKWorker.capture_drain_stats /
+# .reset_capture_peak_mem); calling them by name ships NO function payload, so current
+# vLLM does not require the insecure-serialization fallback.
 # ---------------------------------------------------------------------------
 
-def _rpc_reset_peak(self):  # noqa: ANN001
-    """Reset the CUDA peak-allocated high-water mark; return current allocated."""
-    import torch as _t
-    if _t.cuda.is_available():
-        _t.cuda.synchronize()
-        _t.cuda.reset_peak_memory_stats()
-        return int(_t.cuda.memory_allocated())
-    return 0
-
-
-def _rpc_drain_stats(self):  # noqa: ANN001
-    """Read drain-manager + PROF counters + CUDA mem high-water from the worker."""
-    import torch as _t
-    out = {
-        "drain_present": False,
-        "drain_enabled": False,
-        "num_drains": 0,
-        "gpu_bytes": 0,
-        "resident_bytes": 0,
-        "ceiling_bytes": 0,
-        "throttled_set": 0,
-        "budget_bytes": 0,
-        "prof_throttled": 0,
-        "prof_hookfire": 0,
-        "max_mem_allocated": 0,
-        "mem_allocated": 0,
-    }
-    dm = getattr(self, "_capture_drain", None)
-    if dm is not None:
-        out["drain_present"] = True
-        out["drain_enabled"] = bool(getattr(dm, "enabled", False))
-        out["num_drains"] = int(getattr(dm, "num_drains", 0))
-        out["gpu_bytes"] = int(getattr(dm, "gpu_bytes", 0))
-        out["resident_bytes"] = int(getattr(dm, "resident_bytes", 0))
-        out["ceiling_bytes"] = int(getattr(dm, "ceiling_bytes", 0))
-        out["budget_bytes"] = int(getattr(dm, "budget_bytes", 0))
-        out["throttled_set"] = int(len(getattr(dm, "_throttled", ()) or ()))
-    try:
-        from vllm_hook_plugins._profiler import PROF
-        counters = PROF.snapshot().get("counters", {})
-        out["prof_throttled"] = int(counters.get("capture.throttled", 0))
-        out["prof_hookfire"] = int(counters.get("hook.fire.qk", 0))
-    except Exception:  # noqa: BLE001
-        pass
-    if _t.cuda.is_available():
-        _t.cuda.synchronize()
-        out["max_mem_allocated"] = int(_t.cuda.max_memory_allocated())
-        out["mem_allocated"] = int(_t.cuda.memory_allocated())
-    return out
-
-
-def _rpc(llm, fn):
-    """Call ``fn`` on every worker; return rank-0 result (TP=1 -> the only one)."""
-    res = llm.llm.collective_rpc(fn)
+def _rpc(llm, method):
+    """Call worker method ``method`` (by name) on every worker; return the rank-0 result."""
+    res = llm.llm.collective_rpc(method)
     return res[0] if res else {}
 
 
@@ -244,7 +194,7 @@ def parity(mode, out_path):
         result[name] = _capture_store(out)
 
     if mode == "graph":
-        stats = _rpc(llm, _rpc_drain_stats)
+        stats = _rpc(llm, "capture_drain_stats")
         result["_meta"]["drain"] = stats
         print(f"[cb_oom:{mode}] drain: enabled={stats['drain_enabled']} "
               f"num_drains={stats['num_drains']} budget={stats['budget_bytes']}B "
@@ -375,12 +325,12 @@ def gpuprobe(stage1, out_path):
           f"prompt_toks~{_GP_PROMPT_TOKS} all_tokens; measuring peak GPU residency",
           flush=True)
 
-    base = _rpc(llm, _rpc_reset_peak)
+    base = _rpc(llm, "reset_capture_peak_mem")
     # ONE concurrent batch -> all requests in flight together -> their capture clones
     # accumulate on GPU until flush UNLESS the drain relocates them to pinned host.
     # save_to_disk=True keeps the offline per-request merge out of the memory picture.
     llm.generate(prompts, sp, save_to_disk=True)
-    stats = _rpc(llm, _rpc_drain_stats)
+    stats = _rpc(llm, "capture_drain_stats")
 
     peak_delta = max(0, stats["max_mem_allocated"] - base)
     rec = {"stage1": stage1, "baseline_alloc": base, "peak_delta": peak_delta,
@@ -456,7 +406,7 @@ def throttle(out_path):
           f"single admitted prompt={ntok} toks", flush=True)
     out = llm.generate(prompt, sp1, save_to_disk=False)
     admitted = _capture_store(out)
-    s_after_single = _rpc(llm, _rpc_drain_stats)
+    s_after_single = _rpc(llm, "capture_drain_stats")
     print(f"[cb_oom:throttle] after single: layers_captured={len(admitted)} "
           f"resident={s_after_single['resident_bytes']}B "
           f"throttled_so_far={s_after_single['prof_throttled']}", flush=True)
@@ -468,7 +418,7 @@ def throttle(out_path):
     batch = [prompt] * _THROTTLE_REQS
     print(f"[cb_oom:throttle] throttle batch reqs={_THROTTLE_REQS}", flush=True)
     llm.generate(batch, sp1, save_to_disk=True)
-    stats = _rpc(llm, _rpc_drain_stats)
+    stats = _rpc(llm, "capture_drain_stats")
     print(f"[cb_oom:throttle] after batch: capture.throttled={stats['prof_throttled']} "
           f"throttled_set={stats['throttled_set']} resident={stats['resident_bytes']}B "
           f"ceiling={stats['ceiling_bytes']}B hook.fire.qk={stats['prof_hookfire']}",
@@ -538,6 +488,209 @@ def throttle_compare(throttle_path, eager_path):
 
 
 # ---------------------------------------------------------------------------
+# (e) INFLIGHT — proactive admission cap (VLLM_HOOK_CAPTURE_MAX_INFLIGHT). Bounds the
+#     NUMBER of concurrently-capturing requests, independent of the resident-byte ceiling.
+# ---------------------------------------------------------------------------
+
+def inflight(out_path):
+    # Cap = 1 concurrently-capturing request, ceiling DISABLED so the cap (not bytes) is
+    # the gate. A single request is always admitted (inflight starts at 0); a concurrent
+    # batch then has its first admitted and the rest refused by the cap.
+    cap = os.environ.get("VLLM_HOOK_CB_MAX_INFLIGHT", "1")
+    os.environ["VLLM_HOOK_CAPTURE_MAX_INFLIGHT"] = cap
+    os.environ.pop("VLLM_HOOK_CAPTURE_RESIDENT_CEILING", None)
+    os.environ["VLLM_HOOK_CAPTURE_RESIDENT_CEILING_FRAC"] = "0"  # no byte ceiling -> isolate the cap
+    os.environ["VLLM_HOOK_PROFILE"] = "1"
+
+    llm = _boot("graph", enable_prefix_caching=False, max_num_seqs=max(_THROTTLE_REQS, 8))
+    from vllm import SamplingParams
+    sp1 = SamplingParams(temperature=0.0, max_tokens=1, extra_args={"hooks_on": "prefill"})
+    prompt = _make_prompt(llm.tokenizer, _GP_PROMPT_TOKS)
+    ntok = len(llm.tokenizer.encode(prompt))
+
+    print(f"[cb_oom:inflight] max_inflight={cap} single admitted prompt={ntok} toks", flush=True)
+    out = llm.generate(prompt, sp1, save_to_disk=False)  # always admitted -> correctness ref
+    admitted = _capture_store(out)
+
+    batch = [prompt] * _THROTTLE_REQS
+    print(f"[cb_oom:inflight] concurrent batch reqs={_THROTTLE_REQS} (cap={cap})", flush=True)
+    llm.generate(batch, sp1, save_to_disk=True)
+    stats = _rpc(llm, "capture_drain_stats")
+    print(f"[cb_oom:inflight] after batch: capture.throttled={stats['prof_throttled']} "
+          f"throttled_set={stats['throttled_set']} max_inflight={stats['max_inflight']} "
+          f"admitted_set={stats['admitted_set']}", flush=True)
+    result = {"_meta": {"prompt_toks": ntok, "max_inflight": int(cap)},
+              "admitted": admitted, "stats": stats}
+    with open(out_path, "wb") as f:
+        pickle.dump(result, f)
+    print(f"[cb_oom:inflight] wrote {out_path}", flush=True)
+    return 0
+
+
+def inflight_compare(inflight_path, eager_path):
+    """Reuses the throttle-eager single-prompt ground truth for admitted correctness."""
+    with open(inflight_path, "rb") as f:
+        t = pickle.load(f)
+    with open(eager_path, "rb") as f:
+        e = pickle.load(f)
+    stats = t.get("stats", {})
+    thr = stats.get("prof_throttled", 0)
+    thr_set = stats.get("throttled_set", 0)
+    cap = stats.get("max_inflight", 0)
+    print(f"[cb_oom] INFLIGHT max_inflight={cap} capture.throttled={thr} "
+          f"throttled_set={thr_set}")
+    if not (thr > 0 or thr_set > 0):
+        print("[cb_oom] INFLIGHT VERDICT: NO-THROTTLE — the cap never refused a request "
+              f"(throttled={thr}, set={thr_set}). Raise VLLM_HOOK_CB_THROTTLE_REQS or check "
+              "the cap plumbing.")
+        return 1
+    r = _compare_store(t.get("admitted", {}), e.get("admitted", {}))
+    _print_rec("inflight[admitted]", r)
+    v = _verdict_match("INFLIGHT[admitted-vs-eager]", r)
+    print("=" * 64)
+    if v == 0:
+        print(f"[cb_oom] INFLIGHT VERDICT: PASS — the inflight cap ({cap}) refused "
+              f"{max(thr, thr_set)} admission(s) (no crash) and the admitted request still "
+              f"matches eager. Whole-request cap, no corruption.")
+        return 0
+    print("[cb_oom] INFLIGHT VERDICT: ADMITTED-CORRUPTED — cap fired but the admitted "
+          "request diverges from eager; the cap must not touch an admitted request.")
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# (f) FRACTION — VLLM_HOOK_CAPTURE_GPU_BUDGET smoke test: the budget must resolve LAZILY
+#     against free GPU measured post-KV-carve (not free-at-install). A small fraction must
+#     yield a positive, sub-GPU budget and (at this workload) fire drains, with no crash.
+# ---------------------------------------------------------------------------
+
+def fraction(out_path):
+    frac = os.environ.get("VLLM_HOOK_CB_FRAC", "0.01")
+    os.environ["VLLM_HOOK_CAPTURE_GPU_BUDGET"] = frac
+    os.environ.pop("VLLM_HOOK_CAPTURE_DRAIN_BYTES", None)
+    os.environ.pop("VLLM_HOOK_CAPTURE_STREAMING", None)
+
+    llm = _boot("graph", enable_prefix_caching=False, max_num_seqs=max(_GP_REQS, 16))
+    from vllm import SamplingParams
+    sp = SamplingParams(temperature=0.0, max_tokens=_GP_DECODE,
+                        extra_args={"hooks_on": "both"})
+    prompt = _make_prompt(llm.tokenizer, _GP_PROMPT_TOKS)
+    prompts = [prompt] * _GP_REQS
+    print(f"[cb_oom:fraction] GPU_BUDGET frac={frac} reqs={_GP_REQS} decode={_GP_DECODE}",
+          flush=True)
+    llm.generate(prompts, sp, save_to_disk=True)
+    stats = _rpc(llm, "capture_drain_stats")
+    rec = {"stats": stats, "frac": float(frac), "reqs": _GP_REQS, "decode": _GP_DECODE}
+    print(f"[cb_oom:fraction] resolved budget={stats['budget_bytes']}B "
+          f"total_gpu={stats['total_gpu']/1e9:.1f}GB num_drains={stats['num_drains']} "
+          f"drain_enabled={stats['drain_enabled']}", flush=True)
+    with open(out_path, "wb") as f:
+        pickle.dump(rec, f)
+    print(f"[cb_oom:fraction] wrote {out_path}", flush=True)
+    return 0
+
+
+def fraction_verify(out_path):
+    with open(out_path, "rb") as f:
+        rec = pickle.load(f)
+    s = rec.get("stats", {})
+    budget = s.get("budget_bytes", 0)
+    total = s.get("total_gpu", 0)
+    frac = rec.get("frac", 0.0)
+    print(f"[cb_oom] FRACTION frac={frac} resolved_budget={budget}B "
+          f"total_gpu={total}B num_drains={s.get('num_drains')} "
+          f"drain_enabled={s.get('drain_enabled')}")
+    if not s.get("drain_enabled") or budget <= 0:
+        print("[cb_oom] FRACTION VERDICT: FAIL — fraction budget did not resolve to a "
+              f"positive value (budget={budget}B, enabled={s.get('drain_enabled')}); the "
+              "lazy post-KV resolution is broken.")
+        return 1
+    # The resolved budget must be a SMALL fraction of the GPU (free-post-KV is well under
+    # total), not the near-whole-GPU value the install-time bug would yield for free-before-KV.
+    if total > 0 and budget > 0.5 * total:
+        print(f"[cb_oom] FRACTION VERDICT: REVIEW — resolved budget {budget/1e9:.2f}GB is "
+              f">50% of GPU ({total/1e9:.1f}GB) for frac={frac}; expected a small post-KV "
+              "fraction. Inspect free-GPU timing.")
+        return 2
+    if s.get("num_drains", 0) > 0:
+        print(f"[cb_oom] FRACTION VERDICT: PASS — frac={frac} resolved post-KV to "
+              f"{budget/1e6:.0f}MB ({budget/max(total,1)*100:.2f}% of GPU) and fired "
+              f"{s['num_drains']} drains with no crash. Lazy resolution works.")
+        return 0
+    print(f"[cb_oom] FRACTION VERDICT: PASS (no-fire) — frac={frac} resolved post-KV to a "
+          f"sane {budget/1e6:.0f}MB budget (enabled, sub-GPU) but the workload stayed under "
+          "it so no drains fired. Plumbing OK; raise reqs/decode to force drains.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# (d) NODRAIN — the drain is ARMED with a generous budget but a benign fixed-shape
+#     workload's LIVE residency never crosses it, so it must fire 0 times. Guards
+#     against the v0.5.4 regression (a monotonic-cumulative gpu_bytes that crossed even
+#     a large budget from sheer token throughput, draining with no memory pressure).
+# ---------------------------------------------------------------------------
+
+def nodrain(out_path):
+    # Generous absolute budget: one request's all_tokens capture is ~tens of MB << this,
+    # so the CURRENT-residency trigger stays under budget. Sequential single-request
+    # generates give high CUMULATIVE token throughput while each request flushes (on_pop
+    # -> gpu_bytes decrement) before the next, so live residency stays ~1 request. A
+    # monotonic counter would sum across all iters and cross -> caught.
+    budget = os.environ.get("VLLM_HOOK_CB_NODRAIN_BYTES", str(1 << 29))  # 512 MiB
+    os.environ["VLLM_HOOK_CAPTURE_DRAIN_BYTES"] = str(budget)
+    os.environ.pop("VLLM_HOOK_CAPTURE_GPU_BUDGET", None)
+
+    llm = _boot("graph", enable_prefix_caching=False, max_num_seqs=8)
+    from vllm import SamplingParams
+    sp = SamplingParams(temperature=0.0, max_tokens=_GP_DECODE,
+                        extra_args={"hooks_on": "both"})  # capture every decode step
+    prompt = _make_prompt(llm.tokenizer, _GP_PROMPT_TOKS)
+    iters = int(os.environ.get("VLLM_HOOK_CB_NODRAIN_ITERS", "8"))
+    print(f"[cb_oom:nodrain] ARMED budget={budget}B; {iters} sequential generates "
+          f"decode={_GP_DECODE} prompt_toks~{_GP_PROMPT_TOKS} all_tokens", flush=True)
+    for i in range(iters):
+        llm.generate(prompt, sp, save_to_disk=True)
+        if i == 0 or i == iters - 1:
+            s = _rpc(llm, "capture_drain_stats")
+            print(f"[cb_oom:nodrain]   after iter {i}: num_drains={s['num_drains']} "
+                  f"gpu_bytes={s['gpu_bytes']}B resident={s['resident_bytes']}B",
+                  flush=True)
+    stats = _rpc(llm, "capture_drain_stats")
+    rec = {"stats": stats, "iters": iters, "decode": _GP_DECODE,
+           "budget_bytes": int(budget)}
+    print(f"[cb_oom:nodrain] FINAL num_drains={stats['num_drains']} "
+          f"drain_enabled={stats['drain_enabled']} budget={stats['budget_bytes']}B "
+          f"gpu_bytes={stats['gpu_bytes']}B resident={stats['resident_bytes']}B",
+          flush=True)
+    with open(out_path, "wb") as f:
+        pickle.dump(rec, f)
+    print(f"[cb_oom:nodrain] wrote {out_path}", flush=True)
+    return 0
+
+
+def nodrain_verify(out_path):
+    with open(out_path, "rb") as f:
+        rec = pickle.load(f)
+    s = rec.get("stats", {})
+    print(f"[cb_oom] NODRAIN budget={rec.get('budget_bytes')}B iters={rec.get('iters')} "
+          f"decode={rec.get('decode')} num_drains={s.get('num_drains')} "
+          f"drain_enabled={s.get('drain_enabled')} budget_seen={s.get('budget_bytes')}B")
+    if not s.get("drain_enabled"):
+        print("[cb_oom] NODRAIN VERDICT: INCONCLUSIVE — drain not enabled; cannot assert "
+              "no-fire (check VLLM_HOOK_CAPTURE_DRAIN_BYTES plumbing).")
+        return 2
+    if s.get("num_drains", 0) == 0:
+        print(f"[cb_oom] NODRAIN VERDICT: PASS — drain ARMED (budget={rec.get('budget_bytes')}B) "
+              f"but fired 0 times across {rec.get('iters')} sequential generates; the "
+              f"current-residency trigger does not over-fire on a benign fixed-shape workload.")
+        return 0
+    print(f"[cb_oom] NODRAIN VERDICT: OVER-FIRE — {s.get('num_drains')} drains fired under a "
+          f"{rec.get('budget_bytes')}B budget on a benign workload whose live residency stays "
+          f"bounded; a monotonic-cumulative trigger regression may have returned.")
+    return 1
+
+
+# ---------------------------------------------------------------------------
 
 def main():
     p = argparse.ArgumentParser()
@@ -565,6 +718,22 @@ def main():
     ptc.add_argument("--throttle", required=True)
     ptc.add_argument("--eager", required=True)
 
+    pn = sub.add_parser("nodrain")
+    pn.add_argument("--out", required=True)
+    pnv = sub.add_parser("nodrain-verify")
+    pnv.add_argument("--out", required=True)
+
+    pi = sub.add_parser("inflight")
+    pi.add_argument("--out", required=True)
+    pic = sub.add_parser("inflight-compare")
+    pic.add_argument("--inflight", required=True)
+    pic.add_argument("--eager", required=True)
+
+    pf = sub.add_parser("fraction")
+    pf.add_argument("--out", required=True)
+    pfv = sub.add_parser("fraction-verify")
+    pfv.add_argument("--out", required=True)
+
     args = p.parse_args()
     if args.cmd == "parity":
         sys.exit(parity(args.mode, args.out))
@@ -580,6 +749,18 @@ def main():
         sys.exit(throttle_eager(args.out))
     elif args.cmd == "throttle-compare":
         sys.exit(throttle_compare(args.throttle, args.eager))
+    elif args.cmd == "nodrain":
+        sys.exit(nodrain(args.out))
+    elif args.cmd == "nodrain-verify":
+        sys.exit(nodrain_verify(args.out))
+    elif args.cmd == "inflight":
+        sys.exit(inflight(args.out))
+    elif args.cmd == "inflight-compare":
+        sys.exit(inflight_compare(args.inflight, args.eager))
+    elif args.cmd == "fraction":
+        sys.exit(fraction(args.out))
+    elif args.cmd == "fraction-verify":
+        sys.exit(fraction_verify(args.out))
 
 
 if __name__ == "__main__":
