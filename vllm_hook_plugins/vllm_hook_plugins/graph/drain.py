@@ -69,6 +69,7 @@ Env:
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import List, Optional
 
@@ -409,6 +410,11 @@ class CaptureDrainManager:
             ev.synchronize()
         # The drain stream must not copy a clone before the compute stream materialized it.
         self._stream.wait_stream(compute)
+        # v0.5.7 C: the egress gather (which PRODUCES the bucket clones) may run on its own
+        # side stream, so also wait for its last gather before this D2H reads those tensors.
+        em = getattr(worker, "_egress_stream", None)
+        if em is not None:
+            em.fence_stream(self._stream)
         moved = 0
         with torch.cuda.stream(self._stream):
             for attr in self._BUCKET_ATTRS:
@@ -454,11 +460,98 @@ class CaptureDrainManager:
         return self._drains
 
 
+class EgressStreamManager:
+    """Dedicated copy stream that overlaps capture egress with the next step (v0.5.7 C).
+
+    The post-forward egress gathers (the Lever A ``index_select`` of the saved q/k/hs
+    rows out of the static buffers) run on the COMPUTE stream today, so they sit on the
+    decode critical path between forwards. This moves them onto a side stream so they
+    overlap the inter-step CPU work + the next forward, mirroring ``CaptureDrainManager``'s
+    side-stream discipline.
+
+    The gathers READ the static ``q_buf``/``k_buf``/``hs_buf`` that the NEXT step's scatter
+    REWRITES (same cudagraph-static addresses every step), so two cross-stream hazards are
+    fenced explicitly:
+      * ``gather_scope`` does ``side.wait_stream(compute)`` first, so the gather never reads
+        a buffer the forward's scatter has not finished writing;
+      * ``fence_before_forward`` does ``compute.wait_event(last gather)`` at the top of the
+        next ``execute_model``, so the next forward's scatter never clobbers a buffer a
+        gather is still reading.
+    The reduced tensors the gather produces are held by the buckets to flush; ``synchronize``
+    (via ``drain_barrier``) waits the ring so a flush ``.cpu()`` / drain never reads an
+    unfinished gather. Value-preserving: it only moves WHEN the gather runs, never WHAT it
+    copies. Default ON; ``VLLM_HOOK_EGRESS_STREAM=0`` falls back to the inline compute-stream
+    gather (the A/B control). Inert off-CUDA.
+    """
+
+    def __init__(self, device, enabled: bool, depth: int = 2) -> None:
+        self.device = torch.device(device)
+        self.enabled = bool(enabled) and self.device.type == "cuda"
+        self._stream: Optional[torch.cuda.Stream] = (
+            torch.cuda.Stream(self.device) if self.enabled else None)
+        depth = max(1, int(depth))
+        self._events: List[torch.cuda.Event] = (
+            [torch.cuda.Event() for _ in range(depth)] if self.enabled else [])
+        self._idx = 0
+        self._pending: Optional[torch.cuda.Event] = None  # most recent gather event
+
+    @classmethod
+    def from_env(cls, device) -> "EgressStreamManager":
+        enabled = os.environ.get("VLLM_HOOK_EGRESS_STREAM", "1") != "0"
+        depth = max(1, int(os.environ.get("VLLM_HOOK_EGRESS_RING", "2") or "2"))
+        return cls(device, enabled, depth)
+
+    def fence_before_forward(self) -> None:
+        """Compute waits for the previous step's gather before this forward's scatter."""
+        if not self.enabled or self._pending is None:
+            return
+        torch.cuda.current_stream(self.device).wait_event(self._pending)
+        self._pending = None
+
+    @contextlib.contextmanager
+    def gather_scope(self):
+        """Run the enclosed egress gathers on the side stream, fenced after the forward.
+
+        ``side.wait_stream(compute)`` orders the gather after the forward's scatter; on exit
+        an event is recorded so ``fence_before_forward`` (next step) and ``synchronize``
+        (flush) can wait on it. A no-op pass-through when disabled / off-CUDA.
+        """
+        if not self.enabled:
+            yield
+            return
+        compute = torch.cuda.current_stream(self.device)
+        self._stream.wait_stream(compute)
+        try:
+            with torch.cuda.stream(self._stream):
+                yield
+        finally:
+            ev = self._events[self._idx]
+            ev.record(self._stream)
+            self._pending = ev
+            self._idx = (self._idx + 1) % len(self._events)
+
+    def fence_stream(self, other: "torch.cuda.Stream") -> None:
+        """Make ``other`` wait for the most recent gather (e.g. the drain stream, which
+        reads the gather's output tensors out of the buckets on its own stream)."""
+        if self.enabled and self._pending is not None:
+            other.wait_event(self._pending)
+
+    def synchronize(self) -> None:
+        """Wait for every in-flight gather (flush guard; a never-recorded event is done)."""
+        for ev in self._events:
+            ev.synchronize()
+
+
 def drain_barrier(worker) -> None:
-    """Worker-flush helper: wait for any pending capture drain before reading buckets."""
+    """Worker-flush helper: wait for any pending egress gather + capture drain before
+    reading buckets (both run on side streams; the flush reads the resulting tensors)."""
+    em = getattr(worker, "_egress_stream", None)
+    if em is not None:
+        em.synchronize()
     dm = getattr(worker, "_capture_drain", None)
     if dm is not None:
         dm.synchronize()
 
 
-__all__ = ["CaptureDrainManager", "drain_barrier", "bucket_bytes", "bucket_gpu_bytes"]
+__all__ = ["CaptureDrainManager", "EgressStreamManager", "drain_barrier",
+           "bucket_bytes", "bucket_gpu_bytes"]

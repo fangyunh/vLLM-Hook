@@ -1,6 +1,7 @@
 """CUDA-graph hidden-state capture install (Hybrid mode)."""
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import Any, Dict, Optional
 
@@ -404,12 +405,14 @@ def _build_routing_hs(model_runner, registry: HostRegistry, qsl_cpu: list) -> li
         return []
 
     bs = len(qsl_cpu) - 1
+    inc = registry.incremental_enabled
     capture_index_pinned = registry.capture_index_pinned  # (num_layers, cap)
     any_active_pinned = registry.any_active_pinned          # (num_layers,)
     cap = registry.cap
 
     dbg_rows: list = []
     plans: list = []
+    assignments: list = []  # (start, end, layers_or_None) for the incremental router
     for i in range(bs):
         if i >= len(req_ids):
             break
@@ -457,10 +460,16 @@ def _build_routing_hs(model_runner, registry: HostRegistry, qsl_cpu: list) -> li
         if not rows_layers:
             continue
 
-        rows = torch.arange(start + 1, end + 1, dtype=torch.int64)
-        layer_idx_t = torch.tensor(rows_layers, dtype=torch.long)
-        capture_index_pinned[layer_idx_t[:, None], start:end] = rows[None, :]
-        any_active_pinned[layer_idx_t] = 1
+        if inc:
+            # v0.5.7 A: record (column-range, layer-set); registry uploads only changed
+            # columns. layer_filter None -> all layers (None key); else the 0-based rows.
+            assignments.append((start, end,
+                                None if layer_filter is None else tuple(sorted(rows_layers))))
+        else:
+            rows = torch.arange(start + 1, end + 1, dtype=torch.int64)
+            layer_idx_t = torch.tensor(rows_layers, dtype=torch.long)
+            capture_index_pinned[layer_idx_t[:, None], start:end] = rows[None, :]
+            any_active_pinned[layer_idx_t] = 1
 
         bucket_key = "_disk_states" if extra.get("save_to_disk") else "_captured_states"
         plans.append({
@@ -475,6 +484,8 @@ def _build_routing_hs(model_runner, registry: HostRegistry, qsl_cpu: list) -> li
         })
         dbg_rows.append(f"r{i}:qlen={end - start},mode={req_mode},nlayers={len(rows_layers)}")
 
+    if inc:
+        registry._pending_assignments = assignments
     if _DEBUG and _dbg_hs_call_n[0] <= _DBG_HS_MAX_CALLS:
         print(f"[graph/dbg-hs]   routing bs={bs} plans={len(plans)} :: "
               + " | ".join(dbg_rows), flush=True)
@@ -501,7 +512,11 @@ def _egress_hs(worker, registry: HostRegistry, plans: list) -> None:
     if not plans:
         return
     dm = getattr(worker, "_capture_drain", None)
-    for layer_num, host in registry.iter_hosts():
+    # v0.5.7 C: gather on a side stream so the egress overlaps the next step (see _egress).
+    em = getattr(worker, "_egress_stream", None)
+    scope = em.gather_scope() if em is not None else contextlib.nullcontext()
+    with scope:
+      for layer_num, host in registry.iter_hosts():
         hs_buf = host.hs_buf          # (cap+1, hidden)
         module_name = host.module_name
         ln = host.egress_layer_num    # 1-based, matching the eager artifact
@@ -623,7 +638,7 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
                                    routing_key_fn=_hs_routing_key)
 
     # W4/W6c: budget-driven GPU->pinned drain manager (no-op unless a budget env is set).
-    from vllm_hook_plugins.graph.drain import CaptureDrainManager
+    from vllm_hook_plugins.graph.drain import CaptureDrainManager, EgressStreamManager
     _model = getattr(model_runner, "model", None)
     try:
         _dev = next(_model.parameters()).device if _model is not None else "cpu"
@@ -633,6 +648,10 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
     if worker._capture_drain.enabled:
         print(f"[graph/install_hs] capture drain enabled: budget="
               f"{worker._capture_drain.budget_bytes} bytes")
+    # v0.5.7 C: dedicated side stream so the egress gathers overlap the next decode step.
+    worker._egress_stream = EgressStreamManager.from_env(_dev)
+    if worker._egress_stream.enabled:
+        print("[graph/install_hs] egress copy-stream overlap ON")
     if _BATCHED_EGRESS:
         print("[graph/install_hs] batched egress ON (1 clone/layer + per-request views)")
 
@@ -649,6 +668,12 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
 
         from vllm_hook_plugins.graph.ops import get_fire_count
         fire_before = get_fire_count()
+
+        # v0.5.7 C: fence the previous step's side-stream egress gather before this
+        # forward's scatter can clobber the static hs_buf it reads.
+        em = getattr(worker, "_egress_stream", None)
+        if em is not None:
+            em.fence_before_forward()
 
         result = orig_execute_model(scheduler_output, *args, **kwargs)
 

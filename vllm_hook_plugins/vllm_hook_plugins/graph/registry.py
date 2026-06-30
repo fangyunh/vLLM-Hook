@@ -4,9 +4,15 @@ from __future__ import annotations
 import os
 from typing import Dict, Iterator, List, Optional, Tuple
 
+import numpy as np
 import torch
 
 from vllm_hook_plugins.graph.hosts import QKHookHost
+
+# v0.5.7 A — incremental/persistent capture routing. Default ON; set to 0 to fall
+# back to the legacy per-step full-width reset+build+upload (the A/B control). Only
+# HostRegistry (QK/HS capture) honours it; SteerRegistry keeps its own W1 key-skip.
+INCREMENTAL_ROUTING = os.environ.get("VLLM_HOOK_INCREMENTAL_ROUTING", "1") != "0"
 
 # Depth of the pinned-mirror ring (W2/W6a). >=2 lets reset_pinned() reuse a slot
 # whose H2D upload was enqueued >=2 steps ago — its event is already complete, so
@@ -123,6 +129,9 @@ class HostRegistry:
         # Plans built by the _prepare_inputs routing wrapper this step, consumed by
         # the execute_model egress wrapper post-forward (the two run in one step).
         self._pending_plans: list = []
+        # Per-active-request (start, end, layers_or_None) assignments the incremental
+        # router diffs (set by _build_routing each step in incremental mode).
+        self._pending_assignments: list = []
 
         # Forward-context stash: the attention wrap snapshots the live context on
         # its first fire each step (it's only valid inside the forward), so egress
@@ -130,6 +139,30 @@ class HostRegistry:
         self.fwd_ctx = None          # the live ForwardContext object
         self.fwd_attn_metadata = None  # ctx.attn_metadata snapshot
         self._ctx_step_token = 0     # bumped each step so the wrap re-snapshots
+
+        # v0.5.7 A — incremental/persistent routing state (lazy; cuda + opt-in only).
+        # ``capture_index_all[L, c]`` is c+1 iff layer L is active at column c, else 0 —
+        # a POSITION-deterministic value (independent of WHICH request occupies c). So the
+        # device slab is a pure function of (column -> active-layer-set), and a step only
+        # needs to rewrite/upload the columns whose active-layer-set CHANGED since last
+        # step. ``_col_layerset`` is that per-column shadow (interned set id; 0 = inactive);
+        # ``_inc_mirror`` is a PERSISTENT pinned mirror (single, not ringed — the
+        # incremental upload is tiny so its wait is cheap); ``_inc_event`` guards the mirror
+        # against the previous (in-flight) H2D. ``any_active`` is vestigial (the op does
+        # ``del active``), so only ``capture_index_all`` is maintained here.
+        self.incremental_enabled = (INCREMENTAL_ROUTING
+                                    and self.device.type == "cuda"
+                                    and self.should_capture)
+        self._col_layerset: Optional[np.ndarray] = None   # (cap,) int64 shadow
+        self._inc_mirror: Optional[torch.Tensor] = None   # (num_layers, cap) int64 pinned
+        self._inc_event: Optional[torch.cuda.Event] = None
+        self._inc_force_full = False                      # next apply rewrites [0,w) fully
+        # Interned layer-set ids (id>=1; 0 reserved for "inactive"). "all layers" gets a
+        # fixed id so the common homogeneous batch never builds/hashes a per-request tuple.
+        self._ls_intern: Dict[tuple, int] = {}
+        self._ls_layers: Dict[int, list] = {}
+        self._ls_next = 1
+        self._all_sid = self._intern_layerset(tuple(range(self.num_layers)))
 
     # ------------------------------------------------------------------
     # Host registration + view assignment
@@ -225,6 +258,98 @@ class HostRegistry:
             w = max(1, min(int(width), self.cap))
             ci[:, :w].zero_()
         aa.zero_()
+
+    # ------------------------------------------------------------------
+    # v0.5.7 A — incremental/persistent routing (per-column diff + upload).
+    # ------------------------------------------------------------------
+
+    def _intern_layerset(self, layers: tuple) -> int:
+        """Map a sorted tuple of layer rows to a stable id (>=1); cache the rows."""
+        sid = self._ls_intern.get(layers)
+        if sid is None:
+            sid = self._ls_next
+            self._ls_next += 1
+            self._ls_intern[layers] = sid
+            self._ls_layers[sid] = list(layers)
+        return sid
+
+    def force_full_routing(self) -> None:
+        """Force the next ``apply_incremental_routing`` to rewrite [0,width) in full.
+
+        Used after a wrapper error (device slab in an unknown state) so recovery
+        re-establishes the whole prefix rather than trusting the stale shadow.
+        """
+        self._inc_force_full = True
+
+    def apply_incremental_routing(self, assignments: list, width: int) -> bool:
+        """Write + upload ONLY the capture-index columns whose active-layer-set changed.
+
+        ``assignments`` is one ``(start, end, layers_or_None)`` per ACTIVE request this
+        step (``None`` = all layers; else a sorted tuple of layer rows). Because the slab
+        value at column c is the position-deterministic c+1, the device content of a
+        column is fully described by its active-layer-set id, so a column needs a rewrite
+        iff that id changed vs ``_col_layerset``. Steady-state stable decode (and every
+        idle step) changes 0 columns -> 0 upload, a pure replay. A +1-prefill / finish /
+        condense changes only the affected columns -> O(changed) work. Returns True iff an
+        upload was issued (diagnostic).
+
+        Correctness under input-batch condensation (constraint d): when a finished
+        request's slot is back-filled, the moved request's column shifts, but the slab
+        VALUE there is still c+1 — so if its layer-set matches the vacated one (the common
+        all-layers case) the column legitimately needs no rewrite; egress correctness rides
+        on the per-step-rebuilt plans, not the slab. A layer-set change at a column IS
+        detected (different id) and rewritten.
+        """
+        cap = self.cap
+        w = max(1, min(int(width), cap))
+        if self._col_layerset is None:
+            self._col_layerset = np.zeros(cap, dtype=np.int64)
+            pin = self.device.type == "cuda"
+            self._inc_mirror = torch.zeros(self.num_layers, cap, dtype=torch.int64,
+                                           pin_memory=pin)
+            self._inc_event = torch.cuda.Event() if pin else None
+            # Device slab + shadow + mirror all start zeroed (constructor) -> consistent.
+
+        # Desired per-column active-layer-set id over [0, cap) (only [0,w) is read/diffed;
+        # active columns are always < real_n <= w). Disjoint flat ranges -> no overlap.
+        new_col = np.zeros(cap, dtype=np.int64)
+        for (start, end, layers) in assignments:
+            if end <= start:
+                continue
+            sid = self._all_sid if layers is None else self._intern_layerset(layers)
+            new_col[start:end] = sid
+
+        old = self._col_layerset
+        if self._inc_force_full:
+            # Treat the whole prefix as dirty so the device is fully re-established.
+            changed = np.arange(0, w, dtype=np.int64)
+            self._inc_force_full = False
+        else:
+            changed = np.nonzero(new_col[:w] != old[:w])[0]
+        if changed.size == 0:
+            return False
+
+        lo = int(changed[0])
+        hi = int(changed[-1]) + 1
+        if self._inc_event is not None:
+            self._inc_event.synchronize()  # last upload of this mirror is done
+        mir = self._inc_mirror
+        cc = torch.from_numpy(changed)                      # int64 column indices
+        mir[:, cc] = 0                                       # clear changed cols, all layers
+        new_changed = new_col[changed]
+        for sid in np.unique(new_changed):
+            if sid == 0:
+                continue
+            cols = changed[new_changed == sid]
+            layer_t = torch.tensor(self._ls_layers[int(sid)], dtype=torch.long)
+            cols_t = torch.from_numpy(cols)
+            mir[layer_t[:, None], cols_t] = (cols_t + 1)[None, :]
+
+        self.capture_index_all[:, lo:hi].copy_(mir[:, lo:hi], non_blocking=True)
+        if self._inc_event is not None:
+            self._inc_event.record()
+        old[:w] = new_col[:w]
+        return True
 
     # ------------------------------------------------------------------
     # Forward-context stash (set by the attention wrap, read by egress).

@@ -1,6 +1,7 @@
 """CUDA-graph QK capture — install, per-step routing, and egress."""
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 from typing import Any, Dict, Optional
@@ -755,12 +756,14 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
 
     bs = len(qsl_cpu) - 1
 
+    inc = registry.incremental_enabled
     capture_index_pinned = registry.capture_index_pinned  # (num_layers, cap)
     any_active_pinned = registry.any_active_pinned          # (num_layers,)
     cap = registry.cap
 
     dbg_rows: list = []  # per-request decision trace (diagnostic only)
     plans: list = []
+    assignments: list = []  # (start, end, layers_or_None) for the incremental router
     for i in range(bs):
         if i >= len(req_ids):
             break
@@ -859,10 +862,17 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
 
         # Route EVERY new token (q + k scatter together) into flat rows [start+1, end+1)
         # so k_buf holds this step's keys for egress to clone.
-        rows = torch.arange(start + 1, end + 1, dtype=torch.int64)
-        layer_idx = torch.tensor(req_layers, dtype=torch.long)
-        capture_index_pinned[layer_idx[:, None], start:end] = rows[None, :]
-        any_active_pinned[layer_idx] = 1
+        if inc:
+            # v0.5.7 A: just record (column-range, layer-set); the registry diffs vs last
+            # step and writes/uploads only the columns that changed — no per-request tensor
+            # ops on the hot path (the cost that scaled with batch width). None = all layers.
+            assignments.append((start, end,
+                                None if layer_filter is None else tuple(sorted(req_layers))))
+        else:
+            rows = torch.arange(start + 1, end + 1, dtype=torch.int64)
+            layer_idx = torch.tensor(req_layers, dtype=torch.long)
+            capture_index_pinned[layer_idx[:, None], start:end] = rows[None, :]
+            any_active_pinned[layer_idx] = 1
 
         # Stash everything egress needs so it does not re-derive the gating. Capture is
         # assumed to begin at the sequence start (fresh prefill, no prefix-cache hit) —
@@ -889,6 +899,8 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         dbg_rows.append(f"r{i}:qlen={qlen},flat=[{start},{end}),abs_end={abs_end},"
                         f"emit_q={emit_q},mode={req_mode}")
 
+    if inc:
+        registry._pending_assignments = assignments
     if _DEBUG and _dbg_call_n[0] <= _DBG_MAX_CALLS:
         print(f"[graph/dbg]   routing bs={bs} plans={len(plans)} :: "
               + " | ".join(dbg_rows), flush=True)
@@ -1013,8 +1025,14 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
         return
 
     dm = getattr(worker, "_capture_drain", None)
-
-    for layer_num, host in registry.iter_hosts():
+    # v0.5.7 C: run the index_select gathers (which read the static q_buf/k_buf) on a
+    # dedicated side stream so they overlap the next decode step instead of sitting on the
+    # compute critical path. The scope fences gather-after-scatter; fence_before_forward
+    # (next step) fences scatter-after-gather. No-op / inline when disabled or off-CUDA.
+    em = getattr(worker, "_egress_stream", None)
+    scope = em.gather_scope() if em is not None else contextlib.nullcontext()
+    with scope:
+      for layer_num, host in registry.iter_hosts():
         q_buf = host.q_buf  # (cap+1, q_dim)
         k_buf = host.k_buf   # (cap+1, k_dim)
         module_name = host.module_name
@@ -1419,13 +1437,25 @@ def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
                 return result
 
             with PROF.timed("graph.route"):
-                # Only reset+upload the column prefix the (cudagraph-padded) forward
-                # actually reads — for decode that is ~max_graph_batch, not the full
-                # max_num_batched_tokens slab (a much smaller H2D copy per step).
-                registry.reset_pinned(width)
-                plans = build_routing_fn(model_runner, registry, qsl_cpu) \
-                    if qsl_cpu is not None else []
-                registry.upload(width)
+                if getattr(registry, "incremental_enabled", False):
+                    # v0.5.7 A: build plans every step (cheap O(reqs) scalar work) but
+                    # write+upload ONLY the capture-index columns that changed since last
+                    # step. Steady-state decode / idle steps change 0 columns -> 0 upload
+                    # (a pure replay); a prefill / finish / condense touches O(changed).
+                    registry._pending_assignments = []
+                    plans = build_routing_fn(model_runner, registry, qsl_cpu) \
+                        if qsl_cpu is not None else []
+                    uploaded = registry.apply_incremental_routing(
+                        registry._pending_assignments, width)
+                    PROF.incr("graph.route.upload" if uploaded
+                              else "graph.route.noupload")
+                else:
+                    # Legacy: reset+upload the full column prefix the (cudagraph-padded)
+                    # forward reads — for decode ~max_graph_batch, not the full cap slab.
+                    registry.reset_pinned(width)
+                    plans = build_routing_fn(model_runner, registry, qsl_cpu) \
+                        if qsl_cpu is not None else []
+                    registry.upload(width)
             registry._pending_plans = plans
             registry._last_route_key = key
             registry._last_route_width = width
@@ -1434,6 +1464,8 @@ def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
         except Exception as e:  # noqa: BLE001
             registry._pending_plans = []
             registry._last_route_key = None  # force a re-route after an error
+            if hasattr(registry, "force_full_routing"):
+                registry.force_full_routing()  # re-establish the whole slab next step
             if _DEBUG:
                 print(f"[graph/dbg] _prepare_inputs routing ({label}) raised: {e!r}",
                       flush=True)
@@ -1487,7 +1519,7 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
                                    routing_key_fn=_qk_routing_key)
 
     # W4/W6c: budget-driven GPU->pinned drain manager (no-op unless a budget env is set).
-    from vllm_hook_plugins.graph.drain import CaptureDrainManager
+    from vllm_hook_plugins.graph.drain import CaptureDrainManager, EgressStreamManager
     _model = getattr(model_runner, "model", None)
     try:
         _dev = next(_model.parameters()).device if _model is not None else "cpu"
@@ -1497,6 +1529,10 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     if worker._capture_drain.enabled:
         print(f"[graph/install] capture drain enabled: budget="
               f"{worker._capture_drain.budget_bytes} bytes")
+    # v0.5.7 C: dedicated side stream so the egress gathers overlap the next decode step.
+    worker._egress_stream = EgressStreamManager.from_env(_dev)
+    if worker._egress_stream.enabled:
+        print("[graph/install] egress copy-stream overlap ON")
     if _BATCHED_EGRESS:
         print("[graph/install] batched egress ON (1 clone/layer + per-request views)")
 
@@ -1516,6 +1552,12 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
 
         from vllm_hook_plugins.graph.ops import get_fire_count
         fire_before = get_fire_count()
+
+        # v0.5.7 C: fence the previous step's side-stream egress gather before this
+        # forward's scatter can clobber the static q_buf/k_buf it reads.
+        em = getattr(worker, "_egress_stream", None)
+        if em is not None:
+            em.fence_before_forward()
 
         # Forward: _prepare_inputs (wrapped) builds+uploads routing, then the graph
         # replays and capture_qk scatters into the static buffers.
