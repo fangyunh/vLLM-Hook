@@ -13,6 +13,7 @@ from vllm_hook_plugins.graph import register_graph_ops
 from vllm_hook_plugins.graph.hosts import HSHookHost
 from vllm_hook_plugins.graph.registry import HostRegistry
 from vllm_hook_plugins.graph.install import (  # shared helpers (no op-mode coupling)
+    _capture_idle_key,
     _cpu_1d,
     _resolve_max_num_batched_tokens,
     install_prepare_inputs_routing,
@@ -613,7 +614,13 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
     model_runner._default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
 
     # Routing — runs after _update_states + input prep, so prefill routes correctly.
-    install_prepare_inputs_routing(model_runner, worker, _build_routing_hs, label="hs")
+    # W1′: idle-skip key gates on output_hidden_states (skips the per-step tax on
+    # non-capturing steps; rebuilds the moment any request captures).
+    def _hs_routing_key(_runner, _registry, _qsl):
+        return _capture_idle_key(_runner, _qsl, "output_hidden_states")
+
+    install_prepare_inputs_routing(model_runner, worker, _build_routing_hs, label="hs",
+                                   routing_key_fn=_hs_routing_key)
 
     # W4/W6c: budget-driven GPU->pinned drain manager (no-op unless a budget env is set).
     from vllm_hook_plugins.graph.drain import CaptureDrainManager

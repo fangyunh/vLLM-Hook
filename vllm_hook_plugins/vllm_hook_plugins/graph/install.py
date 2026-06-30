@@ -1297,14 +1297,76 @@ def _upload_width(model_runner, qsl_cpu, cap: int) -> int:
     return max(1, min(int(cap), max(real_n, int(maxbs))))
 
 
+# Sentinel routing key meaning "no request captures anything this step" (W1′
+# idle-skip). A constant tuple, so it is identical across consecutive idle decode
+# steps → the routing wrapper skips reset/build/upload after ONE transition
+# zero-upload, and the resident (zeroed) slab replays as a no-op scatter. Distinct
+# from any real per-request signature and from None (None forces a rebuild).
+_IDLE_ROUTE_KEY = ("__idle__",)
+
+
+def _capture_idle_key(model_runner, qsl_cpu, output_attr: str) -> Optional[tuple]:
+    """W1′ idle-skip key for buffer-mode capture (QK + HS).
+
+    Returns ``_IDLE_ROUTE_KEY`` only when NO request in the batch would emit a
+    capture plan this step — a pure non-capturing step, e.g. every decode step of a
+    ``hooks_on=prefill`` workload (the profiled qk-lasttok / hs-lasttok case). The
+    routing wrapper then skips ``reset_pinned`` + ``_build_routing`` + ``upload``;
+    the device slabs (zeroed on the active→idle transition) make the baked-in
+    scatter a no-op, so the whole per-step routing tax disappears on idle steps.
+
+    Returns ``None`` (force a rebuild — today's behaviour, byte-identical) the
+    moment any request WOULD capture, or when the batch is unreadable. Cheap:
+    scalar gating only (no tensor writes, no f-strings), early-exits to ``None`` on
+    the first capturing request. Mirrors the active-request gate of
+    ``_build_routing`` / ``_build_routing_hs`` up to the plan decision; a request
+    that passes this gate but ultimately produces no plan (empty layer set / empty
+    range) only costs a missed skip, never wrong data.
+    """
+    try:
+        req_ids = model_runner.input_batch.req_ids
+    except Exception:  # noqa: BLE001
+        return None
+    if qsl_cpu is None or not req_ids:
+        return None
+    bs = len(qsl_cpu) - 1
+    default_hooks_on = getattr(model_runner, "_default_hooks_on", "prefill")
+    requests = model_runner.requests
+    for i in range(bs):
+        if i >= len(req_ids):
+            break
+        req_state = requests.get(req_ids[i])
+        if req_state is None or req_state.sampling_params is None:
+            continue
+        extra = req_state.sampling_params.extra_args
+        if not extra or extra.get(output_attr) is None:
+            continue
+        hooks_on = extra.get("hooks_on", default_hooks_on)
+        if hooks_on != "both":
+            is_prefill = len(req_state.output_token_ids) == 0
+            if hooks_on == "prefill" and not is_prefill:
+                continue
+            if hooks_on == "decode" and is_prefill:
+                continue
+        # This request would capture this step → not idle → force a rebuild.
+        return None
+    return _IDLE_ROUTE_KEY
+
+
 def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
-                                   label: str = "qk") -> None:
+                                   label: str = "qk", routing_key_fn=None) -> None:
     """Wrap ``model_runner._prepare_inputs`` to build + upload the capture routing
     right after vLLM finishes input prep — when ``input_batch`` and
     ``query_start_loc`` reflect THIS step (post ``_update_states``). The routing
     must land before the (possibly cudagraph-replayed) forward, and _prepare_inputs
     is the legal off-graph home for it; the resulting plans are stashed on the
     registry for the execute_model wrapper's post-forward egress.
+
+    ``routing_key_fn(model_runner, registry, qsl_cpu)`` is the W1 invalidation-key
+    source. When given (capture passes a ``_capture_idle_key``-based function), it
+    overrides ``registry.routing_key`` so capture gets the idle-skip without the
+    registry needing the worker's gating. Defaults to ``registry.routing_key``
+    (what steer uses).
 
     Idempotent. Defensive: an internal vLLM surface, so any failure degrades to
     "no capture this step" rather than crashing the forward.
@@ -1335,15 +1397,19 @@ def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
             qsl_cpu = _runner_qsl(model_runner)
             width = _upload_width(model_runner, qsl_cpu, registry.cap)
 
-            # W1 invalidation: when the registry reports a stable routing signature
-            # (same key + upload width as last step), the device slabs already hold an
-            # identical routing — skip reset/build/upload so the step is a pure graph
-            # replay with the resident buffer. Steering returns a real key on a stable
-            # batch (its routing is bit-identical every decode step); capture returns
-            # None (its absolute-position rows advance each step) so it never skips
-            # here. A composition change (finish/admit) or prefill<->decode flip moves
-            # the key and forces a re-route. (W3 adds capture's own incremental path.)
-            key = registry.routing_key(model_runner, qsl_cpu) \
+            # W1 invalidation: when the key + upload width match last step, the device
+            # slabs already hold an identical routing — skip reset/build/upload so the
+            # step is a pure graph replay with the resident buffer. Steering returns a
+            # real key on a stable batch (bit-identical every decode step). Capture
+            # (W1′) returns _IDLE_ROUTE_KEY on a fully non-capturing step (every decode
+            # step of a hooks_on=prefill workload) so consecutive idle steps skip after
+            # ONE transition zero-upload; it returns None the moment any request
+            # captures (active steps stay byte-identical to today). A composition change
+            # (finish/admit) or prefill<->decode flip moves the key and forces a
+            # re-route. (W3 adds capture's own incremental decode path.)
+            key = (routing_key_fn(model_runner, registry, qsl_cpu)
+                   if routing_key_fn is not None
+                   else registry.routing_key(model_runner, qsl_cpu)) \
                 if qsl_cpu is not None else None
             if (key is not None
                     and key == getattr(registry, "_last_route_key", None)
@@ -1412,7 +1478,13 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     model_runner._worker_score_head = getattr(worker, "_score_head_default", 0)
 
     # Routing — runs after _update_states + input prep, so prefill routes correctly.
-    install_prepare_inputs_routing(model_runner, worker, _build_routing, label="qk")
+    # W1′: idle-skip key gates on output_qk (skips the per-step tax on non-capturing
+    # steps; rebuilds the moment any request captures).
+    def _qk_routing_key(_runner, _registry, _qsl):
+        return _capture_idle_key(_runner, _qsl, "output_qk")
+
+    install_prepare_inputs_routing(model_runner, worker, _build_routing, label="qk",
+                                   routing_key_fn=_qk_routing_key)
 
     # W4/W6c: budget-driven GPU->pinned drain manager (no-op unless a budget env is set).
     from vllm_hook_plugins.graph.drain import CaptureDrainManager
@@ -1540,4 +1612,5 @@ __all__ = [
     "install_execute_model_wrapper",
     "install_prepare_inputs_routing",
     "_runner_qsl",
+    "_capture_idle_key",
 ]
