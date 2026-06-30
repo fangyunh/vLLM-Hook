@@ -619,6 +619,14 @@ class ProbeHookQKWorker:
                 pass
         return out
 
+    def dump_profiler(self) -> str | None:
+        """collective_rpc-callable: dump this WORKER process's PROF snapshot to
+        VLLM_HOOK_PROFILE_DIR and return the path (None if profiling is off). The
+        routing/egress timers live in the worker, not the driver, so the offline driver
+        cannot read them otherwise. Read-only introspection, string-name callable."""
+        from vllm_hook_plugins._profiler import PROF
+        return PROF.dump(role="worker-rpc")
+
     def clear_captured_states(self, external_req_id: str) -> None:
         """Remove captured states without returning them (cleanup on abort/disconnect)."""
         dm = getattr(self, "_capture_drain", None)

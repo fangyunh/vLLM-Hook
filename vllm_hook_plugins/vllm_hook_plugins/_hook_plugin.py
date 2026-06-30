@@ -143,6 +143,47 @@ def _patched_create_engine_config(self, *args, **kwargs):
         # Legacy v0.2.0: eager is mandatory for the forward-hook capture path.
         self.enforce_eager = True
 
+    # v0.5.7 Tier 3 (opt-in): densify the FULL decode cudagraph capture sizes past vLLM's
+    # default cap of min(max_num_seqs*2, 512). Above ~512 the saturated CB batch (~940) can
+    # no longer replay the decode graph and falls back to EAGER (the high-lambda cascade
+    # that makes FULL lose to PIECEWISE). vLLM honours an explicit max_cudagraph_capture_size
+    # (config/vllm.py: only defaults to 512 when None), so setting it here BEFORE the config
+    # is built lets FULL capture decode graphs up to the saturated batch. Cost: more graphs
+    # -> more warmup + cudagraph pool memory (the reason it is opt-in). VLLM_HOOK_CUDAGRAPH_SIZES
+    # overrides the whole list (coarse spacing -> fewer graphs); _MAX_CAPTURE sets the ceiling
+    # and lets vLLM regenerate the fine list. Graph mode only.
+    if graph_mode:
+        _max_cap = os.environ.get("VLLM_HOOK_CUDAGRAPH_MAX_CAPTURE")
+        _sizes = os.environ.get("VLLM_HOOK_CUDAGRAPH_SIZES")
+        if _max_cap or _sizes:
+            try:
+                cc = self.compilation_config
+                size_list = ([int(x) for x in _sizes.split(",") if x.strip()]
+                             if _sizes else None)
+                max_n = int(_max_cap) if _max_cap else (max(size_list) if size_list else None)
+                def _apply(setter):
+                    if size_list is not None:
+                        setter("cudagraph_capture_sizes", sorted(set(size_list)))
+                    else:
+                        setter("cudagraph_capture_sizes", None)  # regenerate up to max_n
+                    if max_n is not None:
+                        setter("max_cudagraph_capture_size", max_n)
+                if isinstance(cc, dict):
+                    _apply(lambda k, v: cc.__setitem__(k, v))
+                elif cc is not None:
+                    _apply(lambda k, v: setattr(cc, k, v))
+                else:
+                    self.compilation_config = {
+                        **({"cudagraph_capture_sizes": sorted(set(size_list))}
+                           if size_list is not None else {}),
+                        **({"max_cudagraph_capture_size": max_n} if max_n is not None else {}),
+                    }
+                print(f"[vllm-hook] Tier 3: cudagraph capture densified "
+                      f"(max={max_n}, sizes={size_list or 'auto'})", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"[vllm-hook] Tier 3 cudagraph densify FAILED, default sizes: {e!r}",
+                      flush=True)
+
     assert _original_create_engine_config is not None
     config = _original_create_engine_config(self, *args, **kwargs)
 
