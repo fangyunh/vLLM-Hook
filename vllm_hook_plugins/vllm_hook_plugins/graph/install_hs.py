@@ -410,6 +410,9 @@ def _build_routing_hs(model_runner, registry: HostRegistry, qsl_cpu: list) -> li
     any_active_pinned = registry.any_active_pinned          # (num_layers,)
     cap = registry.cap
 
+    # v0.5.7 E: build the per-request trace only when it will be printed (f-strings ran
+    # every active step regardless of _DEBUG — a real O(reqs) hot-path cost).
+    _dbg_on = _DEBUG and _dbg_hs_call_n[0] <= _DBG_HS_MAX_CALLS
     dbg_rows: list = []
     plans: list = []
     assignments: list = []  # (start, end, layers_or_None) for the incremental router
@@ -422,7 +425,7 @@ def _build_routing_hs(model_runner, registry: HostRegistry, qsl_cpu: list) -> li
             continue
         extra = req_state.sampling_params.extra_args
         if not extra or extra.get("output_hidden_states") is None:
-            dbg_rows.append(f"r{i}:no_output_hs")
+            if _dbg_on: dbg_rows.append(f"r{i}:no_output_hs")
             continue
 
         # output_hidden_states: True (all layers) | [1-based layer list].
@@ -436,7 +439,7 @@ def _build_routing_hs(model_runner, registry: HostRegistry, qsl_cpu: list) -> li
         if hooks_on != "both":
             is_prefill = len(req_state.output_token_ids) == 0
             if hooks_on == "prefill" and not is_prefill:
-                dbg_rows.append(f"r{i}:SKIP_prefill_gate")
+                if _dbg_on: dbg_rows.append(f"r{i}:SKIP_prefill_gate")
                 continue
             if hooks_on == "decode" and is_prefill:
                 continue
@@ -482,7 +485,7 @@ def _build_routing_hs(model_runner, registry: HostRegistry, qsl_cpu: list) -> li
             "bucket_key": bucket_key,
             "req_state": req_state,
         })
-        dbg_rows.append(f"r{i}:qlen={end - start},mode={req_mode},nlayers={len(rows_layers)}")
+        if _dbg_on: dbg_rows.append(f"r{i}:qlen={end - start},mode={req_mode},nlayers={len(rows_layers)}")
 
     if inc:
         registry._pending_assignments = assignments

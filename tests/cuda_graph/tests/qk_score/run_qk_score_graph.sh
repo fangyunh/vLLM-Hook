@@ -45,7 +45,16 @@ VLLM_HOOK_SCORE_GRAPH=1 VLLM_HOOK_QK_CAPTURE=buffer VLLM_HOOK_CUDAGRAPH_MODE=FUL
 echo "[run_qk_score_graph] === 3/5 eager qk ground truth ==="
 python -u "$PY" capture --mode qk --out "$WORK/qk.pkl"
 
-echo "[run_qk_score_graph] === 4/5 compare op vs qk ==="
+echo "[run_qk_score_graph] === 4/7 compare op vs qk ==="
 python -u "$PY" compare --score "$WORK/score_op.pkl" --qk "$WORK/qk.pkl"
-echo "[run_qk_score_graph] === 5/5 compare buffer vs qk ==="
+echo "[run_qk_score_graph] === 5/7 compare buffer (all_tokens) vs qk ==="
 python -u "$PY" compare --score "$WORK/score_buffer.pkl" --qk "$WORK/qk.pkl"
+
+# v0.5.7 D1: buffer-mode LAST_TOKEN score computes the [1,S_k] score ON-GPU at EGRESS from the
+# staged last query + the FULL key history read from paged KV (never clones K). Compare vs the
+# LAST ROW of the QK recompute.
+echo "[run_qk_score_graph] === 6/7 buffer-mode (FULL_DECODE_ONLY) last_token score (D1 on-GPU egress) ==="
+VLLM_HOOK_SCORE_GRAPH=1 VLLM_HOOK_QK_CAPTURE=buffer VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY \
+    python -u "$PY" capture --mode score --hookq last_token --out "$WORK/score_buffer_lasttok.pkl"
+echo "[run_qk_score_graph] === 7/7 compare buffer last_token vs qk (last row) ==="
+python -u "$PY" compare --score "$WORK/score_buffer_lasttok.pkl" --qk "$WORK/qk.pkl" --score-lasttok

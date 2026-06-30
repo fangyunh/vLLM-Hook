@@ -761,6 +761,10 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
     any_active_pinned = registry.any_active_pinned          # (num_layers,)
     cap = registry.cap
 
+    # v0.5.7 E: build the per-request decision trace ONLY when it will be printed. The
+    # f-strings below ran every active step regardless of _DEBUG (a real ~O(reqs) CPU cost
+    # on the hot path); gate them at the call site so the string is never built when off.
+    _dbg_on = _DEBUG and _dbg_call_n[0] <= _DBG_MAX_CALLS
     dbg_rows: list = []  # per-request decision trace (diagnostic only)
     plans: list = []
     assignments: list = []  # (start, end, layers_or_None) for the incremental router
@@ -770,11 +774,11 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         req_id = req_ids[i]
         req_state = model_runner.requests.get(req_id)
         if req_state is None or req_state.sampling_params is None:
-            dbg_rows.append(f"r{i}:no_state")
+            if _dbg_on: dbg_rows.append(f"r{i}:no_state")
             continue
         extra = req_state.sampling_params.extra_args
         if not extra or extra.get("output_qk") is None:
-            dbg_rows.append(f"r{i}:no_output_qk")
+            if _dbg_on: dbg_rows.append(f"r{i}:no_output_qk")
             continue
 
         # output_qk: True (all) | [layer_ids] | {layer: [heads]} — only keys filter
@@ -793,34 +797,38 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
         n_computed = getattr(req_state, "num_computed_tokens", None)
         n_prompt = len(getattr(req_state, "prompt_token_ids", []) or [])
         _qlen = int(qsl_cpu[i + 1]) - int(qsl_cpu[i])
-        dbg_rows.append(
-            f"r{i}:qlen={_qlen},out_toks={n_out},computed={n_computed},"
-            f"prompt={n_prompt},hooks_on={hooks_on}"
-        )
+        if _dbg_on:
+            dbg_rows.append(
+                f"r{i}:qlen={_qlen},out_toks={n_out},computed={n_computed},"
+                f"prompt={n_prompt},hooks_on={hooks_on}")
         if hooks_on != "both":
             is_prefill = len(req_state.output_token_ids) == 0
             if hooks_on == "prefill" and not is_prefill:
-                dbg_rows.append(f"r{i}:SKIP_prefill_gate(out_toks={n_out})")
+                if _dbg_on: dbg_rows.append(f"r{i}:SKIP_prefill_gate(out_toks={n_out})")
                 continue
             if hooks_on == "decode" and is_prefill:
                 continue
 
         req_mode = extra.get("hookq_mode", getattr(model_runner, "_worker_hookq_mode", "all_tokens"))
-        # v0.6.0 score capture: stage Q/K like all_tokens (every query row feeds the
-        # [S_q,S_k] matrix); the per-head score is computed at retrieval from the staged Q/K.
+        # Score capture mode (v0.6.0). v0.6.0 forced all_tokens (every query row feeds the
+        # [S_q,S_k] matrix, score recomputed at RETRIEVAL from staged Q/K). v0.5.7 D1 honours
+        # last_token for score: the [1,S_k] score is computed ON-GPU at EGRESS from the staged
+        # last query + the FULL key history read from paged KV, so it never clones K (the
+        # in-flight memory win — the clean case). all_tokens score still stages Q/K (the score
+        # is O(S^2), larger than Q/K above the v0.6.0 S~5120 crossover, so retrieval-time stays).
         cap_mode = extra.get("qk_capture",
                              "score" if getattr(model_runner, "_worker_score_mode", False) else "qk")
         score_head = int(extra.get("score_head", getattr(model_runner, "_worker_score_head", 0)))
-        if cap_mode == "score":
+        if cap_mode == "score" and req_mode != "last_token":
             req_mode = "all_tokens"
 
         start = int(qsl_cpu[i])
         end = int(qsl_cpu[i + 1])
         if end > cap:  # invariant: a step's tokens <= max_num_batched_tokens == cap
-            dbg_rows.append(f"r{i}:end>{cap}_clamped")
+            if _dbg_on: dbg_rows.append(f"r{i}:end>{cap}_clamped")
             end = cap
         if end <= start:
-            dbg_rows.append(f"r{i}:empty_range")
+            if _dbg_on: dbg_rows.append(f"r{i}:empty_range")
             continue
         qlen = end - start  # this step's scheduled tokens for req i
 
@@ -896,8 +904,9 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
             "bucket_key": bucket_key,
             "req_state": req_state,
         })
-        dbg_rows.append(f"r{i}:qlen={qlen},flat=[{start},{end}),abs_end={abs_end},"
-                        f"emit_q={emit_q},mode={req_mode}")
+        if _dbg_on:
+            dbg_rows.append(f"r{i}:qlen={qlen},flat=[{start},{end}),abs_end={abs_end},"
+                            f"emit_q={emit_q},mode={req_mode}")
 
     if inc:
         registry._pending_assignments = assignments
@@ -1101,6 +1110,42 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                               f"req={str(req_id)[:8]} resident={dm.resident_bytes}B "
                               f"ceiling={dm.ceiling_bytes}B", flush=True)
                     continue
+
+            # v0.5.7 D1: last_token SCORE — compute the [1,S_k] head score ON-GPU at egress
+            # from the staged last query + the FULL key history read from paged KV, and store
+            # ONLY the score. Never clones K (the in-flight memory win: the per-request bucket
+            # holds score-size, not 7 MB of staged K). Emits on emit_q (the final prefill chunk
+            # / each decode step); a mid-prefill chunk no-ops (the full-K read at the final
+            # chunk already covers it). all_tokens score falls through to the stage-Q/K path.
+            if plan.get("cap_mode") == "score" and req_mode == "last_token":
+                if emit_q:
+                    head = int(plan.get("score_head", 0))
+                    k_full = _read_cached_keys_buffer(
+                        worker.model_runner, module_name, plan["req_idx"], int(abs_end))
+                    if k_full is None:
+                        PROF.incr("score.kfull.errors")
+                    else:
+                        q_last = q_buf[end, :].detach()
+                        k_full = k_full.to(device=q_last.device, dtype=q_last.dtype)
+                        score = compute_head_score(
+                            q_last.unsqueeze(0), k_full, head, worker._conf,
+                            getattr(worker, "_score_dtype", torch.float16))
+                        if req_id not in bucket:
+                            bucket[req_id] = {}
+                        ls = bucket[req_id]
+                        if module_name not in ls:
+                            ls[module_name] = {
+                                "scores": [], "head": head, "layer_num": layer_num,
+                                "hookq_mode": "last_token", "capture": "score",
+                            }
+                        ls[module_name]["scores"].append(score)
+                        nb = score.numel() * score.element_size()
+                        PROF.incr("hook.fire.qk")
+                        PROF.gauge("captured.bytes.qk", nb)
+                        if dm is not None:
+                            dm.note_resident(nb)
+                            dm.note(nb)
+                continue
 
             # W3 incremental: only THIS step's NEW keys (flat rows [start+1,end+1)),
             # O(1) rows/decode step. ALWAYS appended (even a last_token mid-prefill chunk

@@ -213,8 +213,12 @@ def compare(score_path, qk_path, rtol, atol, score_lasttok=False):
             if score_lasttok:
                 # last_token score = ONE row [1, S_k] = the final query token's attention over
                 # all keys. Recompute the full causal matrix from the all_tokens QK ground truth
-                # and take its LAST row. kv (prefill keys, max_tokens=1 -> unpadded) spans the
-                # full S_k; qv is the full prefill q. Falsifies a wrong-row / off-by-one slice.
+                # and take its LAST row. The D1 buffer score reads the REAL full-K [0,abs_end)
+                # from paged KV (unpadded), so trim kv's pad_sequence decode tail to the score's
+                # S_k (real prefill keys, front-aligned) — same trim the all_tokens branch does —
+                # before the recompute. qv stays the full prefill q so the matrix is square and
+                # its last row is the final prompt token over all prompt keys.
+                kv = kv[:sc.shape[1]]
                 ref = reference_score(qv, kv, head, conf)[-1:, :]
             else:
                 # Under max_tokens>1 the eager QK ground truth stacks q/k_all across passes with
