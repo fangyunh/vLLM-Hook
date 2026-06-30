@@ -249,6 +249,46 @@ def _patched_create_engine_config(self, *args, **kwargs):
 # ---------------------------------------------------------------------------
 
 
+def _prompt_token_len(prompt):
+    """Best-effort prompt token length for the D2 serve-path size model."""
+    try:
+        toks = getattr(prompt, "prompt_token_ids", None)
+        if toks is not None:
+            return len(toks)
+        if isinstance(prompt, dict):
+            t = prompt.get("prompt_token_ids")
+            if t is not None:
+                return len(t)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _qk_model_dims(engine):
+    """(H_q, H_kv, head_dim) for the serve-path size model, cached on the engine.
+
+    Full/unsharded counts from the engine's text config; head_dim = hidden // H_q to
+    match the worker ``_conf`` (and HookLLM's offline dims). Cached so it is read once.
+    """
+    cached = getattr(engine, "_vllm_hook_qk_dims", "missing")
+    if cached != "missing":
+        return cached
+    dims = None
+    try:
+        tc = engine.model_config.hf_text_config
+        H_q = int(getattr(tc, "num_attention_heads"))
+        H_kv = int(getattr(tc, "num_key_value_heads", H_q))
+        hidden = int(getattr(tc, "hidden_size"))
+        dims = (H_q, H_kv, hidden // H_q)
+    except Exception:  # noqa: BLE001
+        dims = None
+    try:
+        engine._vllm_hook_qk_dims = dims
+    except Exception:  # noqa: BLE001
+        pass
+    return dims
+
+
 async def _patched_generate(
     self,
     prompt: Any,
@@ -289,6 +329,36 @@ async def _patched_generate(
     wants_steer = isinstance(extra.get("steer"), dict)
     needs_hooks = wants_hs or wants_qk or wants_steer
     save_to_disk = bool(extra.get("save_to_disk"))
+
+    # v0.5.7 D2: serve-path QK auto-select. vllm serve goes through THIS patch, not
+    # HookLLM.generate, so the offline admission cannot run here. When opted in
+    # (VLLM_HOOK_QK_AUTO_SELECT=1 — the env stands in for the offline analyzer-accepts
+    # gate, since the analyzer runs client-side in serve) and the client did NOT pin
+    # qk_capture, pick the smaller representation per request from the prompt length +
+    # this request's output_qk head set + the model dims. Decided once, immutable.
+    if wants_qk and "qk_capture" not in extra:
+        import os as _os
+        if _os.environ.get("VLLM_HOOK_QK_AUTO_SELECT") == "1":
+            try:
+                _dims = _qk_model_dims(self)
+                _plen = _prompt_token_len(prompt)
+                _oqk = extra.get("output_qk")
+                if _dims and _plen and isinstance(_oqk, dict):
+                    from vllm_hook_plugins.run_utils import qk_score_size_select
+                    _pick = qk_score_size_select(
+                        _plen, extra.get("hookq_mode", "all_tokens"), _oqk, *_dims)
+                    extra["qk_capture"] = _pick
+                    if _pick == "score":
+                        extra.setdefault("score_head", 0)
+                    effective_params.extra_args = extra
+                    _n = getattr(_patched_generate, "_d2_log_n", 0)
+                    if _n < 8:
+                        _patched_generate._d2_log_n = _n + 1
+                        print(f"[hookplugin/D2] serve auto-select qk_capture={_pick} "
+                              f"(S={_plen} mode={extra.get('hookq_mode','all_tokens')})",
+                              flush=True)
+            except Exception:  # noqa: BLE001
+                pass
 
     # In graph mode the QK capture path is already installed in the worker at
     # load_model (graph/install.py), so the lazy forward-hook install would only

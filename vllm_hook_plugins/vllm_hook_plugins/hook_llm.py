@@ -203,21 +203,11 @@ class HookLLM:
         ~never smaller, so keep raw QK.
         """
         dims = self._model_dims
-        l2h = self.layer_to_heads
-        if not dims or not l2h:
+        if not dims or not self.layer_to_heads:
             return "qk"
-        H_q, H_kv, d = dims["H_q"], dims["H_kv"], dims["d"]
-        S = int(prompt_len)
-        qk_elems = sc_elems = 0
-        for _layer, heads in l2h.items():
-            n = len(heads) or 1
-            if mode == "all_tokens":
-                qk_elems += S * (H_q + H_kv) * d
-                sc_elems += n * S * S
-            else:  # last_token
-                qk_elems += (H_q + S * H_kv) * d
-                sc_elems += n * S
-        return "score" if sc_elems < qk_elems else "qk"
+        from vllm_hook_plugins.run_utils import qk_score_size_select
+        return qk_score_size_select(prompt_len, mode, self.layer_to_heads,
+                                    dims["H_q"], dims["H_kv"], dims["d"])
 
     def _maybe_auto_select(self, prompt, sp, extra: dict) -> None:
         """Set ``extra["qk_capture"]`` to the size-model-optimal representation in place.

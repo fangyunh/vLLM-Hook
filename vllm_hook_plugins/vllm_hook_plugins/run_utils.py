@@ -8,6 +8,37 @@ from typing import Dict, List, Any
 from vllm_hook_plugins._profiler import PROF
 
 
+def qk_score_size_select(prompt_len: int, mode: str, layer_to_heads: dict,
+                         H_q: int, H_kv: int, d: int) -> str:
+    """v0.5.7 D2 size model: return "qk" or "score" — the smaller capture artifact.
+
+    Shared by HookLLM offline admission (`_qk_capture_for`) and the serve-path patch
+    (`_hook_plugin._patched_generate`) so both decide identically. Element counts (both
+    representations store 2 bytes/elem, so counts compare directly), summed over the
+    analyzer's layers with per-layer head count ``n``; the prefill pass dominates so
+    ``max_tokens`` cancels out of the crossover:
+
+      all_tokens: QK = S·(H_q+H_kv)·d   score = n·S²   -> score iff S < (H_q+H_kv)·d/n
+      last_token: QK ≈ (H_q + S·H_kv)·d score = n·S    -> score iff n < ~H_kv·d
+
+    No analyzer head set (``layer_to_heads`` empty/None) => score would need ALL heads
+    and is ~never smaller, so keep raw QK.
+    """
+    if not layer_to_heads:
+        return "qk"
+    S = int(prompt_len)
+    qk_elems = sc_elems = 0
+    for _layer, heads in layer_to_heads.items():
+        n = len(heads) or 1
+        if mode == "all_tokens":
+            qk_elems += S * (H_q + H_kv) * d
+            sc_elems += n * S * S
+        else:  # last_token
+            qk_elems += (H_q + S * H_kv) * d
+            sc_elems += n * S
+    return "score" if sc_elems < qk_elems else "qk"
+
+
 # ---------------------------------------------------------------------------
 # Artifact format conversion utilities
 #
