@@ -21,7 +21,9 @@ from vllm_hook_plugins.workers._common import (
 )
 from vllm_hook_plugins.workers.probe_hookqk_worker import (
     _read_cached_keys,
+    _resolve_score_heads,
     compute_head_score,
+    compute_head_scores,
     key_cache_from_layer_kv,
     match_attn,
 )
@@ -269,9 +271,11 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
         start = int(last_indices[i].item())
         end = int(last_indices[i + 1].item())
 
-        # ---- v0.6.0 score mode: flush one head's [S_q, S_k] score, not Q/K ----
+        # ---- v0.6.0 score mode: flush the head set's [n, S_q, S_k] score, not Q/K ----
         if cap_mode == "score":
-            score_head = int(extra.get("score_head", getattr(worker, "_score_head_default", 0)))
+            # v0.5.7 D2: score the analyzer's per-layer head set (output_qk dict), else [default].
+            score_heads = _resolve_score_heads(
+                output_spec, layer_idx, getattr(worker, "_score_head_default", 0))
             q_view = q_in[start:end, :].detach()
             k_view = k_in[start:end, :].detach()
             if seq_lens is not None and metadata is not None and not _NO_PREFIXK:
@@ -290,8 +294,8 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
                                 [prefix_k.to(k_view.device, dtype=k_view.dtype), k_view], dim=0)
                 except Exception:  # noqa: BLE001
                     PROF.incr("kv.prefix_recon.errors")
-            score = compute_head_score(q_view, k_view, score_head, worker._conf,
-                                       getattr(worker, "_score_dtype", torch.float16))
+            score = compute_head_scores(q_view, k_view, score_heads, worker._conf,
+                                        getattr(worker, "_score_dtype", torch.float16))
             PROF.incr("hook.fire.qk")
             bucket = worker._disk_states if extra.get("save_to_disk") \
                 else worker._captured_states
@@ -300,7 +304,7 @@ def _capture_body(q_in: torch.Tensor, k_in: torch.Tensor, layer_idx: int) -> Non
             layer_states = bucket[req_id]
             if module_name not in layer_states:
                 layer_states[module_name] = {
-                    "scores": [], "head": score_head, "layer_num": layer_idx,
+                    "scores": [], "heads": score_heads, "layer_num": layer_idx,
                     "hookq_mode": "all_tokens", "capture": "score",
                 }
             layer_states[module_name]["scores"].append(score)
@@ -901,6 +905,9 @@ def _build_routing(model_runner, registry: HostRegistry, qsl_cpu: list) -> list:
             "hookq_mode": req_mode,
             "cap_mode": cap_mode,
             "score_head": score_head,
+            # v0.5.7 D2: output_qk {layer:[heads]} so egress scores the analyzer's per-layer
+            # head set (resolved per (layer, request) at egress); None/list -> [score_head].
+            "output_spec": output_spec,
             "bucket_key": bucket_key,
             "req_state": req_state,
         })
@@ -1119,7 +1126,9 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
             # chunk already covers it). all_tokens score falls through to the stage-Q/K path.
             if plan.get("cap_mode") == "score" and req_mode == "last_token":
                 if emit_q:
-                    head = int(plan.get("score_head", 0))
+                    # v0.5.7 D2: head set from this layer's output_qk entry (else [score_head]).
+                    heads = _resolve_score_heads(
+                        plan.get("output_spec"), layer_num, plan.get("score_head", 0))
                     k_full = _read_cached_keys_buffer(
                         worker.model_runner, module_name, plan["req_idx"], int(abs_end))
                     if k_full is None:
@@ -1127,15 +1136,15 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                     else:
                         q_last = q_buf[end, :].detach()
                         k_full = k_full.to(device=q_last.device, dtype=q_last.dtype)
-                        score = compute_head_score(
-                            q_last.unsqueeze(0), k_full, head, worker._conf,
+                        score = compute_head_scores(
+                            q_last.unsqueeze(0), k_full, heads, worker._conf,
                             getattr(worker, "_score_dtype", torch.float16))
                         if req_id not in bucket:
                             bucket[req_id] = {}
                         ls = bucket[req_id]
                         if module_name not in ls:
                             ls[module_name] = {
-                                "scores": [], "head": head, "layer_num": layer_num,
+                                "scores": [], "heads": heads, "layer_num": layer_num,
                                 "hookq_mode": "last_token", "capture": "score",
                             }
                         ls[module_name]["scores"].append(score)
@@ -1170,7 +1179,9 @@ def _egress(worker, registry: HostRegistry, plans: list) -> None:
                 # GPU from the staged Q/K and flushes only the score (the bandwidth win).
                 if plan.get("cap_mode") == "score":
                     layer_states[module_name]["capture"] = "score"
-                    layer_states[module_name]["head"] = plan.get("score_head", 0)
+                    # v0.5.7 D2: per-layer head set (output_qk dict) recomputed at retrieval.
+                    layer_states[module_name]["heads"] = _resolve_score_heads(
+                        plan.get("output_spec"), layer_num, plan.get("score_head", 0))
                 # FIRST capture step for this (request, layer). Prefix caching trims a
                 # shared prompt prefix (num_computed > 0) so those keys were never
                 # forwarded into the buffer — read them back from paged KV ONCE and

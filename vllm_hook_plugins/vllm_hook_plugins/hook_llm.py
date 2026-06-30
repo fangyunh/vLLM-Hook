@@ -83,10 +83,27 @@ class HookLLM:
         self.tokenizer = self.llm.get_tokenizer()
         self.llm_engine = self.llm.llm_engine
 
+        # v0.5.7 D2: cache model dims for the auto-select size model (full/unsharded counts,
+        # matching the worker _conf; head_dim = hidden // H_q). None disables auto-select.
+        self._model_dims = None
+        try:
+            tc = self.llm_engine.model_config.hf_text_config
+            H_q = int(getattr(tc, "num_attention_heads"))
+            H_kv = int(getattr(tc, "num_key_value_heads", H_q))
+            hidden = int(getattr(tc, "hidden_size"))
+            self._model_dims = {"H_q": H_q, "H_kv": H_kv, "d": hidden // H_q}
+        except Exception:
+            self._model_dims = None
+        self._autosel_log_n = 0  # rate-limit the per-request auto-select log
+
         self.analyzer = None
+        # v0.5.7 D2: the analyzer's capability gates auto-select (default "qk" => never
+        # substitute score). Read the class attr without instantiating heavy deps.
+        self._analyzer_accepts = "qk"
         if analyzer_name:
-            self.analyzer = PluginRegistry.get_analyzer(analyzer_name).analyzer
-            self.analyzer = self.analyzer(self._hook_dir, self.layer_to_heads)
+            analyzer_cls = PluginRegistry.get_analyzer(analyzer_name).analyzer
+            self._analyzer_accepts = getattr(analyzer_cls, "ACCEPTS", "qk")
+            self.analyzer = analyzer_cls(self._hook_dir, self.layer_to_heads)
 
 
     def load_config(self, config_file: str):
@@ -127,11 +144,15 @@ class HookLLM:
             extra["output_hidden_states"] = self._output_layers if self._output_layers else True
             extra["hs_mode"] = self._hs_mode
         elif self.worker_name == "probe_hook_qk":
-            # Pass layer_to_heads dict for head-level metadata; worker uses keys for layer filtering.
+            # Pass layer_to_heads dict for head-level metadata; worker uses keys for layer
+            # filtering AND (score mode) as the per-layer head set to score.
             extra["output_qk"] = self.layer_to_heads if self.layer_to_heads else True
             extra["hookq_mode"] = self._hookq_mode
-            # v0.6.0: score capture flushes one head's attention score instead of Q/K.
-            if self._qk_capture == "score":
+            # Effective capture: a per-request override (explicit user value or the D2
+            # auto-select decision stashed on request_extra_args) wins over the config
+            # default. v0.6.0/D2 score mode flushes per-head attention scores instead of Q/K.
+            cap = request_extra_args.get("qk_capture", self._qk_capture)
+            if cap == "score":
                 extra["qk_capture"] = "score"
                 extra["score_head"] = self._score_head
         elif self.worker_name == "steer_hook_act":
@@ -147,6 +168,89 @@ class HookLLM:
             extra["run_id"] = run_id
             extra["hook_dir"] = self._hook_dir
         return extra
+
+    # ---- v0.5.7 D2: automatic QK-vs-score selection at admission ----------------------
+    def _prompt_token_len(self, prompt) -> Optional[int]:
+        """Token length of a prompt for the size model (best-effort; None disables select)."""
+        try:
+            if isinstance(prompt, str):
+                return len(self.tokenizer.encode(prompt))
+            if isinstance(prompt, (list, tuple)):
+                return len(prompt)  # already a token-id list
+            if isinstance(prompt, dict):
+                toks = prompt.get("prompt_token_ids")
+                if toks is not None:
+                    return len(toks)
+                txt = prompt.get("prompt")
+                if isinstance(txt, str):
+                    return len(self.tokenizer.encode(txt))
+        except Exception:
+            return None
+        return None
+
+    def _qk_capture_for(self, prompt_len: int, mode: str) -> str:
+        """Pick the smaller capture representation ("qk" | "score") for one request.
+
+        Size model (element counts; both representations store 2 bytes/elem, so counts
+        compare directly), summed over the request's analyzer layers with per-layer head
+        count ``n``. ``S`` = prompt_len; the prefill pass dominates (decode terms factor out
+        of the crossover, so max_tokens does not move the decision):
+
+          all_tokens: QK = S·(H_q+H_kv)·d   score = n·S²    -> score iff S < (H_q+H_kv)·d/n
+          last_token: QK ≈ (H_q + S·H_kv)·d score = n·S     -> score iff n < ~H_kv·d
+
+        No analyzer head set (``layer_to_heads`` empty) => score would need ALL heads and is
+        ~never smaller, so keep raw QK.
+        """
+        dims = self._model_dims
+        l2h = self.layer_to_heads
+        if not dims or not l2h:
+            return "qk"
+        H_q, H_kv, d = dims["H_q"], dims["H_kv"], dims["d"]
+        S = int(prompt_len)
+        qk_elems = sc_elems = 0
+        for _layer, heads in l2h.items():
+            n = len(heads) or 1
+            if mode == "all_tokens":
+                qk_elems += S * (H_q + H_kv) * d
+                sc_elems += n * S * S
+            else:  # last_token
+                qk_elems += (H_q + S * H_kv) * d
+                sc_elems += n * S
+        return "score" if sc_elems < qk_elems else "qk"
+
+    def _maybe_auto_select(self, prompt, sp, extra: dict) -> None:
+        """Set ``extra["qk_capture"]`` to the size-model-optimal representation in place.
+
+        Fires only for the QK worker when the analyzer can consume score and neither the
+        user (per-request ``extra``) nor the config (``self._qk_capture``) pinned a
+        representation. The decision is immutable for the request's lifetime. Disable with
+        ``VLLM_HOOK_QK_AUTO_SELECT=0``.
+        """
+        if self.worker_name != "probe_hook_qk":
+            return
+        # Opt-in (default OFF): default-ON would silently flip every attn_tracker QK user
+        # (and the QK parity oracles) to score whenever it is smaller — e.g. last_token,
+        # which ~always picks score. Enable deliberately with VLLM_HOOK_QK_AUTO_SELECT=1.
+        if os.environ.get("VLLM_HOOK_QK_AUTO_SELECT", "0") != "1":
+            return
+        if self._analyzer_accepts not in ("score", "either"):
+            return
+        if "qk_capture" in extra:           # explicit user override -> respect it
+            return
+        if self._qk_capture != "qk":        # config pinned a representation -> respect it
+            return
+        if self._model_dims is None:
+            return
+        prompt_len = self._prompt_token_len(prompt)
+        if prompt_len is None:
+            return
+        pick = self._qk_capture_for(prompt_len, self._hookq_mode)
+        extra["qk_capture"] = pick
+        if self._autosel_log_n < 16:
+            self._autosel_log_n += 1
+            print(f"[hookllm/D2] auto-select qk_capture={pick} (S={prompt_len} "
+                  f"mode={self._hookq_mode} accepts={self._analyzer_accepts})", flush=True)
 
     def generate(
         self,
@@ -181,9 +285,12 @@ class HookLLM:
                 run_id = str(uuid.uuid4())
             with PROF.timed("hookllm.build_extra"):
                 new_sp_list = []
-                for sp in sp_list:
+                for prompt, sp in zip(prompts, sp_list):
                     sp = copy.copy(sp)
                     extra = dict(sp.extra_args or {})
+                    # v0.5.7 D2: decide qk vs score for THIS request (immutable) before
+                    # _build_extra_args fills output_qk/score_head from the choice.
+                    self._maybe_auto_select(prompt, sp, extra)
                     # Build per-request so _build_extra_args can merge any
                     # per-request "steer" override (e.g. {"coefficient": C})
                     # into the instance-default steer config.
@@ -228,30 +335,43 @@ class HookLLM:
                 # that unpack_qk expects. k_all varies in seq_len so can't be cat'd.
                 all_probes = [o.probes for o in outputs]
                 merged = {k: v for k, v in all_probes[0].items() if k not in ("qk_cache", "hs_cache")}
+                TENSOR_KEYS = ("q", "k_all", "hidden_states", "scores")
                 for cache_key in ("qk_cache", "hs_cache"):
                     if cache_key not in all_probes[0]:
                         continue
                     merged[cache_key] = {}
-                    for layer in all_probes[0][cache_key]:
-                        first = all_probes[0][cache_key][layer]
-                        # "scores" (v0.6.0) joins q/k_all/hidden_states as a per-request
-                        # per-pass tensor list; take pass [0] from each request, same as q/k.
-                        entry = {k: v for k, v in first.items() if k not in ("q", "k_all", "hidden_states", "scores")}
-                        for tensor_key in ("q", "k_all", "hidden_states", "scores"):
-                            if tensor_key not in first:
-                                continue
+                    # Union of layers across all requests (heterogeneous per-request layer
+                    # sets are allowed; a request missing a layer just contributes nothing).
+                    layers = []
+                    for p in all_probes:
+                        for layer in p.get(cache_key, {}):
+                            if layer not in layers:
+                                layers.append(layer)
+                    for layer in layers:
+                        # v0.5.7 D2: a batch may mix representations for one module — auto-select
+                        # can pick "scores" for one request and raw q/k_all for another. Collect
+                        # whatever each request actually has (skip, don't raise, on a missing key)
+                        # so the convenience merge never crashes; each representation lands under
+                        # its own key as a per-request list. Non-tensor metadata (layer_num,
+                        # hookq_mode, capture, heads) is taken from whichever request carries it.
+                        entry = {}
+                        for p in all_probes:
+                            le = p.get(cache_key, {}).get(layer, {})
+                            for k, v in le.items():
+                                if k not in TENSOR_KEYS:
+                                    entry.setdefault(k, v)
+                        for tensor_key in TENSOR_KEYS:
                             vals = []
                             for p in all_probes:
-                                le = p[cache_key].get(layer, {})
-                                if tensor_key not in le:
-                                    # All batch requests must share the capture shape for a
-                                    # module (e.g. all "scores" or all q/k); a mixed qk+score
-                                    # batch on the same module is unsupported — fail clearly.
-                                    raise ValueError(
-                                        f"mixed capture shapes across batch requests for "
-                                        f"{cache_key}/{layer}: missing '{tensor_key}'")
-                                vals.append(le[tensor_key][0])
-                            entry[tensor_key] = vals
+                                le = p.get(cache_key, {}).get(layer, {})
+                                v = le.get(tensor_key)
+                                # RPC format: q/k_all/hidden_states are STACKED tensors,
+                                # scores is a per-pass LIST — both index [0] for pass 0, but
+                                # never use bool(v) (ambiguous on a multi-element tensor).
+                                if v is not None and len(v) > 0:
+                                    vals.append(v[0])
+                            if vals:
+                                entry[tensor_key] = vals
                         merged[cache_key][layer] = entry
                 outputs[0].probes = merged
 

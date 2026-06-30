@@ -8,6 +8,12 @@ from vllm_hook_plugins.run_utils import load_and_merge_qk_cache
 
 class CorerAnalyzer:
 
+    # v0.5.7 D2: capability declaration read by HookLLM admission. "qk" => CoRe needs raw
+    # Q/K (its two-pass calibration reshapes query-span × key and merges prefixes; it
+    # rejects pre-softmaxed scores), so auto-select must NEVER substitute score for it.
+    # Flip to "either" only after the D2.3 CoRe-from-scores rewrite + scale reconciliation.
+    ACCEPTS = "qk"
+
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
         self.hook_dir = hook_dir
         self.layer_to_heads = layer_to_heads

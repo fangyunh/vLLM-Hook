@@ -134,9 +134,59 @@ def _k_all_cpu_list(entry: dict) -> list:
     return [full[:int(L)] for L in prefix_ends]
 
 
+def _resolve_score_heads(output_spec, layer_num: int, default_head: int) -> list:
+    """The q-head set to score for a layer (v0.5.7 D2 multi-head score).
+
+    When ``output_qk`` is a ``{layer: [heads]}`` dict (the analyzer's ``layer_to_heads``),
+    score exactly the analyzer's important heads for this layer; otherwise fall back to a
+    single ``[default_head]`` (the v0.6.0 single-head behaviour). Order is preserved so the
+    captured ``scores[k]`` aligns with ``heads[k]``.
+    """
+    if isinstance(output_spec, dict):
+        for k, v in output_spec.items():
+            if int(k) == int(layer_num):
+                return [int(h) for h in v] if v else [int(default_head)]
+    return [int(default_head)]
+
+
+def compute_head_scores(q_flat: torch.Tensor, k_flat: torch.Tensor, heads: list,
+                        conf: dict, dtype: torch.dtype = torch.float16) -> torch.Tensor:
+    """Per-head causal attention scores for a SET of heads: ``[n, S_q, S_k]``.
+
+    Vectorized generalization of :func:`compute_head_score` over ``heads`` (a list of
+    q-head indices). Each head ``h`` reads KV head ``h // (H_q//H_kv)`` under GQA. Same
+    math (matmul/softmax in fp32, stored in ``dtype``) so each captured score == the
+    analyzer recompute for that head. ``heads`` order is preserved (``out[k] <-> heads[k]``).
+    """
+    H_q = int(conf["num_attention_heads"])
+    H_kv = int(conf["num_key_value_heads"])
+    d = int(conf["head_dim"])
+    mult = float(conf["attention_multiplier"])
+    S_q = q_flat.shape[0]
+    S_k = k_flat.shape[0]
+    g = max(1, H_q // H_kv)
+    hq = torch.tensor([int(h) % H_q for h in heads], device=q_flat.device, dtype=torch.long)
+    hkv = hq // g
+    q = q_flat.view(S_q, H_q, d).float()                  # [S_q, H_q, d]
+    k = k_flat.view(S_k, H_kv, d).float()                 # [S_k, H_kv, d]
+    q_sel = q.index_select(1, hq).permute(1, 0, 2)        # [n, S_q, d]
+    k_sel = k.index_select(1, hkv).permute(1, 0, 2)       # [n, S_k, d]
+    s = torch.bmm(q_sel, k_sel.transpose(1, 2)) * mult    # [n, S_q, S_k] fp32
+    offset = S_k - S_q
+    if S_q > 1 or offset < 0:
+        # Mask non-causal entries (broadcast [S_q,S_k] over the n-head dim). A single query
+        # row (decode / last token) at offset==S_k-1 attends every key -> mask is a no-op.
+        mask = torch.ones(S_q, S_k, dtype=torch.bool, device=s.device).tril(diagonal=offset)
+        s = s.masked_fill(~mask, float("-inf"))
+    return torch.softmax(s, dim=-1).to(dtype)
+
+
 def compute_head_score(q_flat: torch.Tensor, k_flat: torch.Tensor, head: int,
                        conf: dict, dtype: torch.dtype = torch.float16) -> torch.Tensor:
     """One head's causal attention score: ``softmax((q_h·k_hᵀ)·mult + causal) -> [S_q, S_k]``.
+
+    Single-head wrapper over :func:`compute_head_scores` (value-identical, ``[0]`` of the
+    stacked result) — kept for callers/oracles that want one head.
 
     The v0.6.0 GPU-side score capture: instead of cloning q/k (all heads) and recomputing
     in the analyzer, compute the score for ONE head here and flush only that. Matches the
@@ -154,24 +204,7 @@ def compute_head_score(q_flat: torch.Tensor, k_flat: torch.Tensor, head: int,
     Matmul/softmax in fp32 (accuracy), stored in ``dtype`` (default fp16: [0,1] values fit
     fp16's mantissa better than bf16, same 2 bytes). ``conf`` is the worker ``_conf``.
     """
-    H_q = int(conf["num_attention_heads"])
-    H_kv = int(conf["num_key_value_heads"])
-    d = int(conf["head_dim"])
-    mult = float(conf["attention_multiplier"])
-    S_q = q_flat.shape[0]
-    S_k = k_flat.shape[0]
-    g = max(1, H_q // H_kv)
-    h = int(head) % H_q
-    q_h = q_flat.view(S_q, H_q, d)[:, h, :].float()            # [S_q, d]
-    k_h = k_flat.view(S_k, H_kv, d)[:, h // g, :].float()      # [S_k, d]
-    s = torch.matmul(q_h, k_h.transpose(0, 1)) * mult          # [S_q, S_k] fp32
-    offset = S_k - S_q
-    if S_q > 1 or offset < 0:
-        # Mask non-causal entries. A single query row (decode / last token) at offset==S_k-1
-        # attends to every key, so the mask is a no-op and is skipped for speed.
-        mask = torch.ones(S_q, S_k, dtype=torch.bool, device=s.device).tril(diagonal=offset)
-        s = s.masked_fill(~mask, float("-inf"))
-    return torch.softmax(s, dim=-1).to(dtype)
+    return compute_head_scores(q_flat, k_flat, [head], conf, dtype)[0]
 
 
 def _scores_from_qk_entry(entry: dict, conf: dict, dtype: torch.dtype = torch.float16) -> list:
@@ -185,7 +218,7 @@ def _scores_from_qk_entry(entry: dict, conf: dict, dtype: torch.dtype = torch.fl
     so each pass's keys match the eager path; aligns 1:1 with the per-pass ``q`` list (both
     appended on ``emit_q`` steps). Returns CPU score tensors.
     """
-    head = int(entry.get("head", 0))
+    heads = entry.get("heads") or [int(entry.get("head", 0))]
     # .cpu() every staged tensor BEFORE the cat/compute: the streaming drain
     # (graph/drain.py) replaces drained list elements in place with pinned-HOST tensors
     # while post-drain clones stay on GPU, so entry["k_all"]/["q"] can be a CUDA/CPU MIX
@@ -201,7 +234,7 @@ def _scores_from_qk_entry(entry: dict, conf: dict, dtype: torch.dtype = torch.fl
     out = []
     for q_p, k_p in zip(q_list, k_list):
         q_p = q_p if q_p.dim() == 2 else q_p.unsqueeze(0)
-        out.append(compute_head_score(q_p, k_p, head, conf, dtype))
+        out.append(compute_head_scores(q_p, k_p, heads, conf, dtype))  # [n, S_q, S_k]
     return out
 
 
@@ -377,7 +410,11 @@ class ProbeHookQKWorker:
                 # query row [1, S_k] (the last token's attention over the whole context). Decode
                 # passes are [1, S_k] in either mode. k is always the FULL history (every key).
                 if cap_mode == "score":
-                    score_head = int(extra.get("score_head", self._score_head_default))
+                    # v0.5.7 D2: score the analyzer's head SET for this layer (from the
+                    # output_qk {layer:[heads]} dict), not a single head; fall back to the
+                    # single score_head when no per-layer head info is present.
+                    score_heads = _resolve_score_heads(
+                        output_spec, layer_num, self._score_head_default)
                     # q/k are views consumed immediately by the matmul — no clone needed.
                     if req_mode == "last_token":
                         q_view = input[0][end - 1:end, :].detach()
@@ -398,7 +435,7 @@ class ProbeHookQKWorker:
                                     k_view = torch.cat([prefix_k.to(k_view.device, dtype=k_view.dtype), k_view], dim=0)
                         except Exception:
                             PROF.incr("kv.prefix_recon.errors")
-                    score = compute_head_score(q_view, k_view, score_head, self._conf, self._score_dtype)
+                    score = compute_head_scores(q_view, k_view, score_heads, self._conf, self._score_dtype)
                     PROF.incr("hook.fire.qk")
                     PROF.gauge("captured.bytes.qk", score.numel() * score.element_size())
                     bucket = self._disk_states if extra.get("save_to_disk") else self._captured_states
@@ -406,7 +443,7 @@ class ProbeHookQKWorker:
                         bucket[req_id] = {}
                     layer_states = bucket[req_id]
                     if module_name not in layer_states:
-                        layer_states[module_name] = {"scores": [], "head": score_head, "layer_num": layer_num, "hookq_mode": req_mode, "capture": "score"}
+                        layer_states[module_name] = {"scores": [], "heads": score_heads, "layer_num": layer_num, "hookq_mode": req_mode, "capture": "score"}
                     layer_states[module_name]["scores"].append(score)
                     continue
 
@@ -545,7 +582,7 @@ class ProbeHookQKWorker:
                                                        getattr(self, "_score_dtype", torch.float16))
                         cpu_dict[mod_name] = {
                             "scores": [t.cpu() for t in scores],
-                            "head": entry.get("head", 0),
+                            "heads": entry.get("heads") or [entry.get("head", 0)],
                             "layer_num": entry["layer_num"],
                             "hookq_mode": entry.get("hookq_mode", "all_tokens"),
                             "capture": "score",
@@ -679,17 +716,21 @@ class ProbeHookQKWorker:
                                                            getattr(self, "_score_dtype", torch.float16))
                             cpu_entry = {
                                 "scores": [t.cpu() for t in scores],
-                                "head": entry.get("head", 0),
+                                "heads": entry.get("heads") or [entry.get("head", 0)],
                                 "layer_num": entry["layer_num"],
                                 "hookq_mode": entry.get("hookq_mode", "all_tokens"),
                                 "capture": "score",
                             }
-                            if mod_name in cpu_cache["qk_cache"]:
-                                if "scores" not in cpu_cache["qk_cache"][mod_name]:
-                                    raise ValueError(
-                                        f"mixed capture modes (score + qk) for module "
-                                        f"{mod_name} in one batch are not supported")
-                                cpu_cache["qk_cache"][mod_name]["scores"].extend(cpu_entry["scores"])
+                            # v0.5.7 D2: a mixed score+qk batch (auto-select) can hit one module
+                            # with both representations. Coexist in the per-module dict (score
+                            # passes under "scores", qk under "q"/"k_all") instead of crashing —
+                            # best-effort; a single analyzer reads its own representation.
+                            existing = cpu_cache["qk_cache"].get(mod_name)
+                            if existing is not None and "scores" in existing:
+                                existing["scores"].extend(cpu_entry["scores"])
+                            elif existing is not None:
+                                existing.update({k: v for k, v in cpu_entry.items()
+                                                 if k not in ("layer_num", "hookq_mode")})
                             else:
                                 cpu_cache["qk_cache"][mod_name] = cpu_entry
                             continue
@@ -699,13 +740,13 @@ class ProbeHookQKWorker:
                             "layer_num": entry["layer_num"],
                             "hookq_mode": entry.get("hookq_mode", self.hookq_mode),
                         }
-                        if mod_name in cpu_cache["qk_cache"]:
-                            if "q" not in cpu_cache["qk_cache"][mod_name]:
-                                raise ValueError(
-                                    f"mixed capture modes (qk + score) for module "
-                                    f"{mod_name} in one batch are not supported")
-                            cpu_cache["qk_cache"][mod_name]["q"].extend(cpu_entry["q"])
-                            cpu_cache["qk_cache"][mod_name]["k_all"].extend(cpu_entry["k_all"])
+                        existing = cpu_cache["qk_cache"].get(mod_name)
+                        if existing is not None and "q" in existing:
+                            existing["q"].extend(cpu_entry["q"])
+                            existing["k_all"].extend(cpu_entry["k_all"])
+                        elif existing is not None:
+                            existing.setdefault("q", cpu_entry["q"])
+                            existing.setdefault("k_all", cpu_entry["k_all"])
                         else:
                             cpu_cache["qk_cache"][mod_name] = cpu_entry
 

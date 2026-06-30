@@ -9,6 +9,12 @@ from vllm_hook_plugins.run_utils import load_and_merge_qk_cache, unpack_qk
 
 class AttntrackerAnalyzer:
 
+    # v0.5.7 D2: capability declaration read by HookLLM admission (import-light class
+    # attr, no instantiation). "score" => this analyzer can consume per-head attention
+    # scores (its v0.6.0 fast-path reduces them to per-head softmax), so the size-model
+    # auto-select may substitute score for raw QK when score is the smaller artifact.
+    ACCEPTS = "score"
+
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
         self.hook_dir = hook_dir
         self.layer_to_heads = layer_to_heads
@@ -45,20 +51,27 @@ class AttntrackerAnalyzer:
         for layer_name, qk_data in qk_cache.items():
             layer_num = qk_data['layer_num']
 
-            # v0.6.0 score fast-path: the worker already computed softmax(QK·mult) on-GPU
-            # for one head, so skip the QK→score recompute. ``scores`` is a per-pass list
-            # of [S_q, S_k]; the attention tracker uses the LAST query row (the final
-            # token's attention over all keys), matching the eager ``q_last`` path.
+            # v0.6.0/v0.5.7-D2 score fast-path: the worker already computed softmax(QK·mult)
+            # on-GPU for this layer's head SET, so skip the QK→score recompute. ``scores`` is
+            # a per-pass list; each element is [n_heads, S_q, S_k] (all_tokens) or
+            # [n_heads, 1, S_k] (last_token), with ``heads`` the matching q-head indices. The
+            # attention tracker uses the LAST query row (the final token's attention over all
+            # keys) → [n_heads, S_k], matching the eager filtered-QK path.
             if "scores" in qk_data:
                 scores_list = qk_data["scores"]
-                head = qk_data.get("head", 0)
+                heads = qk_data.get("heads") or [qk_data.get("head", 0)]
                 if batch_attention_weights is None:
                     batch_attention_weights = [dict() for _ in range(len(scores_list))]
                 for i, score_t in enumerate(scores_list):
-                    attn = score_t[-1:, :] if score_t.dim() == 2 else score_t.reshape(1, -1)
+                    if score_t.dim() == 3:
+                        attn = score_t[:, -1, :]            # [n_heads, S_k]
+                    elif score_t.dim() == 2:
+                        attn = score_t[-1:, :]              # [1, S_k] (legacy single head)
+                    else:
+                        attn = score_t.reshape(1, -1)
                     batch_attention_weights[i][layer_name] = {
-                        'attention': attn,                 # [1, seq_len] (single captured head)
-                        'head_indices': [head],
+                        'attention': attn,                 # [n_heads, seq_len]
+                        'head_indices': list(heads),
                         'layer_index': layer_num,
                     }
                 continue

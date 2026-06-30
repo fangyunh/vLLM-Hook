@@ -58,3 +58,20 @@ VLLM_HOOK_SCORE_GRAPH=1 VLLM_HOOK_QK_CAPTURE=buffer VLLM_HOOK_CUDAGRAPH_MODE=FUL
     python -u "$PY" capture --mode score --hookq last_token --out "$WORK/score_buffer_lasttok.pkl"
 echo "[run_qk_score_graph] === 7/7 compare buffer last_token vs qk (last row) ==="
 python -u "$PY" compare --score "$WORK/score_buffer_lasttok.pkl" --qk "$WORK/qk.pkl" --score-lasttok
+
+# ---- v0.5.7 D2: MULTI-HEAD score parity (important_heads -> output_qk {layer:[heads]} dict
+# -> score the whole head set, [n,S_q,S_k]). VLLM_HOOK_SCORE_MH=1 selects the *_mh configs;
+# each captured head is compared independently against the QK recompute for that head. ----
+echo "[run_qk_score_graph] === D2 8/11 op-mode (PIECEWISE) MULTI-HEAD all_tokens score ==="
+VLLM_HOOK_SCORE_MH=1 VLLM_HOOK_SCORE_GRAPH=1 VLLM_HOOK_QK_CAPTURE=op VLLM_HOOK_CUDAGRAPH_MODE=PIECEWISE \
+    python -u "$PY" capture --mode score --out "$WORK/score_op_mh.pkl"
+echo "[run_qk_score_graph] === D2 9/11 buffer-mode MULTI-HEAD all_tokens score ==="
+VLLM_HOOK_SCORE_MH=1 VLLM_HOOK_SCORE_GRAPH=1 VLLM_HOOK_QK_CAPTURE=buffer VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY \
+    python -u "$PY" capture --mode score --out "$WORK/score_buffer_mh.pkl"
+echo "[run_qk_score_graph] === D2 10/11 buffer-mode MULTI-HEAD last_token score (D1 on-GPU egress) ==="
+VLLM_HOOK_SCORE_MH=1 VLLM_HOOK_SCORE_GRAPH=1 VLLM_HOOK_QK_CAPTURE=buffer VLLM_HOOK_CUDAGRAPH_MODE=FULL_DECODE_ONLY \
+    python -u "$PY" capture --mode score --hookq last_token --out "$WORK/score_buffer_lasttok_mh.pkl"
+echo "[run_qk_score_graph] === D2 11/11 compare multi-head (op, buffer all_tokens, buffer last_token) vs qk ==="
+python -u "$PY" compare --score "$WORK/score_op_mh.pkl"             --qk "$WORK/qk.pkl"
+python -u "$PY" compare --score "$WORK/score_buffer_mh.pkl"         --qk "$WORK/qk.pkl"
+python -u "$PY" compare --score "$WORK/score_buffer_lasttok_mh.pkl" --qk "$WORK/qk.pkl" --score-lasttok

@@ -98,10 +98,13 @@ def _capture_store(out, mode):
         if not isinstance(entry, dict):
             continue
         if mode == "score":
-            sc = _first(entry.get("scores"))
+            sc = _first(entry.get("scores"))   # pass 0: [n,S_q,S_k] (D2) or legacy [S_q,S_k]
+            heads = entry.get("heads")
+            if heads is None:
+                heads = [entry.get("head", 0)]
             store[str(layer)] = {
                 "score": sc.detach().to(torch.float32).cpu() if isinstance(sc, torch.Tensor) else None,
-                "head": entry.get("head", 0),
+                "heads": [int(h) for h in heads],
                 "layer_num": entry.get("layer_num"),
             }
         else:
@@ -134,9 +137,14 @@ def capture(mode, out_path, hookq="all_tokens"):
     # score arm follows --hookq: all_tokens -> _alltok.json (full matrix), last_token ->
     # _lasttok.json (final query row [1,S_k] only). Both configs capture ALL layers.
     _suffix = "_lasttok" if (mode == "score" and hookq == "last_token") else "_alltok"
+    # v0.5.7 D2: VLLM_HOOK_SCORE_MH=1 selects the multi-head config (important_heads ->
+    # output_qk {layer:[heads]} dict -> score the whole head set). Only the score arm uses
+    # it; the QK ground truth stays the all-layer/all-head _alltok config so compare can
+    # recompute any captured head. No-op for the qk arm.
+    _mh = "_mh" if (mode == "score" and os.environ.get("VLLM_HOOK_SCORE_MH") == "1") else ""
     config_file = os.environ.get(
         "VLLM_HOOK_CONFIG_FILE",
-        f'model_configs/attention_tracker/{_MODEL.split("/")[-1]}{_suffix}.json')
+        f'model_configs/attention_tracker/{_MODEL.split("/")[-1]}{_suffix}{_mh}.json')
 
     from vllm import SamplingParams
     from vllm_hook_plugins import HookLLM
@@ -209,42 +217,51 @@ def compare(score_path, qk_path, rtol, atol, score_lasttok=False):
                 print(f"[score-parity] case={case} layer={layer}: missing tensor "
                       f"(score={sc is not None} q={qv is not None} k={kv is not None})")
                 overall_ok = False; continue
-            head = sl[layer].get("head", 0)
-            if score_lasttok:
-                # last_token score = ONE row [1, S_k] = the final query token's attention over
-                # all keys. Recompute the full causal matrix from the all_tokens QK ground truth
-                # and take its LAST row. The D1 buffer score reads the REAL full-K [0,abs_end)
-                # from paged KV (unpadded), so trim kv's pad_sequence decode tail to the score's
-                # S_k (real prefill keys, front-aligned) — same trim the all_tokens branch does —
-                # before the recompute. qv stays the full prefill q so the matrix is square and
-                # its last row is the final prompt token over all prompt keys.
-                kv = kv[:sc.shape[1]]
-                ref = reference_score(qv, kv, head, conf)[-1:, :]
-            else:
-                # Under max_tokens>1 the eager QK ground truth stacks q/k_all across passes with
-                # pad_sequence: q's widest pass IS the prefill (so q is unpadded), but k_all grows
-                # over decode, so _first(k_all)=pass0 comes back padded to the LONGEST pass's width
-                # (real prefill keys front-aligned, zero pad at the tail). The captured score is the
-                # prefill [S_q, S_k]; trim q/k_all to its dims (front-aligned real tokens) before the
-                # recompute. No-op at max_tokens=1 (kv real length == S_k already).
-                qv = qv[:sc.shape[0]]
-                kv = kv[:sc.shape[1]]
-                ref = reference_score(qv, kv, head, conf)
-            total += 1
-            if sc.shape != ref.shape:
-                print(f"[score-parity] case={case} layer={layer}: SHAPE MISMATCH "
-                      f"score={tuple(sc.shape)} ref={tuple(ref.shape)}")
+            heads = sl[layer].get("heads", [0])
+            # v0.5.7 D2: the score is [n, S_q, S_k] (one slice per captured head); a legacy
+            # single-head capture is [S_q, S_k] -> normalize to a 1-head stack. Compare EACH
+            # head against the independent recompute from the QK ground truth for that head.
+            if sc.dim() == 2:
+                sc = sc.unsqueeze(0)
+            n, S_q_sc, S_k_sc = sc.shape
+            if n != len(heads):
+                print(f"[score-parity] case={case} layer={layer}: HEAD COUNT MISMATCH "
+                      f"score n={n} heads={heads}")
                 overall_ok = False; continue
-            row_sums = sc.sum(-1)
-            vac = not torch.allclose(row_sums, torch.ones_like(row_sums), atol=5e-2)
-            ok = torch.allclose(sc, ref, rtol=rtol, atol=atol)
-            md = (sc - ref).abs().max().item()
-            if ok and not vac:
-                matched += 1
-            else:
-                overall_ok = False
-            print(f"[score-parity] case={case} layer={layer} head={head}: match={ok} "
-                  f"vacuous={vac} max|Δ|={md:.3e} shape={tuple(sc.shape)}")
+            for j, head in enumerate(heads):
+                sc_j = sc[j]
+                if score_lasttok:
+                    # last_token score = ONE row [1, S_k] = the final query token's attention
+                    # over all keys. Recompute the full causal matrix from the all_tokens QK
+                    # ground truth and take its LAST row. The D1 buffer score reads the REAL
+                    # full-K [0,abs_end) from paged KV (unpadded), so trim kv's pad_sequence
+                    # decode tail to the score's S_k before the recompute; qv stays the full
+                    # prefill q so the matrix is square and its last row is the final prompt
+                    # token over all prompt keys.
+                    kv_j = kv[:S_k_sc]
+                    ref = reference_score(qv, kv_j, head, conf)[-1:, :]
+                else:
+                    # Under max_tokens>1 the eager QK ground truth stacks q/k_all across passes
+                    # with pad_sequence; the captured score is the prefill [S_q, S_k]. Trim
+                    # q/k_all to its dims (front-aligned real tokens) before the recompute.
+                    qv_j = qv[:S_q_sc]
+                    kv_j = kv[:S_k_sc]
+                    ref = reference_score(qv_j, kv_j, head, conf)
+                total += 1
+                if sc_j.shape != ref.shape:
+                    print(f"[score-parity] case={case} layer={layer} head={head}: SHAPE "
+                          f"MISMATCH score={tuple(sc_j.shape)} ref={tuple(ref.shape)}")
+                    overall_ok = False; continue
+                row_sums = sc_j.sum(-1)
+                vac = not torch.allclose(row_sums, torch.ones_like(row_sums), atol=5e-2)
+                ok = torch.allclose(sc_j, ref, rtol=rtol, atol=atol)
+                md = (sc_j - ref).abs().max().item()
+                if ok and not vac:
+                    matched += 1
+                else:
+                    overall_ok = False
+                print(f"[score-parity] case={case} layer={layer} head={head}: match={ok} "
+                      f"vacuous={vac} max|Δ|={md:.3e} shape={tuple(sc_j.shape)}")
 
     print("=" * 60)
     print(f"[score-parity] {matched}/{total} score tensors within rtol={rtol} atol={atol}")
