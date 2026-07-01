@@ -1,0 +1,371 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1860 1200" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <marker id="ah-green" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#16a34a"/></marker>
+    <marker id="ah-red"   markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#dc2626"/></marker>
+    <marker id="ah-amber" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#d97706"/></marker>
+    <marker id="ah-slate" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#475569"/></marker>
+    <marker id="ah-axis"  markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8"/></marker>
+  </defs>
+
+  <style>
+    .title  { font-size: 26px; font-weight: 700; fill: #0f172a; }
+    .sub    { font-size: 13.5px; fill: #475569; }
+    .phase  { font-size: 13px; font-weight: 700; fill: #1e293b; }
+    .phaseS { font-size: 10.5px; fill: #64748b; }
+    .lbl    { font-size: 12.5px; font-weight: 700; }
+    .lblS   { font-size: 9.5px; }
+    .tt     { font-size: 11.5px; font-weight: 700; }
+    .t      { font-size: 10.3px; }
+    .fx     { font-size: 10px; font-weight: 600; }
+    .divider{ stroke: #cbd5e1; stroke-width: 1; stroke-dasharray: 3 4; }
+    .blk    { rx: 7; }
+    .mono   { font-family: 'DejaVu Sans Mono','Consolas',monospace; }
+  </style>
+
+  <rect x="0" y="0" width="1860" height="1200" fill="#ffffff"/>
+
+  <!-- ================= TITLE ================= -->
+  <text x="28" y="38" class="title">FULL CUDA-graph hooking — request timeline &amp; async streams</text>
+  <text x="28" y="60" class="sub">vLLM-Hook v0.5.7 · buffer mode · <tspan class="mono">cudagraph_mode = FULL_DECODE_ONLY</tspan> (eager prefill + full-graph decode) · generic over QK / HS / steer workers</text>
+
+  <!-- ================= PHASE BAND ================= -->
+  <!-- phase x-ranges: INSTALL 210-408 | PREFILL 412-612 | DECODE k 616-1048 | DECODE k+1 1052-1424 | FLUSH 1428-1656 | RETURN 1660-1830 -->
+  <g>
+    <rect x="210"  y="80" width="198" height="46" rx="6" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="309"  y="99"  text-anchor="middle" class="phase">1 · INSTALL</text>
+    <text x="309"  y="115" text-anchor="middle" class="phaseS">load_model (one-time)</text>
+
+    <rect x="412"  y="80" width="200" height="46" rx="6" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="512"  y="99"  text-anchor="middle" class="phase">2 · PREFILL</text>
+    <text x="512"  y="115" text-anchor="middle" class="phaseS">EAGER forward</text>
+
+    <rect x="616"  y="80" width="432" height="46" rx="6" fill="#eef2ff" stroke="#c7d2fe"/>
+    <text x="832"  y="99"  text-anchor="middle" class="phase">3 · DECODE step k</text>
+    <text x="832"  y="115" text-anchor="middle" class="phaseS">cudagraph REPLAY · repeats every token</text>
+
+    <rect x="1052" y="80" width="372" height="46" rx="6" fill="#eef2ff" stroke="#c7d2fe"/>
+    <text x="1238" y="99"  text-anchor="middle" class="phase">3 · DECODE step k+1</text>
+    <text x="1238" y="115" text-anchor="middle" class="phaseS">shows cross-step stream overlap</text>
+
+    <rect x="1428" y="80" width="228" height="46" rx="6" fill="#f5f3ff" stroke="#ddd6fe"/>
+    <text x="1542" y="99"  text-anchor="middle" class="phase">4 · FLUSH</text>
+    <text x="1542" y="115" text-anchor="middle" class="phaseS">get_captured_states / flush_disk</text>
+
+    <rect x="1660" y="80" width="170" height="46" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+    <text x="1745" y="99"  text-anchor="middle" class="phase">5 · RETURN</text>
+    <text x="1745" y="115" text-anchor="middle" class="phaseS">probes to driver</text>
+  </g>
+
+  <!-- time axis -->
+  <line x1="210" y1="142" x2="1830" y2="142" stroke="#94a3b8" stroke-width="1.4" marker-end="url(#ah-axis)"/>
+  <text x="1804" y="136" text-anchor="end" class="phaseS" fill="#94a3b8">time →</text>
+
+  <!-- vertical phase dividers spanning lanes -->
+  <g>
+    <line x1="410"  y1="163" x2="410"  y2="599" class="divider"/>
+    <line x1="614"  y1="163" x2="614"  y2="599" class="divider"/>
+    <line x1="1050" y1="163" x2="1050" y2="599" class="divider"/>
+    <line x1="1426" y1="163" x2="1426" y2="599" class="divider"/>
+    <line x1="1658" y1="163" x2="1658" y2="599" class="divider"/>
+  </g>
+
+  <!-- ================= LANE BANDS + LABELS ================= -->
+  <!-- L1 165  L2 253  L3 341  L4 429  L5 517  (h=80) -->
+  <g>
+    <rect x="210" y="165" width="1620" height="80" fill="#f8fafc"/>
+    <rect x="210" y="253" width="1620" height="80" fill="#f5f9ff"/>
+    <rect x="210" y="341" width="1620" height="80" fill="#f4fef7"/>
+    <rect x="210" y="429" width="1620" height="80" fill="#fffdf5"/>
+    <rect x="210" y="517" width="1620" height="80" fill="#faf9ff"/>
+    <line x1="210" y1="165" x2="1830" y2="165" stroke="#e2e8f0"/>
+    <line x1="210" y1="597" x2="1830" y2="597" stroke="#e2e8f0"/>
+  </g>
+
+  <!-- lane label boxes -->
+  <g>
+    <rect x="12" y="165" width="192" height="80" rx="6" fill="#eef2f7" stroke="#64748b"/>
+    <text x="20" y="196" class="lbl" fill="#1e293b">Driver / host</text>
+    <text x="20" y="212" class="lbl" fill="#1e293b">Python control</text>
+    <text x="20" y="230" class="lblS" fill="#64748b">routing plans · reconstruction</text>
+
+    <rect x="12" y="253" width="192" height="80" rx="6" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="20" y="284" class="lbl" fill="#1e3a8a">Compute stream</text>
+    <text x="20" y="300" class="lbl" fill="#1e3a8a">(GPU default)</text>
+    <text x="20" y="318" class="lblS" fill="#1d4ed8">forward · replay · H2D upload</text>
+
+    <rect x="12" y="341" width="192" height="80" rx="6" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="20" y="372" class="lbl" fill="#14532d">Egress copy stream</text>
+    <text x="20" y="388" class="lbl mono" fill="#14532d" font-size="11px">side CUDA · default ON</text>
+    <text x="20" y="406" class="lblS" fill="#15803d">index_select gather</text>
+
+    <rect x="12" y="429" width="192" height="80" rx="6" fill="#fef3c7" stroke="#d97706" stroke-dasharray="4 3"/>
+    <text x="20" y="460" class="lbl" fill="#78350f">Drain D2H stream</text>
+    <text x="20" y="476" class="lbl mono" fill="#78350f" font-size="11px">side CUDA · opt-in</text>
+    <text x="20" y="494" class="lblS" fill="#b45309">GPU→pinned · default OFF</text>
+
+    <rect x="12" y="517" width="192" height="80" rx="6" fill="#ede9fe" stroke="#7c3aed" stroke-dasharray="4 3"/>
+    <text x="20" y="548" class="lbl" fill="#4c1d95">Async save thread</text>
+    <text x="20" y="564" class="lbl mono" fill="#4c1d95" font-size="11px">host thread · opt-in</text>
+    <text x="20" y="582" class="lblS" fill="#6d28d9">disk write · default OFF</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LANE 1  · Driver / host Python                                        -->
+  <!-- ===================================================================== -->
+  <g>
+    <!-- INSTALL -->
+    <rect class="blk" x="216" y="173" width="188" height="64" fill="#eef2f7" stroke="#64748b"/>
+    <text x="224" y="190" class="tt" fill="#1e293b">graph_install</text>
+    <text x="224" y="205" class="t"  fill="#334155">patch load_model; register ops</text>
+    <text x="224" y="219" class="t"  fill="#334155">(NOT a splitting op → absorbed);</text>
+    <text x="224" y="233" class="t"  fill="#334155">install prepare_inputs + exec wrappers</text>
+
+    <!-- PREFILL -->
+    <rect class="blk" x="418" y="173" width="190" height="64" fill="#eef2f7" stroke="#64748b"/>
+    <text x="426" y="190" class="tt" fill="#1e293b">build routing plans</text>
+    <text x="426" y="205" class="t"  fill="#334155">per-req gating (hooks_on,</text>
+    <text x="426" y="219" class="t"  fill="#334155">layers, emit_q) →</text>
+    <text x="426" y="233" class="t"  fill="#334155">apply_incremental_routing</text>
+
+    <!-- DECODE k -->
+    <rect class="blk" x="620" y="173" width="196" height="64" fill="#eef2f7" stroke="#64748b"/>
+    <text x="628" y="190" class="tt" fill="#1e293b">route (host, in _prepare_inputs)</text>
+    <text x="628" y="205" class="t"  fill="#334155">W1 idle-skip check → diff</text>
+    <text x="628" y="219" class="t"  fill="#334155">per-column layer-set;</text>
+    <text x="628" y="233" class="t"  fill="#334155">upload only CHANGED columns</text>
+
+    <!-- DECODE k+1 -->
+    <rect class="blk" x="1056" y="173" width="196" height="64" fill="#eef2f7" stroke="#64748b"/>
+    <text x="1064" y="190" class="tt" fill="#1e293b">route (host)</text>
+    <text x="1064" y="205" class="t"  fill="#334155">steady-state decode:</text>
+    <text x="1064" y="219" class="t"  fill="#334155">0 changed columns →</text>
+    <text x="1064" y="233" class="t"  fill="#334155">SKIP build + upload (replay)</text>
+
+    <!-- FLUSH -->
+    <rect class="blk" x="1432" y="173" width="222" height="64" fill="#eef2f7" stroke="#64748b"/>
+    <text x="1440" y="190" class="tt" fill="#1e293b">flush</text>
+    <text x="1440" y="205" class="t"  fill="#334155">drain_barrier (event-gated sync);</text>
+    <text x="1440" y="219" class="t"  fill="#334155">QK: _k_all_cpu_list prefix rebuild;</text>
+    <text x="1440" y="233" class="t"  fill="#334155">build cpu_cache (pickle/zstd)</text>
+
+    <!-- RETURN -->
+    <rect class="blk" x="1662" y="173" width="166" height="64" fill="#eef2f7" stroke="#64748b"/>
+    <text x="1670" y="190" class="tt" fill="#1e293b">return</text>
+    <text x="1670" y="205" class="t"  fill="#334155">probes → output[0]</text>
+    <text x="1670" y="219" class="t"  fill="#334155">qk_cache / hs_cache</text>
+    <text x="1670" y="233" class="t"  fill="#334155">steer: no artifacts</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LANE 2  · Compute stream (GPU default)                                -->
+  <!-- ===================================================================== -->
+  <g>
+    <!-- INSTALL -->
+    <rect class="blk" x="216" y="261" width="188" height="64" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="224" y="278" class="tt" fill="#1e3a8a">alloc static buffers</text>
+    <text x="224" y="293" class="t"  fill="#1e40af">q/k/hs_buf (cap+1 rows) BEFORE</text>
+    <text x="224" y="307" class="t"  fill="#1e40af">cudagraph pool → fixed data_ptr;</text>
+    <text x="224" y="321" class="t"  fill="#1e40af">device routing slabs + PinnedRing</text>
+
+    <!-- PREFILL -->
+    <rect class="blk" x="418" y="261" width="190" height="64" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="426" y="278" class="tt" fill="#1e3a8a">EAGER forward</text>
+    <text x="426" y="293" class="t"  fill="#1e40af">H2D upload (inline) → op</text>
+    <text x="426" y="307" class="t"  fill="#1e40af">Python RUNS: scatter buffers;</text>
+    <text x="426" y="321" class="t"  fill="#1e40af">QK: prefix-K read from paged KV</text>
+
+    <!-- DECODE k : upload + replay -->
+    <rect class="blk" x="620" y="261" width="120" height="64" fill="#eff6ff" stroke="#2563eb"/>
+    <text x="626" y="278" class="tt" fill="#1e3a8a" font-size="10.5px">H2D upload</text>
+    <text x="626" y="293" class="t"  fill="#1e40af">inline copy,</text>
+    <text x="626" y="307" class="t"  fill="#1e40af">non_blocking;</text>
+    <text x="626" y="321" class="t"  fill="#1e40af">changed cols only</text>
+
+    <rect class="blk" x="746" y="261" width="300" height="64" fill="#bfdbfe" stroke="#1d4ed8"/>
+    <text x="754" y="278" class="tt" fill="#1e3a8a">cudagraph REPLAY (decode)</text>
+    <text x="754" y="293" class="t"  fill="#1e3a8a">0 Python — recorded op replays:</text>
+    <text x="754" y="307" class="t"  fill="#1e3a8a">scatter q_buf/k_buf/hs_buf (capture)</text>
+    <text x="754" y="321" class="t"  fill="#1e3a8a">OR in-place residual add (steer)</text>
+
+    <!-- DECODE k+1 : upload(skip) + replay -->
+    <rect class="blk" x="1056" y="261" width="112" height="64" fill="#eff6ff" stroke="#93c5fd" stroke-dasharray="4 3"/>
+    <text x="1062" y="278" class="tt" fill="#1e3a8a" font-size="10.5px">H2D upload</text>
+    <text x="1062" y="295" class="t"  fill="#1e40af">skipped</text>
+    <text x="1062" y="309" class="t"  fill="#1e40af">(W1 route reuse)</text>
+
+    <rect class="blk" x="1174" y="261" width="248" height="64" fill="#bfdbfe" stroke="#1d4ed8"/>
+    <text x="1182" y="278" class="tt" fill="#1e3a8a">cudagraph REPLAY</text>
+    <text x="1182" y="293" class="t"  fill="#1e3a8a">pure replay — no upload,</text>
+    <text x="1182" y="307" class="t"  fill="#1e3a8a">no per-req Python;</text>
+    <text x="1182" y="321" class="t"  fill="#1e3a8a">steady-state fast path</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LANE 3  · Egress copy stream (side CUDA, default ON)                   -->
+  <!-- ===================================================================== -->
+  <g>
+    <!-- PREFILL egress -->
+    <rect class="blk" x="466" y="349" width="142" height="64" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="474" y="366" class="tt" fill="#14532d">egress gather</text>
+    <text x="474" y="381" class="t"  fill="#166534">index_select →</text>
+    <text x="474" y="395" class="t"  fill="#166534">own-storage;</text>
+    <text x="474" y="409" class="t"  fill="#166534">requests take views</text>
+
+    <!-- DECODE k egress (extends into k+1 → overlap) -->
+    <rect class="blk" x="900" y="349" width="262" height="64" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="908" y="366" class="tt" fill="#14532d">egress gather (side stream)</text>
+    <text x="908" y="381" class="t"  fill="#166534">side.wait_stream(compute);</text>
+    <text x="908" y="395" class="t"  fill="#166534">index_select 1/layer (Lever A) → own storage;</text>
+    <text x="908" y="409" class="t"  fill="#166534">views; QK: append k_new / prefix-K; record ring evt</text>
+
+    <!-- DECODE k+1 egress -->
+    <rect class="blk" x="1300" y="349" width="122" height="64" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="1308" y="366" class="tt" fill="#14532d">egress gather</text>
+    <text x="1308" y="381" class="t"  fill="#166534">overlaps the</text>
+    <text x="1308" y="395" class="t"  fill="#166534">next step's</text>
+    <text x="1308" y="409" class="t"  fill="#166534">route/replay</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LANE 4  · Drain D2H stream (side CUDA, opt-in)                         -->
+  <!-- ===================================================================== -->
+  <g>
+    <rect class="blk" x="960" y="437" width="262" height="64" fill="#fef3c7" stroke="#d97706" stroke-dasharray="4 3"/>
+    <text x="968" y="454" class="tt" fill="#78350f">async drain (D2H) — opt-in</text>
+    <text x="968" y="469" class="t"  fill="#92400e">wait_stream(compute) + fence egress event;</text>
+    <text x="968" y="483" class="t"  fill="#92400e">GPU clones → pinned host; record_stream guard;</text>
+    <text x="968" y="497" class="t"  fill="#92400e">overlaps next decode; ring event · bounds GPU</text>
+
+    <rect class="blk" x="1330" y="437" width="92" height="64" fill="#fef9e7" stroke="#d97706" stroke-dasharray="4 3"/>
+    <text x="1338" y="454" class="tt" fill="#78350f" font-size="10.5px">drain</text>
+    <text x="1338" y="470" class="t"  fill="#92400e">continues</text>
+    <text x="1338" y="484" class="t"  fill="#92400e">per step</text>
+
+    <text x="216" y="470" class="t mono" fill="#b45309">enabled by VLLM_HOOK_CAPTURE_STREAMING=1</text>
+    <text x="216" y="486" class="t mono" fill="#b45309">or a *_DRAIN_BYTES / *_GPU_BUDGET knob</text>
+    <text x="216" y="500" class="t"      fill="#b45309">(default OFF → this stream does not exist)</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LANE 5  · Async save thread (host, opt-in)                             -->
+  <!-- ===================================================================== -->
+  <g>
+    <rect class="blk" x="216" y="525" width="170" height="64" fill="#ede9fe" stroke="#7c3aed" stroke-dasharray="4 3"/>
+    <text x="224" y="542" class="tt" fill="#4c1d95">start daemon thread</text>
+    <text x="224" y="557" class="t"  fill="#5b21b6">init_async_save_thread</text>
+    <text x="224" y="571" class="t"  fill="#5b21b6">if ASYNC_SAVE=1;</text>
+    <text x="224" y="585" class="t"  fill="#5b21b6">blocking queue(maxsize=4)</text>
+
+    <rect class="blk" x="1432" y="525" width="222" height="64" fill="#ede9fe" stroke="#7c3aed" stroke-dasharray="4 3"/>
+    <text x="1440" y="542" class="tt" fill="#4c1d95">disk write (host thread) — opt-in</text>
+    <text x="1440" y="557" class="t"  fill="#5b21b6">flush_disk: _save_queue.put →</text>
+    <text x="1440" y="571" class="t"  fill="#5b21b6">daemon writes .pt / .safetensors</text>
+    <text x="1440" y="585" class="t"  fill="#5b21b6">atomically; overlaps driver return</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- FENCE / SYNC ARROWS                                                    -->
+  <!-- ===================================================================== -->
+  <!-- A: compute scatter (k) → egress gather (k)  : side.wait_stream(compute) -->
+  <path d="M 896,326 L 912,347" stroke="#16a34a" stroke-width="1.8" fill="none" marker-end="url(#ah-green)"/>
+  <text x="700" y="340" class="fx" fill="#15803d">A · side.wait_stream(compute) — gather after scatter</text>
+
+  <!-- B: egress event (k) → forward (k+1) : fence_before_forward / wait_event -->
+  <path d="M 1162,368 C 1200,360 1170,340 1176,327" stroke="#dc2626" stroke-width="1.8" fill="none" marker-end="url(#ah-red)"/>
+  <text x="1200" y="352" class="fx" fill="#dc2626">B · fence_before_forward: compute.wait_event(prev egress) — cross-step overlap</text>
+
+  <!-- C: egress (k) → drain (k) : fence_stream -->
+  <path d="M 1030,414 L 1030,435" stroke="#d97706" stroke-width="1.8" fill="none" marker-end="url(#ah-amber)"/>
+  <text x="1042" y="428" class="fx" fill="#b45309">C · fence_stream (drain waits egress)</text>
+
+  <!-- D: at flush, driver waits egress + drain ring events : drain_barrier -->
+  <path d="M 1512,502 L 1512,239" stroke="#475569" stroke-width="1.6" fill="none" stroke-dasharray="5 4" marker-end="url(#ah-slate)"/>
+  <text x="1522" y="330" class="fx" fill="#475569" transform="rotate(90 1522 330)">D · drain_barrier — flush waits egress + drain events</text>
+
+  <!-- ===================================================================== -->
+  <!-- PER-WORKER BRANCHES                                                    -->
+  <!-- ===================================================================== -->
+  <text x="28" y="648" class="phase" font-size="15px">Per-worker branches (the timeline above is shared; these are the differences)</text>
+
+  <!-- QK box -->
+  <rect x="216" y="662" width="500" height="150" rx="8" fill="#f0fdf4" stroke="#16a34a"/>
+  <text x="232" y="686" class="tt" font-size="13px" fill="#14532d">QK · probe_hook_qk  (capture on TP rank 0)</text>
+  <line x1="232" y1="694" x2="700" y2="694" stroke="#bbf7d0"/>
+  <text x="232" y="714" class="t" fill="#166534"><tspan font-weight="700">in-graph op:</tspan> capture_qk — index_copy scatter of q + k rows</text>
+  <text x="232" y="734" class="t" fill="#166534"><tspan font-weight="700">egress:</tspan> index_select q + k; append k_new each step;</text>
+  <text x="244" y="750" class="t" fill="#166534">prefix-K read from paged KV off-graph (1st capture step)</text>
+  <text x="232" y="770" class="t" fill="#166534"><tspan font-weight="700">flush:</tspan> _k_all_cpu_list rebuilds each request's</text>
+  <text x="244" y="786" class="t" fill="#166534">growing-prefix K history from its own bucket</text>
+  <text x="232" y="804" class="t" fill="#166534"><tspan font-weight="700">route key:</tspan> _capture_idle_key (idle-skip only)</text>
+
+  <!-- HS box -->
+  <rect x="732" y="662" width="470" height="150" rx="8" fill="#eff6ff" stroke="#2563eb"/>
+  <text x="748" y="686" class="tt" font-size="13px" fill="#1e3a8a">HS · probe_hidden_states  (capture on TP rank 0)</text>
+  <line x1="748" y1="694" x2="1186" y2="694" stroke="#bfdbfe"/>
+  <text x="748" y="714" class="t" fill="#1e40af"><tspan font-weight="700">in-graph op:</tspan> capture_hs — forms hidden+residual,</text>
+  <text x="760" y="730" class="t" fill="#1e40af">then index_copy scatter</text>
+  <text x="748" y="750" class="t" fill="#1e40af"><tspan font-weight="700">egress:</tspan> index_select hs; <tspan font-weight="700">NO prefix-K</tspan></text>
+  <text x="748" y="770" class="t" fill="#1e40af"><tspan font-weight="700">flush:</tspan> hidden_states stored directly —</text>
+  <text x="760" y="786" class="t" fill="#1e40af"><tspan font-weight="700">NO reconstruction</tspan> (residuals live in no cache)</text>
+  <text x="748" y="804" class="t" fill="#1e40af"><tspan font-weight="700">route key:</tspan> _capture_idle_key (idle-skip only)</text>
+
+  <!-- Steer box -->
+  <rect x="1218" y="662" width="610" height="150" rx="8" fill="#fdf4ff" stroke="#a21caf"/>
+  <text x="1234" y="686" class="tt" font-size="13px" fill="#701a75">Steer · steer_hook_act  (runs on ALL TP ranks — residual is replicated)</text>
+  <line x1="1234" y1="694" x2="1812" y2="694" stroke="#f5d0fe"/>
+  <text x="1234" y="714" class="t" fill="#86198f"><tspan font-weight="700">in-graph op:</tspan> steer_buffer — masked IN-PLACE residual add;</text>
+  <text x="1246" y="730" class="t" fill="#86198f">mutation propagates downstream on replay (mutates_args)</text>
+  <text x="1234" y="750" class="t" fill="#86198f"><tspan font-weight="700">NO egress lane, NO drain, NO artifacts</tspan> — the steered</text>
+  <text x="1246" y="766" class="t" fill="#86198f">residual just changes the emitted tokens</text>
+  <text x="1234" y="786" class="t" fill="#86198f"><tspan font-weight="700">route key:</tspan> (req_ids, qsl) signature → stable decode</text>
+  <text x="1246" y="802" class="t" fill="#86198f">skips build + upload entirely (pure replay)</text>
+
+  <!-- ===================================================================== -->
+  <!-- LEGEND / KEY FACTS                                                     -->
+  <!-- ===================================================================== -->
+  <rect x="216" y="836" width="1612" height="330" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="236" y="862" class="phase" font-size="15px">Legend</text>
+
+  <!-- swatches -->
+  <g>
+    <rect x="236" y="878" width="22" height="14" rx="3" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="266" y="890" class="t" fill="#334155">Compute stream (GPU default) — forward + cudagraph replay + <tspan class="mono">inline</tspan> H2D routing upload</text>
+
+    <rect x="236" y="900" width="22" height="14" rx="3" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="266" y="912" class="t" fill="#334155">Egress copy stream — dedicated CUDA side stream, <tspan font-weight="700">default ON</tspan> (VLLM_HOOK_EGRESS_STREAM)</text>
+
+    <rect x="236" y="922" width="22" height="14" rx="3" fill="#fef3c7" stroke="#d97706" stroke-dasharray="4 3"/>
+    <text x="266" y="934" class="t" fill="#334155">Drain D2H stream — dedicated CUDA side stream, <tspan font-weight="700">opt-in / default OFF</tspan> (bounds GPU residency)</text>
+
+    <rect x="236" y="944" width="22" height="14" rx="3" fill="#ede9fe" stroke="#7c3aed" stroke-dasharray="4 3"/>
+    <text x="266" y="956" class="t" fill="#334155">Async save thread — host daemon thread, <tspan font-weight="700">opt-in / default OFF</tspan> (VLLM_HOOK_ASYNC_SAVE=1)</text>
+
+    <rect x="236" y="966" width="22" height="14" rx="3" fill="#eef2f7" stroke="#64748b"/>
+    <text x="266" y="978" class="t" fill="#334155">Driver / host Python — routing plan build, W1 idle-skip decision, flush &amp; reconstruction</text>
+  </g>
+
+  <!-- arrow key -->
+  <g>
+    <line x1="880" y1="885" x2="920" y2="885" stroke="#16a34a" stroke-width="1.8" marker-end="url(#ah-green)"/>
+    <text x="928" y="889" class="t" fill="#334155"><tspan font-weight="700">A</tspan>  side.wait_stream(compute) — egress gather ordered after this step's in-graph scatter</text>
+
+    <line x1="880" y1="907" x2="920" y2="907" stroke="#dc2626" stroke-width="1.8" marker-end="url(#ah-red)"/>
+    <text x="928" y="911" class="t" fill="#334155"><tspan font-weight="700">B</tspan>  fence_before_forward: compute.wait_event(prev egress) — next forward waits last step's gather</text>
+
+    <line x1="880" y1="929" x2="920" y2="929" stroke="#d97706" stroke-width="1.8" marker-end="url(#ah-amber)"/>
+    <text x="928" y="933" class="t" fill="#334155"><tspan font-weight="700">C</tspan>  fence_stream — drain waits the egress gather event before reading its output</text>
+
+    <line x1="880" y1="951" x2="920" y2="951" stroke="#475569" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah-slate)"/>
+    <text x="928" y="955" class="t" fill="#334155"><tspan font-weight="700">D</tspan>  drain_barrier — flush blocks on egress + drain <tspan font-style="italic">ring events only</tspan> (not a full device sync)</text>
+  </g>
+
+  <!-- key facts -->
+  <line x1="236" y1="996" x2="1808" y2="996" stroke="#e2e8f0"/>
+  <text x="236" y="1018" class="phase" fill="#0f172a">Load-bearing facts</text>
+  <text x="236" y="1040" class="t" fill="#334155">• The in-graph op is <tspan font-weight="700">NOT a splitting op</tspan> → it is absorbed into the decode cudagraph and replays with <tspan font-weight="700">0 Python</tspan>. All per-request Python lives outside the graph.</text>
+  <text x="236" y="1060" class="t" fill="#334155">• The <tspan font-weight="700">routing H2D upload is INLINE on the compute stream</tspan> (a <tspan class="mono">non_blocking</tspan> pinned→device copy) — it is <tspan font-weight="700">not</tspan> a separate stream. Only egress + drain are true CUDA side streams.</text>
+  <text x="236" y="1080" class="t" fill="#334155">• Static q/k/hs buffers are allocated at INSTALL <tspan font-weight="700">before</tspan> the cudagraph memory pool, so their <tspan class="mono">data_ptr</tspan> is fixed across replays and the recorded scatter always hits the right rows.</text>
+  <text x="236" y="1100" class="t" fill="#334155">• Incremental routing (v0.5.7 A) uploads only columns whose active-layer-set changed; steady-state decode changes nothing → <tspan font-weight="700">upload skipped, pure replay</tspan>.</text>
+  <text x="236" y="1120" class="t" fill="#334155">• Cross-step overlap: egress gather of step k runs on its side stream while the driver builds routing for step k+1; fence B stops k+1's forward from clobbering buffers still being read.</text>
+  <text x="236" y="1140" class="t" fill="#334155">• With defaults (egress ON, drain OFF, async-save OFF) the only concurrency beyond the compute stream is the egress copy stream; enabling drain / async-save adds the two dashed lanes.</text>
+</svg>
