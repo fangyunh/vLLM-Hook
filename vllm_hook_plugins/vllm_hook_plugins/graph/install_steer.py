@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
 
 from vllm.forward_context import get_forward_context
@@ -344,6 +345,36 @@ class SteerRegistry:
         self._next_vec_id = 0
         self._pending_plans: list = []
 
+        # Incremental/persistent routing (dynamic, arbitrary-layer safe). The legacy
+        # reset+build+upload rewrote [num_layers, width]x3 EVERY non-skipped step even
+        # though only the currently-active layer-rows are non-zero; under open-loop churn
+        # the W1 whole-step skip (routing_key) fails every step, so that full O(num_layers
+        # x width) cost fired on the critical path each step and drove the concurrency
+        # slope. Incremental keeps a per-column shadow of the interned (layer, coeff, vid,
+        # mode) state and rewrites/uploads ONLY the columns that changed since last step:
+        # steady decode -> 0 upload (pure replay), churn/finish -> O(changed). The active
+        # layer-rows are discovered from the requests actually in flight, so ANY per-request
+        # layer works with no install-time layer knowledge (unlike wiring only target
+        # layers, which the FULL graph freezes at capture). Kill switch
+        # VLLM_HOOK_INCREMENTAL_ROUTING=0 -> legacy full reset+upload.
+        self.incremental_enabled = (
+            os.environ.get("VLLM_HOOK_INCREMENTAL_ROUTING", "1") != "0"
+            and self.device.type == "cuda"
+            and self.should_capture)
+        self._col_state: Optional[np.ndarray] = None     # (cap,) int64 shadow; 0=inactive
+        self._inc_coeff: Optional[torch.Tensor] = None   # (num_layers, cap) f32 pinned
+        self._inc_vecid: Optional[torch.Tensor] = None   # (num_layers, cap) i64 pinned
+        self._inc_mode: Optional[torch.Tensor] = None    # (num_layers, cap) i64 pinned
+        self._inc_event: Optional[torch.cuda.Event] = None
+        self._inc_force_full = False   # next apply rewrites [0,width) in full (post-error)
+        # Intern (layer, coeff, vid, mode) -> id (>=1; 0 reserved for "inactive"). A steer
+        # deployment fixes the vector/method/coefficient, so this stays tiny (adjust_rs is
+        # always coeff=0; add_vector a fixed per-request coefficient).
+        self._st_intern: Dict[tuple, int] = {}
+        self._st_val: Dict[int, tuple] = {}
+        self._st_next = 1
+        self._pending_assignments: list = []
+
     def register_host(self, host: SteerHost) -> None:
         self.hosts[host.layer_num] = host
 
@@ -420,6 +451,103 @@ class SteerRegistry:
             self.vec_id_all[:, :w].copy_(vec_id[:, :w], non_blocking=True)
             self.mode_all[:, :w].copy_(mode[:, :w], non_blocking=True)
         self._ring.record_advance()
+
+    def force_full_routing(self) -> None:
+        """Force the next ``apply_incremental_routing`` to rewrite [0,width) in full.
+
+        Used by the routing wrapper after an error left the device slabs in an unknown
+        state, so recovery re-establishes the whole prefix rather than trusting the
+        stale shadow.
+        """
+        self._inc_force_full = True
+
+    def _intern_state(self, layer: int, coeff: float, vid: int, mode: int) -> int:
+        """Map a (layer, coeff, vid, mode) steer state to a stable id (>=1)."""
+        key = (int(layer), float(coeff), int(vid), int(mode))
+        sid = self._st_intern.get(key)
+        if sid is None:
+            sid = self._st_next
+            self._st_next += 1
+            self._st_intern[key] = sid
+            self._st_val[sid] = key
+        return sid
+
+    def apply_incremental_routing(self, assignments: list, width: int) -> bool:
+        """Write + upload ONLY the routing columns whose steer state changed this step.
+
+        ``assignments`` is one ``(start, end, layer, coeff, vid, mode)`` per steered
+        request. Each column has at most one active (layer, coeff, vid, mode) tuple
+        (requests own disjoint flat column ranges within a forward), interned to a stable
+        id; a column needs a rewrite iff that id changed vs the ``_col_state`` shadow.
+        Steady-state stable decode (and every idle step) changes 0 columns -> no upload, a
+        pure replay; a +1 prefill / finish / condense changes only the affected columns ->
+        O(changed) work across the three (coeff/vec_id/mode) planes. Returns True iff an
+        upload was issued (diagnostic).
+
+        Clearing is load-bearing: a column that WAS steered and is now inactive (its
+        request finished / moved) flips to id 0, is detected as changed, and its three
+        planes are zeroed — so stale steering never persists into a replay. A column whose
+        request is stable keeps its id and is skipped (0 upload).
+        """
+        cap = self.cap
+        w = max(1, min(int(width), cap))
+        if self._col_state is None:
+            self._col_state = np.zeros(cap, dtype=np.int64)
+            pin = self.device.type == "cuda"
+            self._inc_coeff = torch.zeros(self.num_layers, cap, dtype=torch.float32,
+                                          pin_memory=pin)
+            self._inc_vecid = torch.zeros(self.num_layers, cap, dtype=torch.int64,
+                                          pin_memory=pin)
+            self._inc_mode = torch.zeros(self.num_layers, cap, dtype=torch.int64,
+                                         pin_memory=pin)
+            self._inc_event = torch.cuda.Event() if pin else None
+            # Device slabs (constructor zeros) + shadow + mirrors all start zeroed.
+
+        # Desired per-column interned state over [0, cap) (only [0,w) is read/diffed;
+        # active columns are always < real_n <= w). Disjoint flat ranges -> no overlap.
+        new_col = np.zeros(cap, dtype=np.int64)
+        for (start, end, layer, coeff, vid, mode) in assignments:
+            if end <= start:
+                continue
+            new_col[start:end] = self._intern_state(layer, coeff, vid, mode)
+
+        old = self._col_state
+        if self._inc_force_full:
+            changed = np.arange(0, w, dtype=np.int64)
+            self._inc_force_full = False
+        else:
+            changed = np.nonzero(new_col[:w] != old[:w])[0]
+        if changed.size == 0:
+            return False
+
+        lo = int(changed[0])
+        hi = int(changed[-1]) + 1
+        if self._inc_event is not None:
+            self._inc_event.synchronize()  # last upload of these mirrors is done
+        cc = torch.from_numpy(changed)
+        # Clear the changed columns across ALL layer rows in every plane, then set the one
+        # active (layer, cols) cell per distinct new state.
+        self._inc_coeff[:, cc] = 0
+        self._inc_vecid[:, cc] = 0
+        self._inc_mode[:, cc] = 0
+        new_changed = new_col[changed]
+        for sid in np.unique(new_changed):
+            if sid == 0:
+                continue
+            cols = changed[new_changed == sid]
+            layer, coeff, vid, mode = self._st_val[int(sid)]
+            cols_t = torch.from_numpy(cols)
+            self._inc_coeff[layer, cols_t] = coeff
+            self._inc_vecid[layer, cols_t] = vid
+            self._inc_mode[layer, cols_t] = mode
+
+        self.coeff_all[:, lo:hi].copy_(self._inc_coeff[:, lo:hi], non_blocking=True)
+        self.vec_id_all[:, lo:hi].copy_(self._inc_vecid[:, lo:hi], non_blocking=True)
+        self.mode_all[:, lo:hi].copy_(self._inc_mode[:, lo:hi], non_blocking=True)
+        if self._inc_event is not None:
+            self._inc_event.record()
+        old[:w] = new_col[:w]
+        return True
 
     def vec_id_for_path(self, path: str, worker) -> Optional[int]:
         """Resolve ``vector_path`` to a vec_table row, loading + caching on first use.
@@ -526,13 +654,21 @@ def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -
         return []
 
     bs = len(qsl_cpu) - 1
-    coeff_pinned = registry.coeff_pinned
-    vecid_pinned = registry.vec_id_pinned
-    mode_pinned = registry.mode_pinned
+    inc = registry.incremental_enabled
+    # Legacy ring mirrors are only written when incremental routing is off.
+    if not inc:
+        coeff_pinned = registry.coeff_pinned
+        vecid_pinned = registry.vec_id_pinned
+        mode_pinned = registry.mode_pinned
     cap = registry.cap
     env_path = getattr(worker, "_env_config_path", None) if worker else None
 
+    # v0.5.7 E-style hygiene: build the per-request decision trace ONLY when it will be
+    # printed (the dbg f-strings were built every steered request every step regardless
+    # of the print gate — a real O(reqs) hot-path cost).
+    _dbg_on = _DEBUG and _dbg_steer_call_n[0] <= _DBG_STEER_MAX_CALLS
     plans: list = []
+    assignments: list = []  # (start, end, layer, coeff, vid, mode) for the incremental router
     dbg: list = []
     for i in range(bs):
         if i >= len(req_ids):
@@ -550,19 +686,19 @@ def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -
             continue
         method = cfg.get("method", "adjust_rs")
         if method not in ("add_vector", "adjust_rs"):
-            dbg.append(f"r{i}:method={method}_unsupported")
+            if _dbg_on: dbg.append(f"r{i}:method={method}_unsupported")
             continue
         vector_path = cfg.get("vector_path")
         if not vector_path:
             continue
         vid = registry.vec_id_for_path(vector_path, worker)
         if vid is None:
-            dbg.append(f"r{i}:vec_load_failed")
+            if _dbg_on: dbg.append(f"r{i}:vec_load_failed")
             continue
         if method == "adjust_rs" and vid not in registry.vec_has_avgproj:
             # adjust_rs needs the vector's avg_proj target; without it the in-kernel
             # coefficient would be wrong, so skip rather than steer incorrectly.
-            dbg.append(f"r{i}:adjust_rs_no_avg_proj")
+            if _dbg_on: dbg.append(f"r{i}:adjust_rs_no_avg_proj")
             continue
         mode_val = 1 if method == "adjust_rs" else 0
         coefficient = 0.0 if method == "adjust_rs" else float(cfg.get("coefficient", 0.0))
@@ -571,12 +707,21 @@ def _build_routing_steer(model_runner, registry: SteerRegistry, qsl_cpu: list) -
         end = min(int(qsl_cpu[i + 1]), cap)
         if end <= start:
             continue
-        coeff_pinned[layer, start:end] = coefficient
-        vecid_pinned[layer, start:end] = vid
-        mode_pinned[layer, start:end] = mode_val
+        if inc:
+            # Record (column-range, layer, coeff, vid, mode); the registry diffs vs last
+            # step and writes/uploads only the columns that changed — no per-request tensor
+            # ops on the hot path (the cost that scaled with batch width x num_layers).
+            assignments.append((start, end, layer, coefficient, vid, mode_val))
+        else:
+            coeff_pinned[layer, start:end] = coefficient
+            vecid_pinned[layer, start:end] = vid
+            mode_pinned[layer, start:end] = mode_val
         plans.append({"req_idx": i, "layer": layer, "method": method, "vid": vid})
-        dbg.append(f"r{i}:L{layer},{method},coeff={coefficient},vid={vid},rows={start}:{end}")
+        if _dbg_on:
+            dbg.append(f"r{i}:L{layer},{method},coeff={coefficient},vid={vid},rows={start}:{end}")
 
+    if inc:
+        registry._pending_assignments = assignments
     if _DEBUG and _dbg_steer_call_n[0] <= _DBG_STEER_MAX_CALLS:
         _dbg_steer_call_n[0] += 1
         print(f"[graph/dbg-steer] routing bs={bs} steered={len(plans)} :: "
