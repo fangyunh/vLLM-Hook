@@ -11,6 +11,9 @@ output*.txt
 # random test configs
 model_configs/**/*.RANDOM_TEST.json
 
+# LSF job output — regenerated on every submit
+bluevela/logs/
+
 # capture-ring dumps (VLLM_HOOK_RING_DIR defaults to these RELATIVE paths)
 hs_ring_dump/
 qk_ring_dump/
