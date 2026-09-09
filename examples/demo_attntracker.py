@@ -11,6 +11,28 @@ os.environ.setdefault("VLLM_HOOK_USE_SAFETENSORS", "1")
 from vllm import SamplingParams
 from vllm_hook_plugins import HookLLM
 
+
+def _print_evidence(elapsed_s: float, n_tokens: int) -> None:
+    """Compact end-of-run evidence: wall-clock/decode-step timing, the profiler's
+    counters (meaningful only with VLLM_HOOK_PROFILE=1), and the active optimization
+    lever state -- so a reader can tell from the log whether anything actually ran
+    differently, not just that the script printed text."""
+    per_step = (elapsed_s * 1000 / n_tokens) if n_tokens else float("nan")
+    print(f"[evidence] generate: {elapsed_s * 1000:.1f} ms total, "
+          f"{per_step:.2f} ms/decode-step over {n_tokens} tokens")
+
+    from vllm_hook_plugins._profiler import PROF
+    snap = PROF.summary_only()
+    if snap["enabled"]:
+        print(f"[evidence] profiler counters: {snap['counters']}")
+    else:
+        print("[evidence] profiler disabled -- set VLLM_HOOK_PROFILE=1 to see hook/ring counters")
+
+    from vllm_hook_plugins.optimizations import describe
+    print("[evidence] active optimization levers:")
+    print(describe())
+
+
 def apply_chat_template_and_get_ranges(tokenizer, model_name: str, instruction: str, data: str):
     """Following https://github.com/khhung-906/Attention-Tracker/blob/main/models/attn_model.py"""
     messages = [
@@ -59,6 +81,15 @@ if __name__ == "__main__":
         "VLLM_HOOK_CONFIG_FILE",
         f'model_configs/attention_tracker/{model.split("/")[-1]}.json')
 
+    # Graph mode is strictly opt-in: VLLM_HOOK_ALLOW_CUDAGRAPH=1 arms the FULL
+    # CUDA-graph capture ring and lets enforce_eager below go False; unset/anything
+    # else keeps today's eager default unchanged. Its companion knob,
+    # VLLM_HOOK_RING_MAX_BATCHED_TOKENS, only ever LOWERS the scheduler's token
+    # budget (byte-identical capture either way) and is left at its "off" default here.
+    GRAPH_MODE = os.environ.get("VLLM_HOOK_ALLOW_CUDAGRAPH") == "1"
+    print(f"[demo_attntracker] mode={'FULL CUDA-graph capture' if GRAPH_MODE else 'eager'} "
+          f"(VLLM_HOOK_ALLOW_CUDAGRAPH={'1' if GRAPH_MODE else '0'})")
+
     llm = HookLLM(
         model=model,
         worker_name="probe_hook_qk",
@@ -70,7 +101,7 @@ if __name__ == "__main__":
         max_model_len=2048,
         trust_remote_code=True,
         dtype=dtype_map.get(model, torch.float16),
-        enforce_eager=True,
+        enforce_eager=not GRAPH_MODE,
         enable_prefix_caching=True,
         enable_hook=True, 
         tensor_parallel_size=1  # the number of gpus
@@ -103,7 +134,11 @@ if __name__ == "__main__":
         output = llm.generate(text, SamplingParams(temperature=0.1, max_tokens=50), save_to_disk=True)
         t1 = time.time()
         print(f"hook llm generation runtime: {(t1-t0):.3f}s")
-        stats = llm.analyze(probes=getattr(output[0], "probes", None), analyzer_spec={'input_range': input_range, 'attn_func':"sum_normalize"})
+        # save_to_disk=True above means probes is always None on the output (see
+        # _hook_plugin.py); analyze() already resolves this run from disk, so no
+        # probes= argument is passed here -- that keeps the disk path explicit
+        # instead of reading as a (dead) in-memory retrieval.
+        stats = llm.analyze(analyzer_spec={'input_range': input_range, 'attn_func':"sum_normalize"})
         t2 = time.time()
         print(f"hook llm analysis runtime: {(t2-t1):.3f}s")
 
@@ -112,6 +147,7 @@ if __name__ == "__main__":
 
         print(output[0].outputs[0].text)
         print(f"Attention tracker score: {score[0]:.3f}")
+        _print_evidence(t1 - t0, len(output[0].outputs[0].token_ids))
 
         # Runtime comparison with vllm without hooks
         llm.llm_engine.reset_prefix_cache()
@@ -143,16 +179,23 @@ if __name__ == "__main__":
         texts.append(text)
         input_ranges.append(input_range)
     
+    t0 = time.time()
     output = llm.generate(texts, SamplingParams(temperature=0.1, max_tokens=50), save_to_disk=True)
-    stats = llm.analyze(probes=getattr(output[0], "probes", None), analyzer_spec={'input_range': input_ranges, 'attn_func':"sum_normalize"})
-    
+    elapsed = time.time() - t0
+    # Same reasoning as above: save_to_disk=True means probes is None on output,
+    # so analyze() is left to read from disk explicitly rather than via a dead
+    # probes= kwarg.
+    stats = llm.analyze(analyzer_spec={'input_range': input_ranges, 'attn_func':"sum_normalize"})
+
     score = stats['score']
 
     llm.llm_engine.reset_prefix_cache()
-    output = llm.generate(texts, temperature=0.1, max_tokens=50, use_hook=False)
-    print(output[1].outputs[0].text)
+    output_orig = llm.generate(texts, temperature=0.1, max_tokens=50, use_hook=False)
+    print(output_orig[1].outputs[0].text)
 
     print("=" * 50)
     print(f"Original attention-tracker score: {score[0]:.3f}")
     print(f"Prompt injection attention-tracker score: {score[1]:.3f}")
     print(f"Difference: {abs(score[0] - score[1]):.3f}")
+    n_tokens = sum(len(o.outputs[0].token_ids) for o in output)
+    _print_evidence(elapsed, n_tokens)

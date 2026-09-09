@@ -27,6 +27,7 @@ Env knobs:
 """
 import os
 import multiprocessing as mp
+import time
 import torch
 
 mp.set_start_method("spawn", force=True)
@@ -36,6 +37,27 @@ os.environ.setdefault("VLLM_HOOK_USE_SAFETENSORS", "1")
 
 from vllm import SamplingParams
 from vllm_hook_plugins import HookLLM
+
+
+def _print_evidence(elapsed_s: float, n_tokens: int) -> None:
+    """Compact end-of-run evidence: wall-clock/decode-step timing, the profiler's
+    counters (meaningful only with VLLM_HOOK_PROFILE=1), and the active optimization
+    lever state -- so a reader can tell from the log whether anything actually ran
+    differently, not just that the script printed text."""
+    per_step = (elapsed_s * 1000 / n_tokens) if n_tokens else float("nan")
+    print(f"[evidence] generate: {elapsed_s * 1000:.1f} ms total, "
+          f"{per_step:.2f} ms/decode-step over {n_tokens} tokens")
+
+    from vllm_hook_plugins._profiler import PROF
+    snap = PROF.summary_only()
+    if snap["enabled"]:
+        print(f"[evidence] profiler counters: {snap['counters']}")
+    else:
+        print("[evidence] profiler disabled -- set VLLM_HOOK_PROFILE=1 to see hook/ring counters")
+
+    from vllm_hook_plugins.optimizations import describe
+    print("[evidence] active optimization levers:")
+    print(describe())
 
 
 if __name__ == "__main__":
@@ -50,8 +72,17 @@ if __name__ == "__main__":
     max_tokens = int(os.environ.get("VLLM_HOOK_DEMO_MAX_TOKENS", "128"))
     hooks_on = os.environ.get("VLLM_HOOK_DEMO_HOOKS_ON", "both")
 
+    # Graph mode is strictly opt-in: VLLM_HOOK_ALLOW_CUDAGRAPH=1 arms the FULL
+    # CUDA-graph capture ring and lets enforce_eager below go False; unset/anything
+    # else keeps today's eager default unchanged. Its companion knob,
+    # VLLM_HOOK_RING_MAX_BATCHED_TOKENS, only ever LOWERS the scheduler's token
+    # budget (byte-identical capture either way) and is left at its "off" default here.
+    GRAPH_MODE = os.environ.get("VLLM_HOOK_ALLOW_CUDAGRAPH") == "1"
+
     print(f"[longdec-hs] model={model} config={config_file} "
-          f"max_tokens={max_tokens} hooks_on={hooks_on}")
+          f"max_tokens={max_tokens} hooks_on={hooks_on} "
+          f"mode={'FULL CUDA-graph capture' if GRAPH_MODE else 'eager'} "
+          f"(VLLM_HOOK_ALLOW_CUDAGRAPH={'1' if GRAPH_MODE else '0'})")
 
     llm = HookLLM(
         model=model,
@@ -64,7 +95,7 @@ if __name__ == "__main__":
         max_model_len=2048,
         trust_remote_code=True,
         dtype=torch.float16,
-        enforce_eager=True,
+        enforce_eager=not GRAPH_MODE,
         enable_prefix_caching=False,
         enable_hook=True,
         tensor_parallel_size=1,
@@ -81,7 +112,9 @@ if __name__ == "__main__":
         sp = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         sp.extra_args = {"hooks_on": hooks_on}
 
+        t0 = time.time()
         output = llm.generate(case, sp, save_to_disk=True)
+        elapsed = time.time() - t0
         stats = llm.analyze(analyzer_spec={"reduce": "none"})
 
         print(f"\nPrompt: '{case}'  (decode={max_tokens}, hooks_on={hooks_on})")
@@ -89,4 +122,5 @@ if __name__ == "__main__":
         for layer_name, tensors in sorted(stats["hidden_states"].items()):
             t = tensors[0]
             print(f"  {layer_name}: shape={tuple(t.shape)}, norm={torch.norm(t.float()):.4f}")
+        _print_evidence(elapsed, len(output[0].outputs[0].token_ids))
         llm.llm_engine.reset_prefix_cache()
