@@ -349,6 +349,18 @@ def generate_with_spotlight(
         sp.extra_args = extra
         sp_list.append(sp)
 
+    # _hook_plugin's generate-patch gate only checks for output_hidden_states /
+    # output_qk / steer, so it never lazily installs the Spotlight forward hooks.
+    # Install them ourselves before generating -- same workaround as
+    # generate_with_highlighter (utils/TokenHighlighter/utils.py).
+    engine = getattr(llm, "llm", llm)
+    if not getattr(engine, "_vllm_hook_installed", False):
+        install_hooks = getattr(engine, "collective_rpc", None)
+        if callable(install_hooks):
+            print("Installing hooks via collective_rpc")
+            install_hooks("install_hooks")
+            setattr(engine, "_vllm_hook_installed", True)
+
     return llm.generate(
         prompts=prompts,
         sampling_params=sp_list,

@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import multiprocessing as mp
 import torch
 
@@ -131,14 +132,31 @@ if __name__ == "__main__":
     # classify with the science_hallucination analyzer
     config_file = f"model_configs/hidden_states/{model.split('/')[-1]}.json"
     with open(config_file) as f:
-        clf_path = json.load(f)["scihal"]["clf_path"]
+        config_clf_path = json.load(f)["scihal"]["clf_path"]
+    # The config's clf_path is the original author's personal absolute path.
+    # Let an env var override it so this demo is runnable on other machines;
+    # the config value stays the documented fallback/default.
+    clf_path = os.environ.get("VLLM_HOOK_SCIHAL_CLF", config_clf_path)
+    if not os.path.isfile(clf_path):
+        print(
+            f"[demo_scihal] SciHal classifier not found: {clf_path}\n"
+            f"  This joblib file is produced by the SciHal-Challenge repo linked "
+            f"above (https://github.com/InfintyLab/SciHal-Challenge) -- train/export "
+            f"a classifier there, then point this demo at it by either:\n"
+            f"    export VLLM_HOOK_SCIHAL_CLF=/path/to/your_classifier.joblib\n"
+            f"  or updating \"scihal.clf_path\" in {config_file}."
+        )
+        sys.exit(1)
     LABEL_NAMES = ["entailment", "contradiction", "unverifiable"]
     spec = {
         "label_names": LABEL_NAMES,
         "clf_path": clf_path,
         "model_id": model,
     }
-    stats = llm.analyze(probes=getattr(output[0], "probes", None), analyzer_spec=spec)
+    # generate() above used save_to_disk=True, so output[0].probes is always None and
+    # analyze() reads the artifacts from disk via the run_id it recorded. Passing a dead
+    # probes= here only made it look like in-memory retrieval.
+    stats = llm.analyze(analyzer_spec=spec)
     
     labels = stats["prediction_labels"]
     print("=" * 50)

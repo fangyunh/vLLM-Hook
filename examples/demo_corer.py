@@ -1,4 +1,5 @@
 import os
+import sys
 import multiprocessing as mp
 import torch
 from typing import List
@@ -51,20 +52,39 @@ def apply_chat_template_and_get_ranges(tokenizer, model_name: str, query: str, d
 if __name__ == "__main__":
 
     cache_dir = "./cache/"
-    hook_dir  = "/dev/shm/vllm_hook" # None # 
-    model = 'ibm-granite/granite-3.1-8b-instruct'  # 'mistralai/Mistral-7B-Instruct-v0.3' # 'Qwen/Qwen2-1.5B-Instruct' #
-    
+    hook_dir  = "/dev/shm/vllm_hook" # None #
+    # 'ibm-granite/granite-3.1-8b-instruct' has no verified core_reranker config yet
+    # (the important_heads for this analyzer are task-specific and have not been
+    # derived for granite-8b -- see the guard below). Default to Mistral, whose
+    # config is real and verified.
+    model = 'mistralai/Mistral-7B-Instruct-v0.3'  # 'ibm-granite/granite-3.1-8b-instruct' # 'Qwen/Qwen2-1.5B-Instruct' #
+
     dtype_map = {
         'mistralai/Mistral-7B-Instruct-v0.3': torch.float16,
         'ibm-granite/granite-3.1-8b-instruct': torch.float16,
         'Qwen/Qwen2-1.5B-Instruct': torch.float
     }
-    
+
+    config_dir = 'model_configs/core_reranker'
+    config_file = f'{config_dir}/{model.split("/")[-1]}.json'
+    if not os.path.isfile(config_file):
+        available = sorted(os.listdir(config_dir)) if os.path.isdir(config_dir) else []
+        print(
+            f"[demo_corer] No core_reranker config for model '{model}'.\n"
+            f"  Expected: {config_file}\n"
+            f"  Available configs in {config_dir}/:\n"
+            + "".join(f"    - {name}\n" for name in available)
+            + "  Pick a `model` above with a matching config, or add one for this "
+              "model (do not guess important_heads/layer indices -- they must be "
+              "derived for the core_reranker task specifically)."
+        )
+        sys.exit(1)
+
     llm = HookLLM(
         model=model,
         worker_name="probe_hook_qk",
         analyzer_name="core_reranker",
-        config_file=f'model_configs/core_reranker/{model.split("/")[-1]}.json',
+        config_file=config_file,
         download_dir=cache_dir,
         hook_dir=hook_dir,
         gpu_memory_utilization=0.7,

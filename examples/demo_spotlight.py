@@ -25,7 +25,7 @@ if __name__ == "__main__":
         gpu_memory_utilization=0.8,
         dtype=torch.float16,
         enable_hook=True,
-        enforce_eager=True,  # Required for Spotlight (disables Flash Attention)
+        enforce_eager=True,  # Required for Spotlight (torch.compile traces away register_forward_hook callbacks)
         enable_prefix_caching=False,
         enable_chunked_prefill=False,
     )
