@@ -28,6 +28,7 @@ This includes dynamic analysis of:
   - Easy to define new hooks, analyzers, and behaviors  
 - **Introspection** of model internals  
 - **Interventions** (activation steering, attention control, etc.)  
+- **FULL CUDA-graph support** — capture and steering stay graph-safe, no fallback to eager  
 - **Example applications**:  
   - Safety guardrails  
   - Reranking  
@@ -48,7 +49,7 @@ Key takeaways:
 
 ## 🧩 Supported Configurations
 
-Each use case (e.g. attention tracker, activation steering, hidden states extraction, etc) runs across a Cartesian product of configuration axes — execution path (`offline` / `vllm serve`), storage (`rpc` / `disk` / `shm`), disk format (`pt` / `safetensors`), and save mode (`sync` / `async`). See [`docs/configs.md`](docs/configs.md) for code snippets showing how to select each config.
+Each use case (e.g. attention tracker, activation steering, hidden states extraction, etc) runs across a Cartesian product of configuration axes — execution path (`offline` / `vllm serve`), storage (`rpc` / `disk` / `shm`), and disk format (`pt` / `safetensors`). See [`docs/configs.md`](docs/configs.md) for code snippets showing how to select each config.
 
 ---
 
@@ -142,7 +143,11 @@ vllm_hook_plugins/
 ├── workers/
 │   ├── probe_hookqk_worker.py
 │   ├── steer_activation_worker.py
+├── graph/
+│   ├── install.py
+│   ├── gpu_capture_ring.py
 ├── hook_llm.py
+├── optimizations.py
 ├── registry.py
 ```
 
@@ -151,6 +156,8 @@ Each component handles a key stage of the plugin lifecycle:
 - **Registry** — manages available hooks and extensions  
 - **Workers** — define execution behavior and orchestration  
 - **Analyzers** — optionally conduct analysis based on the saved statistics  
+- **Graph** — installs the capture/steering ops and the GPU capture ring under CUDA graphs  
+- **Optimizations** — the public performance levers (`optimizations.py::PUBLIC_LEVERS`)  
 
 
 ---
