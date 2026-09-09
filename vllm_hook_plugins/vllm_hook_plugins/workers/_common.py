@@ -1,25 +1,100 @@
-"""Shared helpers for probe workers.
-
-Both probe_hookqk_worker and probe_hidden_states_worker do the same things:
-- match internal request IDs by ``{external_req_id}-`` prefix
-- write atomic .pt artifacts with tmp+rename
-- spawn a background save thread for VLLM_HOOK_ASYNC_SAVE=1
-- pull query_start_loc/seq_lens from ForwardContext.attn_metadata,
-  walking the per-layer dict for hybrid models
-
-These helpers factor out that duplication. They are stateless utilities
-where possible; the async-save thread setup mutates ``self`` because the
-queue and thread live on the worker instance.
+"""Stateless helpers shared by probe_hookqk_worker and probe_hidden_states_worker:
+matching internal request IDs by ``{external_req_id}-`` prefix, writing atomic
+artifacts via tmp+rename, and pulling query_start_loc/seq_lens from
+ForwardContext.attn_metadata (walking the per-layer dict for hybrid models).
 """
 from __future__ import annotations
 
 import os
-import queue
 import re
-import threading
 from typing import Any, Iterator
 
 import torch
+
+from vllm_hook_plugins._profiler import PROF
+
+
+# ---------------------------------------------------------------------------
+# Artifact quantization (opt-in via VLLM_HOOK_ARTIFACT_DTYPE; default off/no-op)
+# ---------------------------------------------------------------------------
+# Quantizes the captured GPU clone at capture (shrinks GPU residency and the
+# deferred D2H copy) and dequantizes back to float inside the worker at
+# retrieval/flush, so every downstream consumer sees a normal float tensor and
+# stays byte-identical.
+
+
+def resolve_capture_quant(artifact: str):
+    """Return ``(tag, gran, group_size)`` for an artifact family
+    (``"qk"``/``"hs"``/``"score"``). ``tag is None`` means native/off (no-op)."""
+    from vllm_hook_plugins.artifact_quant import (
+        resolve_dtype, resolve_granularity, resolve_group_size)
+    return resolve_dtype(artifact), resolve_granularity(), resolve_group_size()
+
+
+def quant_clone(x, tag, gran, group_size=128):
+    """Quantize a captured GPU clone. Returns ``(packed, scale, qmeta)``
+    (``qmeta is None`` when ``tag is None`` → ``packed is x`` unchanged)."""
+    if tag is None:
+        return x, None, None
+    from vllm_hook_plugins.artifact_quant import quantize
+    packed, scale, _zp, qmeta = quantize(x, tag, gran, group_size)
+    return packed, scale, qmeta
+
+
+def capture_bytes(*tensors):
+    """Resident bytes of a (possibly quantized) captured artifact — packed + scale."""
+    from vllm_hook_plugins.artifact_quant import quant_nbytes
+    return quant_nbytes(*tensors)
+
+
+# ---------------------------------------------------------------------------
+# Pinned host staging buffer
+# ---------------------------------------------------------------------------
+# Grow-only pinned buffer, keyed by dtype, for a batched GPU->host D2H move. Safe to
+# reuse across calls because there is one worker per process and retrieval runs one
+# call at a time on the serial engine loop, syncing+cloning before returning -> no
+# per-call cudaHostAlloc. Unused directly by this module; the capture bank's GPU->host
+# mover owns the batching logic and reuses this buffer.
+_PINNED_STAGING: dict = {}
+
+
+def _pinned_staging(dtype: torch.dtype, numel: int) -> torch.Tensor:
+    buf = _PINNED_STAGING.get(dtype)
+    if buf is None or buf.numel() < numel:
+        buf = torch.empty(numel, dtype=dtype, pin_memory=torch.cuda.is_available())
+        _PINNED_STAGING[dtype] = buf
+    return buf[:numel]
+
+
+def cpu_list_batched(tensors: list) -> list:
+    """Batched byte-identical replacement for ``[t.cpu() for t in tensors]``.
+
+    cat on device -> one ``non_blocking`` copy into a reused pinned staging buffer -> sync
+    -> split -> owned clones. Collapses many launch-bound per-tensor D2H copies into one
+    bandwidth-bound transfer; each clone owns its storage so the staging pool is safe to
+    reuse on the next call.
+
+    Falls back to the exact per-tensor ``.cpu()`` when the list is empty, holds a non-tensor,
+    the first element is already host, or the elements differ in device / dtype / trailing
+    shape (not cat-able -- e.g. a streaming-drain CUDA/CPU mix). Bit-for-bit the old path in
+    every fallback case.
+    """
+    if not tensors:
+        return []
+    t0 = tensors[0]
+    if not torch.is_tensor(t0) or not t0.is_cuda:
+        return [t.cpu() if torch.is_tensor(t) else t for t in tensors]
+    dev, dt, trail = t0.device, t0.dtype, t0.shape[1:]
+    for t in tensors:
+        if (not torch.is_tensor(t)) or t.device != dev or t.dtype != dt \
+                or t.dim() < 1 or t.shape[1:] != trail:
+            return [t.cpu() if torch.is_tensor(t) else t for t in tensors]
+    lengths = [t.shape[0] for t in tensors]
+    flat = torch.cat(tensors, dim=0)
+    staging = _pinned_staging(dt, flat.numel()).view(flat.shape)
+    staging.copy_(flat, non_blocking=True)
+    torch.cuda.current_stream().synchronize()
+    return [s.clone() for s in staging.split(lengths, dim=0)]
 
 
 # ---------------------------------------------------------------------------
@@ -49,13 +124,13 @@ def match_layer(name: str):
 
 ATTN_PATTERNS = [
     # GPT-2: transformer.h.<i>.attn
-    re.compile(r"^transformer\.h\.(\d+)\.attn.attn$"),
+    re.compile(r"^transformer\.h\.(\d+)\.attn\.attn$"),
 
     # OPT: model.decoder.layers.<i>.self_attn
-    re.compile(r"^model\.decoder\.layers\.(\d+)\.self_attn.attn$"),
+    re.compile(r"^model\.decoder\.layers\.(\d+)\.self_attn\.attn$"),
 
     # Qwen/LLaMA: model.layers.<i>.self_attn
-    re.compile(r"^model\.layers\.(\d+)\.self_attn.attn$"),
+    re.compile(r"^model\.layers\.(\d+)\.self_attn\.attn$"),
 ]
 
 def match_attn(name: str):
@@ -119,30 +194,47 @@ def get_query_metadata(metadata: Any) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+def compact_page_backed_cache(cpu_cache: dict) -> None:
+    """Clone every list-valued tensor leaf in ``cpu_cache`` IN PLACE to owned storage,
+    breaking any sharing with a capture-ring host page.
+
+    ``pickle``/``torch.save`` of a tensor that is a narrow VIEW into a multi-MiB pinned ring
+    page re-serializes the WHOLE page per view -- up to ``page_bytes`` per tensor on disk. The
+    DEFAULT disk path never hits this: the writer process packs via ``torch.cat``
+    (``graph/artifact_writer.py``) into fresh storage before it ever touches disk. This helper
+    exists for the RARE inline-fallback path only (writer process off, or its child
+    unavailable), which serializes the raw ``cpu_cache`` directly -- call it right before
+    ``save_pt_atomic``/``save_safetensors_atomic`` there, then release the request's ring
+    pages (now safe: the values are cloned + about to be written).
+
+    ``.clone()`` allocates fresh storage with the same values -> byte-identical, just no
+    longer aliasing a page. Non-tensor entries pass through untouched. Shape is exactly
+    ``cpu_cache``'s two-levels-of-dict nesting
+    (``{"hs_cache"/"qk_cache": {module_name: {key: [tensor, ...], ...}}}``)."""
+    for top_val in cpu_cache.values():
+        if not isinstance(top_val, dict):
+            continue
+        for mod_entry in top_val.values():
+            if not isinstance(mod_entry, dict):
+                continue
+            for key, val in mod_entry.items():
+                if isinstance(val, list):
+                    mod_entry[key] = [t.clone() if torch.is_tensor(t) else t for t in val]
+
+
 def save_pt_atomic(cpu_cache: dict, out_path: str) -> None:
     """Write ``cpu_cache`` to ``out_path`` via tmp+fsync+rename for atomicity."""
-    tmp_path = out_path + ".tmp"
-    with open(tmp_path, "wb") as f:
-        torch.save(cpu_cache, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.rename(tmp_path, out_path)
-
-
-def init_async_save_thread(worker, target, thread_name: str) -> None:
-    """Start a background save thread on ``worker`` if not already started.
-
-    Activated by VLLM_HOOK_ASYNC_SAVE=1. The thread runs ``target`` (a bound
-    method on ``worker`` that consumes ``worker._save_queue``).
-    """
-    if os.environ.get("VLLM_HOOK_ASYNC_SAVE", "0") != "1":
-        return
-    if getattr(worker, "_io_thread_started", False):
-        return
-    worker._save_queue = queue.Queue(maxsize=4)
-    worker._io_thread = threading.Thread(target=target, daemon=True, name=thread_name)
-    worker._io_thread.start()
-    worker._io_thread_started = True
+    with PROF.timed("worker.disk_write.pt"):
+        tmp_path = out_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            torch.save(cpu_cache, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, out_path)
+    try:
+        PROF.gauge("disk.bytes.pt", os.path.getsize(out_path))
+    except OSError:
+        pass
 
 
 def iter_matched_modules(model, match_fn, layer_filter=None):
@@ -164,6 +256,10 @@ def iter_matched_modules(model, match_fn, layer_filter=None):
 def save_safetensors_atomic(flat_dict: dict, meta: dict, run_dir: str, basename: str) -> None:
     """Write ``flat_dict`` to ``{run_dir}/{basename}.safetensors`` and ``meta``
     to ``{run_dir}/{basename}.json``, both via tmp+rename for atomicity.
+
+    When VLLM_HOOK_PROFILE=1 the JSON sidecar is enriched with a snapshot
+    of the worker-side profiler so post-hoc analysis doesn't need a
+    separate RPC fetch.
     """
     import json as _json
     from safetensors.torch import save_file as _st_save
@@ -173,31 +269,27 @@ def save_safetensors_atomic(flat_dict: dict, meta: dict, run_dir: str, basename:
     tmp_st = out_path + ".tmp"
     tmp_meta = meta_path + ".tmp"
 
-    _st_save(flat_dict, tmp_st)
-    os.rename(tmp_st, out_path)
+    with PROF.timed("worker.disk_write.safetensors"):
+        _st_save(flat_dict, tmp_st)
+        os.rename(tmp_st, out_path)
+
+    # Bake a profile snapshot into the JSON meta so the harness reads perf data without
+    # a separate fetch. Cumulative at write time -- readers subtract the previous
+    # snapshot for per-cell metrics, or call PROF.reset() between cells.
+    try:
+        from vllm_hook_plugins._profiler import PROF as _PROF, is_enabled as _en
+        if _en():
+            meta = dict(meta)
+            meta["profile"] = _PROF.summary_only()
+    except Exception:
+        pass
 
     with open(tmp_meta, "w") as f:
         _json.dump(meta, f)
     os.rename(tmp_meta, meta_path)
 
-
-def background_save_loop(worker, pt_filename: str) -> None:
-    """Drain ``worker._save_queue`` and write artifacts to disk.
-
-    Activated by VLLM_HOOK_ASYNC_SAVE=1. Each queue item is
-    (run_id, cpu_cache, run_dir). Workers must define
-    ``_save_safetensors(cpu_cache, run_dir)`` — used when
-    VLLM_HOOK_USE_SAFETENSORS=1.
-    """
-    while True:
-        run_id, cpu_cache, run_dir = worker._save_queue.get()
-        try:
-            os.makedirs(run_dir, exist_ok=True)
-            if os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1":
-                worker._save_safetensors(cpu_cache, run_dir)
-            else:
-                save_pt_atomic(cpu_cache, os.path.join(run_dir, pt_filename))
-        except Exception as e:
-            print(f"background save failed for {run_id}: {e}")
-        finally:
-            worker._save_queue.task_done()
+    try:
+        PROF.gauge("disk.bytes.safetensors", os.path.getsize(out_path))
+        PROF.gauge("disk.bytes.json", os.path.getsize(meta_path))
+    except OSError:
+        pass

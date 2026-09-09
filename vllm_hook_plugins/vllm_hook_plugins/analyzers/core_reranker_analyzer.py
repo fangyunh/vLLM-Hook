@@ -3,14 +3,21 @@ from typing import Dict, List, Tuple, Optional
 import glob
 import math
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.run_utils import load_and_merge_qk_cache
 
 class CorerAnalyzer:
-     
+
+    # Capability declaration read by HookLLM admission. "qk" => CoRe needs raw Q/K (its
+    # two-pass calibration reshapes query-span x key and merges prefixes; it rejects
+    # pre-softmaxed scores), so auto-select must never substitute score for it. Flip to
+    # "either" only after a CoRe-from-scores rewrite + scale reconciliation.
+    ACCEPTS = "qk"
+
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
         self.hook_dir = hook_dir
         self.layer_to_heads = layer_to_heads
-    
+
     def analyze(
         self,
         analyzer_spec: Optional[Dict] = None,
@@ -26,6 +33,8 @@ class CorerAnalyzer:
         if run_ids is None or len(run_ids) < 2:
             raise ValueError("CorerAnalyzer.analyze: pass run_ids=[doc_run_id, na_run_id].")
 
+        PROF.incr("analyzer.corer.calls")
+
         if not isinstance(analyzer_spec['query_spec'], list):
             analyzer_spec['query_spec'] = [analyzer_spec['query_spec']]
         if not isinstance(analyzer_spec['na_spec'], list):
@@ -35,18 +44,21 @@ class CorerAnalyzer:
         doc_run_id = run_ids[-2]
         # turn list of tuples to tuple of lists
         doc_span, query_start, after_instruct, query_end = tuple(map(list, zip(*analyzer_spec['query_spec'])))
-        tok_scores, prefill = self.score_documents(doc_run_id, doc_span, query_start, after_instruct, query_end) 
+        with PROF.timed("analyzer.corer.score_doc"):
+            tok_scores, prefill = self.score_documents(doc_run_id, doc_span, query_start, after_instruct, query_end)
 
         # NA cache
         na_run_id = run_ids[-1]
         _, query_start, after_instruct, query_end = tuple(map(list, zip(*analyzer_spec['na_spec'])))
-        tok_scores_na, _ = self.score_documents(na_run_id, doc_span, query_start, after_instruct, query_end, prefill) 
+        with PROF.timed("analyzer.corer.score_na"):
+            tok_scores_na, _ = self.score_documents(na_run_id, doc_span, query_start, after_instruct, query_end, prefill)
         del prefill
 
-        bs = len(doc_span)
-        batch_scores = []
-        batch_ranking = []
-        for i in range(bs):
+        with PROF.timed("analyzer.kernel"):
+         bs = len(doc_span)
+         batch_scores = []
+         batch_ranking = []
+         for i in range(bs):
             doc_scores = torch.zeros(len(doc_span[i]))
             _i = 0
             for tok_score, tok_score_na in zip(tok_scores[i], tok_scores_na[i]):
@@ -84,6 +96,13 @@ class CorerAnalyzer:
         
         cache = load_and_merge_qk_cache(self.hook_dir, run_id)
         config = cache["config"]
+        # Score capture is not supported by CoRe: its two-pass calibration needs the
+        # query-span x key reshape from raw Q/K (and prefix-merge), not a pre-softmaxed
+        # single-head score. Use QK capture (the default) for CoRe reranking.
+        if any("scores" in e for e in cache["qk_cache"].values()):
+            raise NotImplementedError(
+                "CorerAnalyzer requires QK capture (qk_capture='qk'); attention-score "
+                "capture (v0.6.0) is only consumed by AttntrackerAnalyzer.")
         bs = len(next(iter(cache["qk_cache"].values()))['q'])
 
         # Check if k_all is already fully reconstructed (worker did prefix cache reconstruction).

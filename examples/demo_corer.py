@@ -7,7 +7,6 @@ mp.set_start_method("spawn", force=True)
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ.setdefault("VLLM_HOOK_USE_SAFETENSORS", "1")
-os.environ.setdefault("VLLM_HOOK_ASYNC_SAVE", "1")
 
 from vllm import SamplingParams
 from vllm_hook_plugins import HookLLM

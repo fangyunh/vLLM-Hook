@@ -3,15 +3,22 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Tuple, Optional, List
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.run_utils import load_and_merge_qk_cache, unpack_qk
 
 
 class AttntrackerAnalyzer:
-    
+
+    # Capability declaration read by HookLLM admission (import-light class attr, no
+    # instantiation). "score" => this analyzer can consume per-head attention scores (its
+    # fast-path reduces them to per-head softmax), so the size-model auto-select may
+    # substitute score for raw QK when score is the smaller artifact.
+    ACCEPTS = "score"
+
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
         self.hook_dir = hook_dir
         self.layer_to_heads = layer_to_heads
-    
+
     def analyze(
         self,
         analyzer_spec: Optional[Dict] = None,
@@ -19,8 +26,9 @@ class AttntrackerAnalyzer:
         probes: Optional[Dict] = None,
     ) -> Optional[Dict]:
 
-        attention_weights = self.compute_attention_from_qk(run_id, probes=probes)
-        score = self.attn2score(attention_weights, analyzer_spec['input_range'], analyzer_spec['attn_func'])
+        with PROF.timed("analyzer.kernel"):
+            attention_weights = self.compute_attention_from_qk(run_id, probes=probes)
+            score = self.attn2score(attention_weights, analyzer_spec['input_range'], analyzer_spec['attn_func'])
 
         return {
             "score": score
@@ -45,6 +53,32 @@ class AttntrackerAnalyzer:
 
         for layer_name, qk_data in qk_cache.items():
             layer_num = qk_data['layer_num']
+
+            # Score fast-path: the worker already computed softmax(QK·mult) on-GPU for this
+            # layer's head set, so skip the QK->score recompute. ``scores`` is a per-pass
+            # list; each element is [n_heads, S_q, S_k] (all_tokens) or [n_heads, 1, S_k]
+            # (last_token), with ``heads`` the matching q-head indices. The attention tracker
+            # uses the last query row (the final token's attention over all keys) ->
+            # [n_heads, S_k], matching the eager filtered-QK path.
+            if "scores" in qk_data:
+                scores_list = qk_data["scores"]
+                heads = qk_data.get("heads") or [qk_data.get("head", 0)]
+                if batch_attention_weights is None:
+                    batch_attention_weights = [dict() for _ in range(len(scores_list))]
+                for i, score_t in enumerate(scores_list):
+                    if score_t.dim() == 3:
+                        attn = score_t[:, -1, :]            # [n_heads, S_k]
+                    elif score_t.dim() == 2:
+                        attn = score_t[-1:, :]              # [1, S_k] (legacy single head)
+                    else:
+                        attn = score_t.reshape(1, -1)
+                    batch_attention_weights[i][layer_name] = {
+                        'attention': attn,                 # [n_heads, seq_len]
+                        'head_indices': list(heads),
+                        'layer_index': layer_num,
+                    }
+                continue
+
             important_head_indices = self.layer_to_heads[layer_num]
             q_list, k_list = unpack_qk(qk_data)
 

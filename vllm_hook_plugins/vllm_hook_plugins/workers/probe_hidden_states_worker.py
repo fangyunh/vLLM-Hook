@@ -1,3 +1,4 @@
+import contextlib
 import os
 import pickle
 from typing import TYPE_CHECKING, Any
@@ -7,14 +8,17 @@ import zstandard as zstd
 from vllm.forward_context import get_forward_context
 from vllm.distributed import parallel_state as ps
 
+from vllm_hook_plugins._profiler import PROF
 from vllm_hook_plugins.workers._common import (
-    background_save_loop,
+    capture_bytes,
     clear_states_for_req,
+    compact_page_backed_cache,
     get_query_metadata,
-    init_async_save_thread,
     iter_matched_modules,
     iter_matching_req_ids,
     match_layer,
+    quant_clone,
+    resolve_capture_quant,
     save_pt_atomic,
     save_safetensors_atomic,
 )
@@ -23,6 +27,63 @@ if TYPE_CHECKING:
     from vllm.config import ParallelConfig
 
 _ZSTD_COMPRESSOR = zstd.ZstdCompressor(level=1)
+
+
+def _ring_disk_dbg(msg: str) -> None:
+    """Gated disk-pipeline debug logging (VLLM_HOOK_RING_DEBUG=1). Off by default -> no perf impact.
+    Read at call time so a per-worker env set before spawn takes effect."""
+    if os.environ.get("VLLM_HOOK_RING_DEBUG") == "1":
+        print(f"[hookplugin/ring-disk] {msg}", flush=True)
+
+# Offload cost-attribution census: decomposes the flush D2H into allocation vs copy and
+# censuses the popped bucket's tensor shape, BEFORE any .cpu() runs. Diagnostic only --
+# never changes a captured value. Default OFF -> every call site below runs the plain
+# `[t.cpu() for t in ...]` verbatim (see _cpu_list).
+_CENSUS_ON = os.environ.get("VLLM_HOOK_CAPTURE_CENSUS") == "1"
+
+# Batch the flush D2H (cat -> one pinned copy -> split) instead of one .cpu() per
+# accumulated step-tensor. Default OFF -> _cpu_list runs the plain comprehension verbatim.
+_BATCHED_FLUSH = os.environ.get("VLLM_HOOK_BATCHED_FLUSH") == "1"
+
+
+def _cpu_list(tensors, acc: dict | None):
+    """``[t.cpu() for t in tensors]``, routed through the census allocation/copy
+    decomposition when ``acc`` is not None (VLLM_HOOK_CAPTURE_CENSUS=1). ``acc`` is None on
+    the default path -> this is exactly ``[t.cpu() for t in tensors]``, unchanged."""
+    if acc is not None:                       # census baseline: per-tensor decomposition
+        from vllm_hook_plugins.graph.census import cpu_list_measured
+        return cpu_list_measured(tensors, acc)
+    if _BATCHED_FLUSH:                         # Tier 1: one pinned D2H for the whole list
+        from vllm_hook_plugins.workers._common import cpu_list_batched
+        return cpu_list_batched(tensors)
+    return [t.cpu() for t in tensors]          # default: verbatim
+
+
+def _marshal_perreq_hs(per_layer: dict, conf) -> bytes:
+    """Marshal ONE finished request's assembled per-layer tensors (the
+    ``PerRequestIndex.pop_deliverable`` value: ``{layer_num(1-based): tensor}``) into the same
+    driver-attachable payload ``get_captured_states`` returns, serialized to ZSTD-PICKLE BYTES.
+
+    ``collective_rpc`` does NOT round-trip raw torch tensors (they arrive on the driver as plain
+    Python lists), so every tensor payload MUST be bytes -- the same convention as
+    ``get_captured_states`` / ``flush_ring_per_request``.
+
+    Payload SHAPE == ``get_captured_states``: ``{"hs_cache": {layer_num: {"hidden_states": tensor,
+    "layer_num": layer_num}}, "config": conf}``. The value dict mirrors the eager path's
+    ``{"hidden_states": tensor, "layer_num": int}`` (the ring has no module names, so the outer key
+    is ``layer_num`` -- the eager path's ``L+1``, the number the analyzer/oracle read off
+    ``entry["layer_num"]``, so it lines up with NO remap). Each tensor is the FLAT per-token layout
+    ``pop_deliverable`` produces (``torch.cat`` of the request's per-step demuxed row slices, in
+    step order), moved to CPU float32."""
+    hs_cache = {}
+    for layer, t in per_layer.items():
+        layer = int(layer)
+        hs_cache[layer] = {
+            "hidden_states": t.detach().to(torch.float32).cpu(),
+            "layer_num": layer,
+        }
+    payload = {"hs_cache": hs_cache, "config": conf}
+    return _ZSTD_COMPRESSOR.compress(pickle.dumps(payload))
 
 
 class ProbeHiddenStatesWorker:
@@ -84,9 +145,13 @@ class ProbeHiddenStatesWorker:
                 print(f"SHM attach failed: {e} — falling back to disk path")
                 self._shm = None
 
-        # Background I/O thread for async safetensors/.pt writes. Shared by
-        # all disk-save requests on this worker.
-        init_async_save_thread(self, self._background_save_loop, "vllm-hook-hs-io")
+        # Writer PROCESS (no-op unless VLLM_HOOK_WRITER_PROCESS=1).
+        from vllm_hook_plugins.graph.writer_process import init_writer_process
+        init_writer_process(self)
+
+        # Artifact quantization (opt-in): quantize the residual clone on GPU at
+        # capture, dequantize in the worker at retrieval/flush. Default off = no-op.
+        self._artifact_tag, self._artifact_gran, self._artifact_gsize = resolve_capture_quant("hs")
 
         cfg = model.config
         # Multimodal models (e.g. Qwen3.5) nest text config under text_config.
@@ -229,6 +294,13 @@ class ProbeHiddenStatesWorker:
                 else:
                     activation = hidden[start:end].detach().clone()
 
+                # Optional on-GPU quantization (default off → packed is the clone unchanged).
+                activation, hs_scale, hs_qmeta = quant_clone(
+                    activation, self._artifact_tag, self._artifact_gran, self._artifact_gsize)
+
+                PROF.incr("hook.fire.hs")
+                PROF.gauge("captured.bytes.hs", capture_bytes(activation, hs_scale))
+
                 # Route to disk or RPC bucket based on save_to_disk flag.
                 bucket = self._disk_states if e["save_to_disk"] else self._captured_states
                 if req_id not in bucket:
@@ -236,7 +308,12 @@ class ProbeHiddenStatesWorker:
                 layer_states = bucket[req_id]
                 if module_name not in layer_states:
                     layer_states[module_name] = {"hidden_states": [], "layer_num": layer_num, "hs_mode": req_mode}
-                layer_states[module_name]["hidden_states"].append(activation)
+                    if hs_qmeta is not None:
+                        layer_states[module_name].update(_hs_scale=[], _hs_qmeta=hs_qmeta)
+                ls = layer_states[module_name]
+                ls["hidden_states"].append(activation)
+                if hs_qmeta is not None:
+                    ls["_hs_scale"].append(hs_scale)
 
         # Hook every decoder layer. Per-request layer filtering via
         # extra_args['output_hidden_states'] happens inside the hook closure.
@@ -255,6 +332,339 @@ class ProbeHiddenStatesWorker:
         print(f"Installed {len(self._hooks)} hidden-state hooks on layers: {matched}")
 
     # ------------------------------------------------------------------
+    # v0.3.0 CUDA-graph capture install (graph mode only)
+    # ------------------------------------------------------------------
+
+    def graph_install(self):
+        """Install the CUDA-graph hidden-state capture path (buffer mode).
+
+        Thin delegating entry called by the Worker.load_model monkey-patch
+        (graph/install.py:patch_worker_load_model) AFTER the model is built but
+        BEFORE warm-up/compile/capture. No-op on the eager path: only reached
+        when graph mode is armed.
+
+        Seeds the egress buckets as per-instance dicts so the graph capture body
+        can populate them and get_captured_states / flush_disk / _save_safetensors
+        consume them UNCHANGED — REUSE CONTRACT: the graph installers write the SAME
+        worker buckets the eager path writes, which is why retrieval/flush behave
+        identically in both modes. Delegates to graph.install_hs, which builds the
+        per-layer static buffers and wraps the decoder-layer class to emit the
+        capture_hs scatter op (absorbed into the decode cudagraph).
+        """
+        if not getattr(self, "_captured_states", None):
+            self._captured_states = {}
+        if not getattr(self, "_disk_states", None):
+            self._disk_states = {}
+        from vllm_hook_plugins.graph.install_hs import (
+            install_execute_model_wrapper_hs,
+            install_hs_hosts,
+        )
+        # Capture-ring path: scatter -> ring -> drain -> disk. Builds self._capture_ring +
+        # self._hs_drain; retrieval/flush go through the ring path below (no separate bank).
+        # Retrieval is off-loop, reading durable files via
+        # ring_reader.load_multilayer_ring_artifact.
+        install_hs_hosts(self)
+        install_execute_model_wrapper_hs(self.model_runner, self)
+
+    def flush_ring(self) -> str | None:
+        """collective_rpc-callable: final drain + write the capture-ring metadata sidecar; return
+        the per-worker run_dir (None if the ring path is not installed).
+
+        The capture-ring path writes durable per-layer raw files continuously (per step); this
+        flushes any last pending rows and writes the shared sidecar so the reader can reconstruct.
+        Call once after all requests finish (the worker process is often killed rather than joined,
+        so the atexit backstop is not reliable — this RPC is the durable-flush contract).
+
+        Handles both drains: the off-loop consumer thread (``stop()`` drains its queue + joins,
+        surfacing any consumer error) and the synchronous drain (``drain_once``). ``stop()`` is
+        idempotent, so a duplicate flush is safe."""
+        drain = getattr(self, "_hs_drain", None)
+        if drain is None:
+            return None
+        stop = getattr(drain, "stop", None)
+        if callable(stop):
+            drain.stop()         # off-loop: drain the queue + join the consumer thread (raises on error)
+        else:
+            drain.drain_once()   # synchronous path: flush any last pending rows on the loop
+        drain.close()            # write the shared sidecar (idempotent)
+        return getattr(self, "_hs_run_dir", None)
+
+    def get_drain_row_counts(self) -> dict:
+        """collective_rpc-callable read-only diagnostic: how many ring rows THIS worker's HS drain
+        actually copied (`hs.drain.rows_copied`) vs. how many an unconditional full drain of the
+        same steps would have copied but this one did not (`hs.drain.rows_skipped`), cumulative
+        since install, plus whether selective drain (`VLLM_HOOK_DRAIN_SELECTIVE`, default ON,
+        `=0` to disable) is in force and why it was refused if armed.
+
+        `hs.drain.degenerate_steps`: steps where every installed layer was wanted over the whole
+        span, so the armed lever took the flag-off fast path -- the only field that separates
+        "fast path fired" from "never fired" on an all-layers workload, where `rows_skipped`
+        reads 0 either way. `rows_copied` is counted where the copies are issued, so it can't
+        agree with a plan that was never followed -- stronger than a byte-compare alone, which a
+        subset run that silently copied every layer anyway would still pass. All zeros when no
+        ring drain is installed."""
+        from vllm_hook_plugins.graph.install_hs import get_drain_row_counts
+        return get_drain_row_counts(self)
+
+    def flush_ring_per_request(self):
+        """collective_rpc-callable TEST read-hook for the per-request ring-delivery parity oracle.
+        SEPARATE from ``flush_ring`` (the shared-file durable path) so that path stays
+        byte-identical — never runs unless per-request delivery is armed.
+
+        Drives end-of-run delivery on the OFF-LOOP per-request drain: ``drain.stop()`` drains the
+        queue and joins the consumer, then ``finalize_all()`` marks every still-live request
+        finished so last-step stragglers become deliverable; ``index.pop_deliverable()`` pops each
+        finished request's per-layer assembled tensors (``torch.cat`` of its per-step demuxed row
+        slices, in step order == the eager path's flat per-token layout), moved to CPU float32;
+        then ``index.free(req_id)`` removes each delivered request so residency can reach 0.
+
+        Returns ZSTD-COMPRESSED PICKLE BYTES of ``(deliverables, residency_after)`` (mirrors
+        ``get_captured_states`` — ``collective_rpc`` does not round-trip raw tensors, so any tensor
+        payload must be serialized to bytes). ``deliverables`` = ``{req_id: {layer_num(1-based):
+        cpu_f32_tensor}}``, lining up with the eager probes with NO remap. ``residency_after`` MUST
+        be 0 — the oracle asserts no request is left un-delivered / un-freed. A second call after
+        everything is popped+freed serializes ``({}, 0)`` (idempotent).
+
+        Strict no-op -> ``None`` when the capture-ring path is not installed OR per-request mode is
+        off, so it can never perturb the shared-file / QK / eager paths. TP=1 in scope."""
+        drain = getattr(self, "_hs_drain", None)
+        if drain is None or not getattr(drain, "per_request", False):
+            return None
+        index = getattr(drain, "index", None)
+        if index is None:
+            return None
+        stop = getattr(drain, "stop", None)
+        if callable(stop):
+            # off-loop: drain the queue + join the consumer + finalize_all (last-step stragglers
+            # become deliverable); raises if the consumer thread died.
+            drain.stop()
+        # pop + free + residency under the drain's lock as ONE section (uniformity — this path is
+        # already race-free because stop() joined the consumer, so it is uncontended here, but the
+        # index-access discipline is the same on every side). Marshal to cpu/f32 OUTSIDE the lock.
+        lock = getattr(drain, "_index_lock", None) or contextlib.nullcontext()
+        with lock:
+            popped = index.pop_deliverable()
+            for req_id, _ in popped:
+                index.free(req_id)
+            residency_after = len(index.live_req_ids())
+        deliverables: dict = {}
+        for req_id, per_layer in popped:
+            deliverables[str(req_id)] = {
+                int(layer): t.detach().to(torch.float32).cpu()
+                for layer, t in per_layer.items()
+            }
+        # Serialize to bytes exactly like get_captured_states -- collective_rpc drops raw torch
+        # tensors (they arrive on the driver as lists). The driver unpickles the tuple back.
+        raw = pickle.dumps((deliverables, residency_after))
+        return _ZSTD_COMPRESSOR.compress(raw)
+
+    def get_ring_per_request(self, external_req_id: str) -> bytes | None:
+        """collective_rpc-callable PRODUCTION per-request retrieval for the off-loop HS
+        capture-ring demux path. Returns this request's marshaled probes as ZSTD-PICKLE BYTES
+        (mirroring ``get_captured_states`` -- ``collective_rpc`` drops raw tensors, so tensor
+        payloads must be serialized), or ``None`` when the request has not been delivered yet
+        (still generating / its off-loop finish not yet processed).
+
+        BULK-POP-INTO-STASH: ``pop_deliverable`` is a BULK drain -- it returns EVERY
+        currently-finished request AND clears the deliverable list, so a single call cannot
+        fetch just the asked-for one without discarding the rest. Instead, drain ALL
+        currently-finished requests ONCE, marshal each into a per-req_id STASH of bytes,
+        ``index.free`` each so residency drops, then return + remove the asked-for request's
+        stashed bytes -- the stash keeps the others for their own later calls, so each request
+        is delivered exactly once. A request appears here only once its assembly is complete
+        (the consumer thread marks it finished after all its rows are noted).
+
+        Strict no-op -> ``None`` when the capture-ring path is not installed OR per-request mode is
+        off, so it NEVER perturbs the bank / shared-file / QK / eager paths, nor
+        ``get_captured_states`` / ``flush_ring`` / ``flush_ring_per_request``. TP=1 in scope."""
+        drain = getattr(self, "_hs_drain", None)
+        if drain is None or not getattr(drain, "per_request", False):
+            return None
+        index = getattr(drain, "index", None)
+        if index is None:
+            return None
+        stash = self._drain_ring_into_stash(drain, index)
+        # Serve + remove the asked-for request (exact match or "{external}-{suffix}", the v1/legacy
+        # id rule); None if it has not been delivered into the stash yet.
+        match = next(iter(iter_matching_req_ids(stash, external_req_id)), None)
+        if match is None:
+            return None
+        return stash.pop(match)
+
+    def _drain_ring_into_stash(self, drain, index, free_external: str | None = None) -> dict:
+        """Bulk-drain EVERY currently-finished ring request into ``self._ring_perreq_stash`` (bytes),
+        returning the stash. Shared by ``get_ring_per_request`` (retrieval) and ``clear_ring_request``
+        (abort cleanup) so BOTH drain the index identically and race-safe. Still-generating requests
+        stay in the index for a later call.
+
+        POP + FREE-POPPED + the optional FREE-TARGET (``free_external`` — the abort case's target
+        request) run under the DRAIN'S ``_index_lock`` as ONE atomic section, because this runs on the
+        engine/retrieval (or abort) thread while the off-loop consumer thread concurrently mutates the
+        SAME PerRequestIndex (note_rows / mark_finished). Splitting the target-free into a separate
+        lock section would let a concurrent ``mark_finished`` land in the gap and either (a) strand a
+        request that was mid-delivery, never re-entering ``_deliverable`` (lost, client hangs), or (b)
+        leave an aborting request finished in ``_entries`` after its target-free already removed it,
+        so the next ``pop_deliverable`` KeyErrors and wedges the whole host RPC delivery path. Folding
+        both into one section closes the gap: whichever side wins, the request ends up freed exactly
+        once and consistently. A later ``_handle_finish(R)`` for a freed R is a no-op — it guards on
+        ``live_req_ids()`` — so a ``mark_finished`` that lands after this section has already freed R
+        cannot resurrect it.
+
+        Under the lock, pop_deliverable's per-request torch.cat DOES run (deliberate and safe — these
+        are CPU-only cats of ALREADY-CLONED host tensors: no D2H, no GPU sync, no I/O — and the cat
+        must stay atomic with the pop+free for the same reason above). Only the heavier MARSHAL
+        (compress/pickle) runs AFTER releasing the lock, so the critical section never blocks on
+        serialization."""
+        stash = getattr(self, "_ring_perreq_stash", None)
+        if stash is None:
+            stash = {}
+            self._ring_perreq_stash = stash
+        conf = getattr(self, "_conf", {})
+        dbg = os.environ.get("VLLM_HOOK_RING_DEBUG") == "1"
+        lock = getattr(drain, "_index_lock", None) or contextlib.nullcontext()
+        with lock:
+            live_before = len(index.live_req_ids()) if dbg else 0
+            popped = index.pop_deliverable()
+            for req_id, _ in popped:
+                index.free(req_id)
+            freed_target = []
+            if free_external is not None:
+                for rid in list(iter_matching_req_ids(index.live_req_ids(), free_external)):
+                    index.free(rid)
+                    freed_target.append(rid)
+            if dbg:
+                _ring_disk_dbg(
+                    f"host-free: popped={[r for r, _ in popped]} "
+                    f"free_external={free_external!r}->{freed_target} "
+                    f"live_before={live_before} live_after={len(index.live_req_ids())}")
+        for req_id, per_layer in popped:
+            stash[str(req_id)] = _marshal_perreq_hs(per_layer, conf)
+        return stash
+
+    def clear_ring_request(self, external_req_id: str) -> None:
+        """collective_rpc-callable ABORT/disconnect cleanup for the off-loop HS capture-ring
+        per-request path: free ALL of an aborted request's ring state so residency eventually
+        returns to 0 -- the host-buffer ``PerRequestIndex`` entry + any stashed bytes AND the disk
+        staging (+ a delivered-but-unconfirmed source dir). ``clear_captured_states`` clears only
+        the bank / eager buckets, which the ring path never uses, so this is the ring path's own
+        cleanup and the driver calls BOTH on abort.
+
+        Strict no-op -> None when the ring per-request path is not installed. TP=1, internal
+        req_id == external, matched via ``iter_matching_req_ids`` (exact + legacy ``{external}-``
+        suffix), except the disk maps, which ``clear_request_disk`` keys exactly.
+
+        DISK route runs on the ENGINE thread and must NOT delete a staging dir the off-loop
+        consumer may still be demuxing into (a ``rmtree``-vs-``open`` race killed the consumer
+        once). SINGLE-OWNER lifecycle: this call only MARKS the request aborted and drops its
+        route; the CONSUMER thread alone creates, writes, and deletes the staging dir, skipping a
+        marked request's remaining writes and discarding the dir on that request's finish (or at
+        ``finalize_all``). A delivered-but-unconfirmed source dir (finish already ran) is safe to
+        reclaim here off-lock, since by FIFO the consumer is done writing it.
+
+        HOST route: the shared ``_drain_ring_into_stash`` drains AND frees this request's
+        still-live entry under ONE ``_index_lock`` hold (``free_external``), so a concurrent
+        ``mark_finished`` can never strand it in ``_deliverable`` while it is freed from
+        ``_entries``."""
+        drain = getattr(self, "_hs_drain", None)
+        if drain is None or not getattr(drain, "per_request", False):
+            return None
+        # DISK route: MARK aborted (single-owner: the consumer discards the staging dir on the _Finish)
+        # + reclaim any delivered-but-unconfirmed source. No engine-thread rmtree of a live staging dir.
+        # No-op if it was never disk-routed / already fully reclaimed.
+        clear_disk = getattr(drain, "clear_request_disk", None)
+        if callable(clear_disk):
+            clear_disk(external_req_id)
+        # HOST route: bulk-drain deliverables into the stash AND free this request's still-live entry
+        # in ONE atomic _index_lock section (free_external). A concurrent consumer mark_finished for
+        # this request can no longer land between the drain and the target free -> no stranded
+        # _deliverable / KeyError wedge. Marshal + stash pop run off-lock.
+        index = getattr(drain, "index", None)
+        if index is not None:
+            # Mark the request HOST-aborted BEFORE freeing it: once marked, the off-loop consumer
+            # skips (re-)staging any backlogged/in-flight drained rows into the PerRequestIndex, so
+            # free_external below removes the entry for good instead of it being re-note_rows'd and
+            # stranded. mark_host_aborted only marks a request with LIVE host state, so a
+            # normally-completed request (already delivered) is not marked -> the set stays
+            # bounded; the request's _Finish drops the mark.
+            mark_host = getattr(drain, "mark_host_aborted", None)
+            if callable(mark_host):
+                mark_host(external_req_id)
+            self._drain_ring_into_stash(drain, index, free_external=external_req_id)
+            stash = getattr(self, "_ring_perreq_stash", None)
+            if stash:
+                for rid in list(iter_matching_req_ids(stash, external_req_id)):
+                    stash.pop(rid, None)
+        return None
+
+    def route_ring_to_disk(self, req_id: str, dest: str) -> bool:
+        """collective_rpc-callable SEAM for the router: mark ``req_id`` for the per-request DISK
+        route on the off-loop drain — its rows stream to their own NVMe run_dir and, on finish, the
+        file is offloaded to ``dest`` — instead of the host-buffer RPC path. Must be called at
+        request-start (before the request's rows are drained). Returns True when the route was
+        registered, False when the ring per-request path is not installed (strict no-op — never
+        perturbs the shared-file / QK / eager paths). TP=1 in scope."""
+        drain = getattr(self, "_hs_drain", None)
+        if drain is None or not getattr(drain, "per_request", False):
+            return False
+        route = getattr(drain, "route_to_disk", None)
+        if not callable(route):
+            return False
+        _ring_disk_dbg(f"worker.route_ring_to_disk: req_id={req_id!r} (EXTERNAL) dest={dest!r}")
+        route(str(req_id), str(dest))
+        return True
+
+    def confirm_ring_delivery(self, req_id: str, timeout_s: float | None = None) -> bool | None:
+        """collective_rpc-callable CONFIRM for a disk-routed request: block until its
+        per-request file has actually landed at the client ``dest`` via the OffloadProcess, so the
+        client can read it. Returns True on delivery, False on timeout / retry-exhausted give-up,
+        None when the ring per-request path is not installed. ``bool``/``None`` round-trip fine over
+        ``collective_rpc`` (no tensor payload). ``req_id`` is the EXTERNAL ``request_id`` (the driver's
+        ``_await_ring_disk_confirm`` passes the request's external id) -- the SAME key the offload job
+        was submitted under (``route_to_disk``/``_handle_finish`` register + submit on the external id),
+        so ``offload.wait(req_id)`` matches. The row-level internal->external divergence is resolved
+        earlier, inside the drain (``_match_disk_route``); it never reaches this confirm."""
+        drain = getattr(self, "_hs_drain", None)
+        if drain is None or not getattr(drain, "per_request", False):
+            return None
+        offload = getattr(drain, "_offload", None)
+        if offload is None:
+            return None
+        ok = bool(offload.wait(str(req_id), timeout=timeout_s))
+        if ok:
+            # Delivered: reclaim the SERVER-side staging SOURCE dir -- the durable CLIENT dest
+            # copy is kept. Runs on the worker's RPC thread, off the engine forward.
+            unlink = getattr(drain, "unlink_delivered_source", None)
+            if callable(unlink):
+                unlink(str(req_id))
+        return ok
+
+    def ring_residency(self):
+        """collective_rpc-callable READ-ONLY residency query for the off-loop HS capture-ring
+        per-request path. Returns ``(host_live_count, disk_residency)`` -- the number of requests
+        still holding a host-buffer ``PerRequestIndex`` entry and the number still holding
+        per-request DISK staging -- WITHOUT stopping the drain, popping, or freeing anything, so
+        it can be polled MID-serving.
+
+        ``len(index.live_req_ids())`` is read under the drain's ``_index_lock``; ``disk_residency()``
+        acquires that SAME lock itself and ``threading.Lock`` is non-reentrant, so it is called
+        OUTSIDE the hold -- two short reads, never a nested acquire (nesting would deadlock the
+        drain). The pair is a monitoring snapshot, not one atomic transaction, but at quiescence
+        both read 0 regardless of interleaving.
+
+        Strict no-op -> ``None`` when the capture-ring path is not installed OR per-request mode is
+        off. TP=1 in scope."""
+        drain = getattr(self, "_hs_drain", None)
+        if drain is None or not getattr(drain, "per_request", False):
+            return None
+        index = getattr(drain, "index", None)
+        lock = getattr(drain, "_index_lock", None) or contextlib.nullcontext()
+        with lock:
+            host_live = len(index.live_req_ids()) if index is not None else 0
+        disk_fn = getattr(drain, "disk_residency", None)
+        disk = int(disk_fn()) if callable(disk_fn) else 0
+        return (int(host_live), int(disk))
+
+    # ------------------------------------------------------------------
     # API serving: collective_rpc-callable artifact retrieval
     # ------------------------------------------------------------------
 
@@ -267,25 +677,87 @@ class ProbeHiddenStatesWorker:
         CPU transfer happens here (once per request, not per hook).
         Returns zstd-compressed pickle, or None if nothing was captured.
         """
+        from vllm_hook_plugins.graph.drain import drain_barrier
+        drain_barrier(self)  # wait for any pending streaming drain before reading buckets
+        consumer = getattr(self, "_capture_consumer", None)
+        if consumer is not None:
+            consumer.drain_writer_done(self)  # recycle any disk-path pages the feeder packed
         for req_id in iter_matching_req_ids(self._captured_states, external_req_id):
             layer_dict = self._captured_states.pop(req_id)
+            # Release the request's resident bytes (counted at egress/stream) on pop.
+            if consumer is not None:
+                consumer.on_pop(req_id, layer_dict)
+            # Offload cost-attribution measurement (VLLM_HOOK_CAPTURE_CENSUS=1): a pure
+            # structural census of the bucket BEFORE any .cpu() below, plus a shared
+            # per-request accumulator that _cpu_list() feeds when not None. Both stay None
+            # on the default path -> zero-cost, verbatim.
+            _census_bucket = None
+            _census_acc = None
+            if _CENSUS_ON:
+                from vllm_hook_plugins.graph.census import census_bucket, new_accumulator
+                _census_bucket = census_bucket(layer_dict)
+                _census_acc = new_accumulator()
             cpu_dict = {}
-            for mod_name, entry in layer_dict.items():
-                tensors = entry["hidden_states"]
-                mode = entry.get("hs_mode", self.hs_mode)
-                if mode == "last_token":
-                    stacked = torch.stack([t.cpu() for t in tensors])
-                else:
-                    from torch.nn.utils.rnn import pad_sequence
-                    stacked = pad_sequence([t.cpu() for t in tensors], batch_first=True)
-                cpu_dict[mod_name] = {"hidden_states": stacked, "layer_num": entry["layer_num"], "hs_mode": mode}
+            with PROF.timed("worker.cpu_transfer.hs"):
+                for mod_name, entry in layer_dict.items():
+                    mode = entry.get("hs_mode", self.hs_mode)
+                    hs_qmeta = entry.get("_hs_qmeta")
+                    if hs_qmeta is None:
+                        # native: stack to the RPC format (unchanged behaviour).
+                        with PROF.timed("cpu_transfer.hs.d2h"):
+                            tensors = _cpu_list(entry["hidden_states"], _census_acc)
+                        with PROF.timed("cpu_transfer.hs.pad"):
+                            if mode == "last_token":
+                                stacked = torch.stack(tensors)
+                            else:
+                                from torch.nn.utils.rnn import pad_sequence
+                                stacked = pad_sequence(tensors, batch_first=True)
+                        cpu_dict[mod_name] = {"hidden_states": stacked,
+                                              "layer_num": entry["layer_num"], "hs_mode": mode}
+                    else:
+                        # Hand off QUANTIZED; the driver dequantizes at analysis.
+                        cpu_dict[mod_name] = {
+                            "hidden_states": _cpu_list(entry["hidden_states"], _census_acc),
+                            "hidden_states_scale": [s.cpu() if s is not None else None
+                                                    for s in entry.get("_hs_scale", [])],
+                            "hidden_states_qmeta": hs_qmeta,
+                            "layer_num": entry["layer_num"], "hs_mode": mode}
+            if _census_bucket is not None:
+                from vllm_hook_plugins.graph.census import census_emit, census_record
+                census_emit(census_record(worker="hs", sink="rpc", req_id=req_id,
+                                           bucket=_census_bucket, acc=_census_acc))
             payload = {"hs_cache": cpu_dict, "config": self._conf}
-            return _ZSTD_COMPRESSOR.compress(pickle.dumps(payload))
+            with PROF.timed("worker.compress.hs"):
+                with PROF.timed("compress.hs.pickle"):
+                    raw = pickle.dumps(payload)
+                PROF.gauge("worker.raw_bytes.hs", len(raw))
+                with PROF.timed("compress.hs.zstd"):
+                    compressed = _ZSTD_COMPRESSOR.compress(raw)
+            PROF.gauge("worker.compressed_bytes.hs", len(compressed))
+            return compressed
         return None
+
+    def dump_profiler(self) -> str | None:
+        """collective_rpc-callable: dump this WORKER process's PROF snapshot to
+        VLLM_HOOK_PROFILE_DIR and return the path (None if profiling is off). The
+        routing/egress timers live in the worker, not the driver, so the offline driver
+        cannot read them otherwise. Read-only introspection, string-name callable."""
+        from vllm_hook_plugins._profiler import PROF
+        return PROF.dump(role="worker-rpc")
 
     def clear_captured_states(self, external_req_id: str) -> None:
         """Remove captured states without returning them (cleanup on abort/disconnect)."""
-        clear_states_for_req(self._captured_states, external_req_id)
+        consumer = getattr(self, "_capture_consumer", None)
+        if consumer is None:
+            clear_states_for_req(self._captured_states, external_req_id)
+            clear_states_for_req(self._disk_states, external_req_id)
+            return
+        # Release resident bytes before dropping each bucket so aborts don't leak
+        # residency (which would eventually starve admission). BOTH buckets: a
+        # disk-mode abort must release too, else residency ratchets up monotonically.
+        for bucket in (self._captured_states, self._disk_states):
+            for req_id in iter_matching_req_ids(bucket, external_req_id):
+                consumer.on_pop(req_id, bucket.pop(req_id))
 
     def flush_disk(self, external_req_ids: list, run_id: str, hook_dir: str) -> bool:
         """Write captured hidden states for all requests in the batch to one artifact.
@@ -295,95 +767,130 @@ class ProbeHiddenStatesWorker:
         execute_model() behavior where the full batch was saved atomically.
 
         Returns True if any artifacts were written, False if nothing captured.
+
+        REUSE-AFTER-FREE: this pops each request's bucket (and its ring pages, if any)
+        BEFORE the writer feeder has copied the bytes out, so ``on_pop`` is called with
+        ``release_pages=False`` here — pages are released later, once the feeder signals it has
+        copied them (see ``consumer.drain_writer_done``), never immediately.
         """
+        from vllm_hook_plugins.graph.drain import drain_barrier
+        drain_barrier(self)  # wait for any pending streaming drain before reading buckets
+        consumer = getattr(self, "_capture_consumer", None)
         cpu_cache: dict = {"config": self._conf, "hs_cache": {}}
         found_any = False
+        flushed_ids: list = []  # req_ids popped this flush -> whose pages we deferred releasing
 
-        for external_req_id in external_req_ids:
-            for req_id in iter_matching_req_ids(self._disk_states, external_req_id):
-                layer_dict = self._disk_states.pop(req_id)
-                if not layer_dict:
-                    continue
-                found_any = True
-                for mod_name, entry in layer_dict.items():
-                    cpu_entry = {
-                        "hidden_states": entry["hidden_states"],
-                        "layer_num": entry["layer_num"],
-                        "hs_mode": entry.get("hs_mode", self.hs_mode),
-                    }
-                    if mod_name in cpu_cache["hs_cache"]:
-                        cpu_cache["hs_cache"][mod_name]["hidden_states"].extend(
-                            cpu_entry["hidden_states"]
-                        )
-                    else:
-                        cpu_cache["hs_cache"][mod_name] = cpu_entry
+        with PROF.timed("worker.cpu_transfer.hs"):
+            for external_req_id in external_req_ids:
+                for req_id in iter_matching_req_ids(self._disk_states, external_req_id):
+                    layer_dict = self._disk_states.pop(req_id)
+                    # Disk path: defer page release until the writer feeder copies the bytes
+                    # out (release_pages=False) — releasing here would let a later stream()
+                    # overwrite pages the feeder still reads.
+                    if consumer is not None:
+                        consumer.on_pop(req_id, layer_dict, release_pages=False)
+                    flushed_ids.append(req_id)
+                    if not layer_dict:
+                        continue
+                    found_any = True
+                    # Offload cost-attribution measurement (VLLM_HOOK_CAPTURE_CENSUS=1): see
+                    # the matching comment in get_captured_states. Both stay None (verbatim,
+                    # zero cost) on the default path.
+                    _census_bucket = None
+                    _census_acc = None
+                    if _CENSUS_ON:
+                        from vllm_hook_plugins.graph.census import census_bucket, new_accumulator
+                        _census_bucket = census_bucket(layer_dict)
+                        _census_acc = new_accumulator()
+                    for mod_name, entry in layer_dict.items():
+                        # Keep quantized onto disk; the disk loader dequantizes at read. Native
+                        # (hs_qmeta None) stores float lists exactly as before.
+                        hs_qmeta = entry.get("_hs_qmeta")
+                        # Split the on-loop flush cost into D2H (_cpu_list) vs the rest (marshal
+                        # ~= dict/extend): marshal.hs ~= cpu_transfer.hs - cpu_transfer.hs.d2h.
+                        # Byte-identical; inert when profiling is off. Mirrors the
+                        # get_captured_states RPC-path split.
+                        with PROF.timed("cpu_transfer.hs.d2h"):
+                            _hs_hostlist = _cpu_list(entry["hidden_states"], _census_acc)
+                        cpu_entry = {
+                            "hidden_states": _hs_hostlist,
+                            "layer_num": entry["layer_num"],
+                            "hs_mode": entry.get("hs_mode", self.hs_mode),
+                        }
+                        if hs_qmeta is not None:
+                            cpu_entry["hidden_states_scale"] = [
+                                s.cpu() if s is not None else None
+                                for s in entry.get("_hs_scale", [])]
+                            cpu_entry["hidden_states_qmeta"] = hs_qmeta
+                        if mod_name in cpu_cache["hs_cache"]:
+                            existing = cpu_cache["hs_cache"][mod_name]
+                            existing["hidden_states"].extend(cpu_entry["hidden_states"])
+                            if hs_qmeta is not None:
+                                existing.setdefault("hidden_states_scale", []).extend(
+                                    cpu_entry["hidden_states_scale"])
+                                existing.setdefault("hidden_states_qmeta", hs_qmeta)
+                        else:
+                            cpu_cache["hs_cache"][mod_name] = cpu_entry
+                    if _census_bucket is not None:
+                        from vllm_hook_plugins.graph.census import census_emit, census_record
+                        census_emit(census_record(worker="hs", sink="disk", req_id=req_id,
+                                                   bucket=_census_bucket, acc=_census_acc))
 
         if not found_any:
+            if consumer is not None:
+                consumer.drain_writer_done(self)  # recycle any already-packed pages anyway
             return False
 
         tp_rank = int(ps.get_tensor_model_parallel_rank())
         run_dir = os.path.join(hook_dir, run_id, f"tp_rank_{tp_rank}")
         os.makedirs(run_dir, exist_ok=True)
 
-        if os.environ.get("VLLM_HOOK_ASYNC_SAVE", "0") == "1":
-            self._save_queue.put((run_id, cpu_cache, run_dir))
-        elif os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1":
-            self._save_safetensors(cpu_cache, run_dir)
+        # Quantized cache -> .pt (packed uint8 + scale + qmeta don't fit fixed-shape safetensors).
+        quant_on = any("hidden_states_qmeta" in e for e in cpu_cache["hs_cache"].values())
+        # Hand serialize+write to a separate PROCESS (off the engine GIL) when armed. submit() is
+        # NON-BLOCKING and returns False if the child is gone or the queue is full -> fall through
+        # to the SAME thread/inline ladder below, so a dead/backed-up child never hangs the loop
+        # or silently loses the artifact.
+        wp = getattr(self, "_writer_process", None)
+        use_st = os.environ.get("VLLM_HOOK_USE_SAFETENSORS", "0") == "1"
+        if wp is not None:
+            with PROF.timed("worker.queue_put"):
+                submitted = wp.submit("hs", cpu_cache, run_dir, self.hs_mode, tp_rank,
+                                      use_st, quant_on, "hidden_states.pt",
+                                      req_ids=flushed_ids, block=True)
+            if not submitted:  # child dead / bounded wait timed out -> data-safety inline (rare)
+                # The inline fallback serializes cpu_cache directly (unlike the writer-process
+                # pack, which torch.cat's into fresh storage) -- compact page-backed views to
+                # owned storage first so pickle/torch.save doesn't re-serialize a whole ring
+                # page per narrow view.
+                compact_page_backed_cache(cpu_cache)
+                if use_st and not quant_on:
+                    self._save_safetensors(cpu_cache, run_dir)
+                else:
+                    save_pt_atomic(cpu_cache, os.path.join(run_dir, "hidden_states.pt"))
+                if consumer is not None:
+                    consumer.release_req_pages(flushed_ids)  # cloned + written -> safe now
+            # else: submitted -> pages released later by the writer's pack-done signal.
         else:
-            save_pt_atomic(cpu_cache, os.path.join(run_dir, "hidden_states.pt"))
+            # writer process OFF (VLLM_HOOK_WRITER_PROCESS=0): inline save. Same compaction
+            # rationale as the fallback above -- this path never runs off-loop.
+            compact_page_backed_cache(cpu_cache)
+            if use_st and not quant_on:
+                self._save_safetensors(cpu_cache, run_dir)
+            else:
+                save_pt_atomic(cpu_cache, os.path.join(run_dir, "hidden_states.pt"))
+            if consumer is not None:
+                consumer.release_req_pages(flushed_ids)
+
+        if consumer is not None:
+            consumer.drain_writer_done(self)  # recycle any pages the feeder already packed
         return found_any
 
     def _save_safetensors(self, cpu_cache: dict, run_dir: str):
-        """Write cpu_cache as a safetensors file + JSON sidecar.
-
-        last_token mode: tensors are (hidden_size,) per prompt — stacked to
-          (bs, hidden_size).
-        all_tokens mode: tensors are (seq_len, hidden_size) with variable
-          seq_len — padded to (bs, max_seq_len, hidden_size) and seq_lens
-          stored in the sidecar JSON so the reader can unpad.
-        """
-        from torch.nn.utils.rnn import pad_sequence
-
-        flat_dict: dict = {}
-        layer_order: list = []
-        batch_size = 0
-        seq_lens: list = []  # only populated for all_tokens mode
-
-        for mod_name, entry in cpu_cache["hs_cache"].items():
-            hs_list = entry["hidden_states"]
-            safe_key = mod_name.replace(".", "__")
-            mode = entry.get("hs_mode", self.hs_mode)
-
-            if mode == "all_tokens":
-                stacked = pad_sequence(hs_list, batch_first=True)  # (bs, max_seq, hidden)
-                if not seq_lens:
-                    seq_lens = [int(t.shape[0]) for t in hs_list]
-            else:
-                stacked = torch.stack(hs_list)  # (bs, hidden_size)
-
-            if stacked.is_cuda:
-                stacked = stacked.cpu()
-            batch_size = stacked.shape[0]
-            flat_dict[safe_key] = stacked
-            layer_order.append({
-                "key": safe_key,
-                "module_name": mod_name,
-                "layer_num": entry["layer_num"],
-                "hs_mode": mode,
-            })
-
-        meta: dict = {
-            "config": cpu_cache["config"],
-            "layer_order": layer_order,
-            "batch_size": batch_size,
-            "hs_mode": self.hs_mode,
-            "peak_gpu_mb": cpu_cache.get("peak_gpu_mb", 0.0),
-            "tp_rank": int(ps.get_tensor_model_parallel_rank()),
-        }
-        if seq_lens:
-            meta["seq_lens"] = seq_lens
-        save_safetensors_atomic(flat_dict, meta, run_dir, "hidden_states")
-
-    def _background_save_loop(self):
-        background_save_loop(self, "hidden_states.pt")
+        """Write cpu_cache as safetensors + JSON sidecar. The serialize body is a PURE
+        function (graph/artifact_writer) so the writer PROCESS and this inline path
+        serialize byte-identically; this wrapper supplies self.hs_mode + tp_rank."""
+        from vllm_hook_plugins.graph.artifact_writer import save_hs_cache_safetensors
+        save_hs_cache_safetensors(cpu_cache, run_dir, self.hs_mode,
+                                  int(ps.get_tensor_model_parallel_rank()))
 
