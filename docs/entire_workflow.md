@@ -204,11 +204,8 @@ one job.
 
 ### 3.1 A complete job script
 
-There is no standalone demo job script shipped under this name anymore. The skeleton below shows
-the job-script shape you'll write for any GPU run — copy it as the starting point for your own.
-For a job script that is shipped today and runs as-is, see
-`tests/cuda_graph/tests/hs_graph/run_hs_parity_full.sh`, the canonical hidden-states parity runner
-(§3.3):
+No demo job script is shipped. The skeleton below shows the job-script shape you'll write for
+any GPU run — copy it as the starting point for your own:
 
 ```bash
 #!/bin/bash
@@ -217,14 +214,14 @@ For a job script that is shipped today and runs as-is, see
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "rusage[ngpus=1,mem=32GB]"
-#BSUB -o tests/cuda_graph/logs/hs_demo.%J.out
-#BSUB -e tests/cuda_graph/logs/hs_demo.%J.err
+#BSUB -o logs/hs_demo.%J.out
+#BSUB -e logs/hs_demo.%J.err
 set -euo pipefail
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate vllm_hook_env
 cd ~/vLLM-Hook
-mkdir -p tests/cuda_graph/logs
+mkdir -p logs
 
 # Model resolution pings the HF API even when cached; a burst of jobs gets 429'd and
 # surfaces as "server failed to become ready". Offline once the model is cached.
@@ -247,14 +244,14 @@ it before trusting a number.
 
 ```bash
 cd ~/vLLM-Hook
-bsub -G grp_exploratory < tests/cuda_graph/tests/hs_graph/run_hs_parity_full.sh   # -G is mandatory
-bjobs                                                    # queued / running / done
-bpeek <JOBID>                                            # live stdout
-grep 'VERDICT' tests/cuda_graph/logs/hs_parity_full.<JOBID>.out  # after it lands
-bkill <JOBID>                                            # stop it
+bsub -G grp_exploratory < my_hs_demo.sh   # the script from 3.1; -G is mandatory
+bjobs                                    # queued / running / done
+bpeek <JOBID>                            # live stdout
+grep 'VERDICT' logs/hs_demo.<JOBID>.out  # after it lands
+bkill <JOBID>                            # stop it
 ```
 
-Logs appear under `tests/cuda_graph/logs/` **only once the job starts**, not at submit time.
+Logs appear under the `-o`/`-e` paths you set **only once the job starts**, not at submit time.
 
 Two habits that save hours:
 
@@ -264,19 +261,6 @@ Two habits that save hours:
 - **A hard-killed job leaks.** vLLM creates a Unix socket named with a UUID in the process CWD per
   engine boot; a killed job leaves it behind. They are harmless and invisible to git (git does not
   track sockets), but they accumulate. Sweep with `find . -maxdepth 1 -type s -delete`.
-
-### 3.3 The parity harnesses are the worked reference
-
-Every capture path has a graph-vs-eager numerical oracle under
-`tests/cuda_graph/tests/<topic>/`, driven by a `run_*.sh` wrapper. For hidden states:
-
-```bash
-bsub -G grp_exploratory < tests/cuda_graph/tests/ring/run_hs_ring_parity.sh
-grep 'VERDICT' tests/cuda_graph/logs/hs_ring_parity.*.out
-```
-
-When you are unsure how to wire a setting, read the harness that already pins it. They are
-maintained; prose drifts.
 
 ---
 
@@ -355,7 +339,6 @@ worker and `VLLM_ALLOW_INSECURE_SERIALIZATION` is not needed. Call it once, afte
 finish, because the worker process is usually killed rather than joined — anything not flushed is
 gone. It returns `None` if the ring path was never installed.
 
-`tests/cuda_graph/tests/ring/hs_ring_parity.py` is the worked reference.
 
 The eager path is unchanged and still returns `probes`. That asymmetry is what the parity oracles
 compare.
@@ -553,11 +536,15 @@ Two you should know by name:
 
 When prose and code disagree, trust in this order:
 
-1. **The parity harnesses** (`tests/cuda_graph/tests/*/`) — graph-vs-eager numerical oracles at
-   `rtol=atol=1e-2`. They are the source of truth for what works.
-2. **`tests/unit/`** — no GPU needed, runs in under a minute:
+1. **The code itself** — `optimizations.py::PUBLIC_LEVERS` is the lever table, and each lever's
+   `os.environ.get(...)` call site is the authority on its real default. Read the call site, not
+   the prose.
+2. **`tests/use_cases/`** — the shipped model-compatibility tests. They need a GPU (except
+   `test_artifact_quant.py`, which is CPU-only):
    ```bash
-   python -m pytest tests/unit tests/test_optimizations_api.py -q
+   pytest tests/use_cases -vv
    ```
-3. **`optimizations.py::PUBLIC_LEVERS`** — the lever table, guarded by a test that fails if a
-   default flips without the table being updated.
+3. **The `capture_ring` branch** — it retains the full graph-vs-eager parity harnesses
+   (`tests/cuda_graph/tests/*/`, numerical oracles at `rtol=atol=1e-2`) and the no-GPU unit suite
+   that this branch does not carry. When you need to know whether a capture path is
+   numerically correct, that is where the evidence lives.

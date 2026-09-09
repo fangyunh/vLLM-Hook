@@ -28,7 +28,7 @@ so a fused kernel without an explicit destination check turns that loud crash in
 into whatever allocation follows ``hs_buf`` — KV cache, weights. The kernel therefore clamps
 ``dst`` into ``[0, SENTINEL]`` — aten's own legal domain — so the select is the identity for
 every legally-routed index (byte-identity preserved, proven cell-by-cell by
-``tests/cuda_graph/tests/capture_perf/capture_fused_unit.py``) and an illegal one lands on the
+``capture_fused_unit.py`` on the capture_ring branch) and an illegal one lands on the
 discard row instead of another allocation.
 
   Why SILENT-degrade and not loud. Loud is not reachable from inside a captured cudagraph: a
