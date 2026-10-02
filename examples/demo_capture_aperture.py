@@ -21,7 +21,6 @@ os.environ.setdefault("MIA_PROFILE", "1")
 if os.environ.get("MIA_ALLOW_CUDAGRAPH") == "1":
     os.environ.setdefault("MIA_APERTURE_PER_REQUEST", "1")
 
-import vllm
 from vllm import SamplingParams
 from mia import MiaLLM
 from _paths import config_path
@@ -262,5 +261,10 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    vllm.destroy_process_group()
+    # vllm.destroy_process_group() was removed in 0.29; the engine shutdown above already
+    # tears the group down, and these are the surviving entry points for anything it missed.
+    from vllm.distributed import (destroy_distributed_environment,
+                                  destroy_model_parallel)
+    destroy_model_parallel()
+    destroy_distributed_environment()
 

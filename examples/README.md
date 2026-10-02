@@ -58,9 +58,20 @@ so the server's own log tells you where it is going.
 demuxes a single request's rows and returns them on the response, and `client.analyze()` picks
 them up with no `run_id`. It is per request, so it covers a demo that analyzes one response and
 not one that reduces over a whole run — and the router sends a payload past the RPC crossover to
-disk anyway, back to the layout `analyze()` cannot read. Demos in that position
-(`demo_corer.py`, `demo_halludetect.py`, `demo_scihal.py`, `profiling_longdecode/`) ask for
-eager, and say so where they call `require_server`.
+disk anyway, back to the layout `analyze()` cannot read.
+
+Which mode each demo asks for, and why:
+
+| Mode | Demos | Why |
+|---|---|---|
+| FULL graph | `demo_hiddenstate.py` | analyzes one response, and HS `last_token` is under the crossover |
+| FULL graph | `demo_actsteer*.py` | steering reads nothing back |
+| FULL graph | `demo_capture_aperture.py` | in-process, per-request delivery |
+| eager | `demo_attntracker.py`, `demo_attnlink.py` | one token of Q/K on a 40-layer 8B model is ~410 KB against a ~100 KB Q/K crossover, so the router always takes the disk route |
+| eager | `demo_corer.py`, `demo_halludetect.py`, `demo_scihal.py` | each reduces over several requests under one `run_id` |
+| eager | `profiling_longdecode/` | `hooks_on=both` over 128 decode steps, far past the crossover |
+
+Each one says so where it calls `require_server`, and prints the matching command.
 
 ### Did it actually capture anything?
 

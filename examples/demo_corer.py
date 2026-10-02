@@ -251,6 +251,19 @@ if __name__ == "__main__":
                            max_tokens=1, temperature=0.1, save_to_disk=True,
                            run_id="corer-batch-na")
 
-    stats = client.analyze(run_ids=["corer-batch-doc", "corer-batch-na"],
-                           analyzer_spec={'query_spec': query_specs, 'na_spec': na_specs})
-    print(f"Sorted document IDs and scores by CoRe-Reranking: {stats['ranking']}: {stats['scores']}")
+    try:
+        stats = client.analyze(run_ids=["corer-batch-doc", "corer-batch-na"],
+                               analyzer_spec={'query_spec': query_specs, 'na_spec': na_specs})
+        print(f"Sorted document IDs and scores by CoRe-Reranking: {stats['ranking']}: {stats['scores']}")
+    except RuntimeError as exc:
+        if "must match the size of tensor" not in str(exc):
+            raise
+        # Pre-existing, and not a 0.29 issue: CorerAnalyzer's batch path is byte-identical
+        # to the pre-port one, and the single-document path above works on the same server.
+        # Batching cases whose prompts differ in length (154 vs 238 tokens here) makes
+        # score_documents line up tensors that do not. Reported, not worked around.
+        print(f"[demo_corer] batch reranking is broken for cases of differing prompt "
+              f"length: {exc}")
+        print("[demo_corer] the single-document reranking above is the working path; this "
+              "batch limitation predates the vLLM 0.29 port (the analyzer's batch code is "
+              "unchanged from the original).")
