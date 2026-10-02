@@ -14,6 +14,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 
 #: Worker kinds `MIA_WORKER` accepts (exact; MIA refuses anything else).
 HS, QK, STEER = "hidden_states", "qk", "steer"
@@ -25,22 +26,35 @@ def base_url() -> str:
 
 
 def serve_command(model: str, worker: str, *, graph: bool = True,
-                  max_model_len: int = 2048, tp: int = 1) -> str:
+                  max_model_len: int = 2048, tp: int = 1,
+                  extra_args: Sequence[str] = ()) -> str:
     """The `vllm serve` invocation a demo needs, ready to paste.
 
     `tp` > 1 adds `--tensor-parallel-size`. Capture shards across the ranks -- hidden states
     by layer, Q/K by head -- and each rank writes its own `tp_rank_<r>/`. Note that
     MIA_APERTURE_GPU_BYTES is a PER-RANK budget, so TP x N claims N times that much GPU.
+
+    `extra_args` are flags the demo cannot work without, so that the command it prints is
+    one that actually runs it -- `demo_corer.py` needs `--no-enable-prefix-caching`, for
+    instance, because it captures the same prefix twice.
     """
     env = ["VLLM_WORKER_MULTIPROC_METHOD=spawn", f"MIA_WORKER={worker}"]
     args = [f"--max-model-len {max_model_len}", f"--port {_port()}"]
     if int(tp) > 1:
         args.append(f"--tensor-parallel-size {int(tp)}")
+    args.extend(extra_args)
     if graph:
         # MIA's point is capture that survives CUDA graphs, so this is the default. The mode
         # must be named explicitly: MIA accepts NONE or FULL, and vLLM would otherwise pick a
         # mode MIA refuses.
         env.append("MIA_ALLOW_CUDAGRAPH=1")
+        # Per-request delivery is what makes a graph-mode capture reachable from the client.
+        # Without it the drain writes every request's rows into the shared aperture files
+        # under MIA_APERTURE_DIR, and neither route home works: `.probes` is never set on the
+        # response, and `analyze(run_id=...)` looks under `hook_dir` and finds nothing. With
+        # it, MIA either returns the rows on the response or redirects the drain into
+        # `hook_dir/<run_id>/`, and `MiaClient.analyze()` finds them either way.
+        env.append("MIA_APERTURE_PER_REQUEST=1")
         args.append("""--compilation-config '{"cudagraph_mode": "FULL"}'""")
     else:
         # Opt-out. Eager capture is bit-exact, which graph-mode capture is not.
@@ -49,7 +63,8 @@ def serve_command(model: str, worker: str, *, graph: bool = True,
 
 
 def require_server(model: str, worker: str, *, graph: bool = True,
-                   max_model_len: int = 2048, tp: int = 1) -> str:
+                   max_model_len: int = 2048, tp: int = 1,
+                   extra_args: Sequence[str] = ()) -> str:
     """Return the base URL, or explain how to start the server and exit."""
     url = base_url()
     try:
@@ -57,7 +72,7 @@ def require_server(model: str, worker: str, *, graph: bool = True,
             served = {m.get("id") for m in json.loads(r.read()).get("data", [])}
     except (urllib.error.URLError, OSError, ValueError) as e:
         print(f"[mia] no server at {url} ({e}).\n\nStart one in another terminal:\n\n"
-              f"{serve_command(model, worker, graph=graph, max_model_len=max_model_len, tp=tp)}\n",
+              f"{serve_command(model, worker, graph=graph, max_model_len=max_model_len, tp=tp, extra_args=extra_args)}\n",
               file=sys.stderr)
         raise SystemExit(1)
 

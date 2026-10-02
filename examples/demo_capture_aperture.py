@@ -13,6 +13,13 @@ os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ.setdefault("MIA_ALLOW_CUDAGRAPH", "1")
 os.environ.setdefault("MIA_PROFILE", "1")
+# Check 1 retrieves without going through disk (`save_to_disk=False`), which under FULL
+# CUDA graphs means per-request aperture delivery: the drain demuxes each request's rows and
+# hands them back on the response. Without this the graph path writes to the shared aperture
+# files instead, `get_captured_states` has nothing in memory to return, and `output.probes`
+# is simply never set. Eager does not need it -- the RPC path returns states directly.
+if os.environ.get("MIA_ALLOW_CUDAGRAPH") == "1":
+    os.environ.setdefault("MIA_APERTURE_PER_REQUEST", "1")
 
 import vllm
 from vllm import SamplingParams
@@ -102,6 +109,25 @@ def _all_equal(tensors_a: dict, tensors_b: dict):
     return (len(mismatches) == 0), mismatches
 
 
+def _probes(outputs, which: str) -> dict:
+    """The captured states carried back on a response, or a diagnosis of why they are not.
+
+    `output.probes` is set only when the engine had a route home that does not go through
+    disk. Reading it unguarded turns a configuration problem into an AttributeError three
+    frames away from the cause.
+    """
+    probes = getattr(outputs[0], "probes", None)
+    if probes is None:
+        raise SystemExit(
+            f"[demo_capture_aperture] {which}: the engine returned no captured states.\n"
+            f"  Under FULL CUDA graphs, retrieval without save_to_disk needs per-request\n"
+            f"  aperture delivery: MIA_APERTURE_PER_REQUEST=1 (this demo sets it) and\n"
+            f"  MIA_PROFILE_MODE unset (it routes capture straight to the sink instead).\n"
+            f"  MIA_APERTURE_PER_REQUEST={os.environ.get('MIA_APERTURE_PER_REQUEST')!r} "
+            f"MIA_PROFILE_MODE={os.environ.get('MIA_PROFILE_MODE')!r}")
+    return probes
+
+
 def main() -> None:
     cache_dir = "./cache/"
     hook_dir = "/dev/shm/mia"
@@ -150,7 +176,7 @@ def main() -> None:
     out1 = llm.generate(prompts, sampling, save_to_disk=False)
     elapsed1 = time.perf_counter() - t0
     n_tokens1 = sum(len(o.outputs[0].token_ids) for o in out1)
-    stats1 = llm.analyze(analyzer_spec={"reduce": "none"}, probes=out1[0].probes)
+    stats1 = llm.analyze(analyzer_spec={"reduce": "none"}, probes=_probes(out1, "run 1"))
     text1 = [o.outputs[0].text for o in out1]
 
     llm.llm_engine.reset_prefix_cache()
@@ -159,7 +185,7 @@ def main() -> None:
     out2 = llm.generate(prompts, sampling, save_to_disk=False)
     elapsed2 = time.perf_counter() - t0
     n_tokens2 = sum(len(o.outputs[0].token_ids) for o in out2)
-    stats2 = llm.analyze(analyzer_spec={"reduce": "none"}, probes=out2[0].probes)
+    stats2 = llm.analyze(analyzer_spec={"reduce": "none"}, probes=_probes(out2, "run 2"))
     text2 = [o.outputs[0].text for o in out2]
 
     det_ok, det_mismatches = _all_equal(stats1["hidden_states"], stats2["hidden_states"])
