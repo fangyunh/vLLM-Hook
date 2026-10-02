@@ -10,7 +10,6 @@ from _serve import HS, chat, require_server
 
 MODEL = os.environ.get("MIA_DEMO_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 INFER_CFG = config_path("hnode_hallucination/Qwen2.5-1.5B-Instruct.infer.json")
-GRAPH = os.environ.get("MIA_ALLOW_CUDAGRAPH", "1") != "0"
 
 PROBE_BASE_URL = (
     "https://raw.githubusercontent.com/Samarpit-bhatia/hnode-probe-builder/"
@@ -53,7 +52,10 @@ def ensure_probe():
 
 if __name__ == "__main__":
     ensure_probe()
-    url = require_server(MODEL, HS, graph=GRAPH, max_model_len=1024)
+    # Eager: this analyzes a RUN (several requests under one run_id), which needs the
+    # disk route. Under FULL CUDA graphs the capture is staged in the aperture layout
+    # instead, and analyze() has no reader for it -- see docs/configs.md.
+    url = require_server(MODEL, HS, graph=False, max_model_len=1024)
     client = MiaClient(base_url=url, analyzer_name="hnode_hallucination",
                        config_file=INFER_CFG)
 

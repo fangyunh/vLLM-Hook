@@ -77,7 +77,11 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Captures the same prefix twice, and 0.29 has no endpoint to reset the prefix cache.
-    url = require_server(model, QK, extra_args=["--no-enable-prefix-caching"])
+    # Eager: this analyzes a RUN (several requests under one run_id), which needs the
+    # disk route. Under FULL CUDA graphs the capture is staged in the aperture layout
+    # instead, and analyze() has no reader for it -- see docs/configs.md.
+    url = require_server(model, QK, graph=False,
+                         extra_args=["--no-enable-prefix-caching"])
     client = MiaClient(
         base_url=url,
         analyzer_name="core_reranker",

@@ -49,9 +49,18 @@ repository root, that means inside your clone. An all-layers, all-tokens run wri
 there. Both names are gitignored, so nothing gets committed, but a home filesystem with a quota
 will notice.
 
-In graph mode `analyze()` is **not** the way back: use the reader above. Each capturing rank
-logs its directory once at install (`... aperture drain ON -> <dir>`), so the server's own log
-tells you where it is going.
+In graph mode `analyze()` is **not** the way back to the shared aperture files: use the reader
+above. Each capturing rank logs its directory once at install (`... aperture drain ON -> <dir>`),
+so the server's own log tells you where it is going.
+
+**The one graph-mode route `analyze()` does read** is per-request delivery
+(`MIA_APERTURE_PER_REQUEST=1`, which `serve_command()` emits with the graph flags): the drain
+demuxes a single request's rows and returns them on the response, and `client.analyze()` picks
+them up with no `run_id`. It is per request, so it covers a demo that analyzes one response and
+not one that reduces over a whole run — and the router sends a payload past the RPC crossover to
+disk anyway, back to the layout `analyze()` cannot read. Demos in that position
+(`demo_corer.py`, `demo_halludetect.py`, `demo_scihal.py`, `profiling_longdecode/`) ask for
+eager, and say so where they call `require_server`.
 
 ### Did it actually capture anything?
 

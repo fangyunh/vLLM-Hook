@@ -26,8 +26,11 @@ if __name__ == "__main__":
     print("=" * 50)
     for prompt in PROMPTS:
         t0 = time.time()
+        # No save_to_disk: this analyzes the ONE response above, so the router is free to
+        # return the rows on the response (RPC). Forcing the disk transport under FULL CUDA
+        # graphs stages the aperture layout instead, which analyze() cannot read.
         response = client.generate(messages=chat(prompt), model=MODEL, max_tokens=10,
-                                   temperature=0.0, save_to_disk=True)
+                                   temperature=0.0)
         elapsed = time.time() - t0
         stats = client.analyze(analyzer_spec={"reduce": "none"})
 
@@ -42,7 +45,7 @@ if __name__ == "__main__":
     print("Reducing to a norm per layer instead of the raw tensor...")
     t0 = time.time()
     response = client.generate(messages=chat(PROMPTS[0]), model=MODEL, max_tokens=10,
-                               temperature=0.0, save_to_disk=True)
+                               temperature=0.0)
     elapsed = time.time() - t0
     stats = client.analyze(analyzer_spec={"reduce": "norm"})
 

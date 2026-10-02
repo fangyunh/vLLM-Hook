@@ -392,3 +392,32 @@ its own `tp_rank_<r>/`, and each rank's aperture, drain thread and writer cover 
 `max_num_batched_tokens × ceil(L / tp) × hidden × 2` on a rank (2.5 GiB for Llama-3.1-70B at TP4,
 not 10 GiB). Read a run back with `mia.graph.aperture_reader.load_hs_aperture_tp(MIA_APERTURE_DIR)`,
 which unions the rank dirs and refuses a gap or a duplicate. TP = 1 is unchanged, byte for byte.
+
+## Reading a capture back: which route you are on
+
+Capture always happens; where the bytes land, and what can read them, depends on the route.
+
+| Route | Where | `analyze()` reads it? |
+|---|---|---|
+| RPC (small artifact, no `save_to_disk`) | on the response | yes — `client.analyze(...)` with no `run_id` |
+| disk, eager (`save_to_disk=True`) | `<hook_dir>/<run_id>/*.pt` or `*.safetensors` | yes — `client.analyze(run_id=...)` |
+| disk, FULL graph | `<hook_dir>/<run_id>/hs_layer_<N>.raw` + `hs_aperture_meta.jsonl` | **no** |
+| shared aperture, FULL graph (no per-request delivery) | `$MIA_APERTURE_DIR/tp_rank_<r>/` | **no** |
+
+The last two are the aperture layout. Nothing in `analyze()` reads it — use
+`mia.graph.aperture_reader` (`load_multilayer_aperture_artifact`, or `load_hs_aperture_tp` /
+`load_qk_aperture_tp` to union the ranks).
+
+Consequences worth knowing before you design around it:
+
+- `MIA_APERTURE_PER_REQUEST=1` is what makes a graph-mode capture reach `analyze()`: the drain
+  demuxes one request's rows and returns them on the response. `serve_command()` emits it with
+  the graph flags.
+- It is **per request**, so a flow that reduces over several requests under one `run_id` cannot
+  use it.
+- `save_to_disk=True` forces the disk transport, which under graphs is the layout `analyze()`
+  cannot read. Omit it and let the router choose if you want the rows on the response.
+- Past the RPC crossover (`MIA_ROUTER_T_RPC`) the router takes the disk route regardless.
+
+So a capture-then-`analyze()`-a-run flow belongs in eager mode today. Graph mode covers
+steering, capture whose bytes you read with the aperture reader, and single-response analysis.

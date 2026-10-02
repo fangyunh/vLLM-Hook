@@ -16,12 +16,13 @@ CONFIG = os.environ.get(
     "MIA_CONFIG_FILE", config_path(f'attention_tracker/{MODEL.split("/")[-1]}.json'))
 MAX_TOKENS = int(os.environ.get("MIA_DEMO_MAX_TOKENS", "128"))
 HOOKS_ON = os.environ.get("MIA_DEMO_HOOKS_ON", "both")
-GRAPH = os.environ.get("MIA_ALLOW_CUDAGRAPH", "1") != "0"
 
 if __name__ == "__main__":
     print(f"[longdec-qk] model={MODEL} config={CONFIG} "
           f"max_tokens={MAX_TOKENS} hooks_on={HOOKS_ON}")
-    url = require_server(MODEL, QK, graph=GRAPH)
+    # Eager: hooks_on=both over a long decode is far past the RPC crossover, so the router
+    # takes the disk route, which analyze() can only read in eager mode.
+    url = require_server(MODEL, QK, graph=False)
     client = MiaClient(base_url=url, analyzer_name="attn_tracker", config_file=CONFIG)
 
     print("=" * 50)

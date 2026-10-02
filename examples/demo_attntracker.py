@@ -69,8 +69,11 @@ if __name__ == "__main__":
             tokenizer, MODEL, case["instruction"], case["data"])
 
         t0 = time.time()
+        # No save_to_disk: this analyzes the ONE response above, so the router is free to
+        # return the rows on the response (RPC). Forcing the disk transport under FULL CUDA
+        # graphs stages the aperture layout instead, which analyze() cannot read.
         response = client.generate(messages=messages, model=MODEL, max_tokens=50,
-                                   temperature=0.1, save_to_disk=True)
+                                   temperature=0.1)
         t1 = time.time()
         print(f"capture generation runtime: {(t1 - t0):.3f}s")
 
