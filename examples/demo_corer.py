@@ -76,7 +76,8 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    url = require_server(model, QK)
+    # Captures the same prefix twice, and 0.29 has no endpoint to reset the prefix cache.
+    url = require_server(model, QK, extra_args=["--no-enable-prefix-caching"])
     client = MiaClient(
         base_url=url,
         analyzer_name="core_reranker",

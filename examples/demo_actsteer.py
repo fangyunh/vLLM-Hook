@@ -29,7 +29,9 @@ PROMPTS = [
 ]
 
 if __name__ == "__main__":
-    require_server(MODEL, STEER, graph=GRAPH)
+    # Phi-3-mini-4k has a 4096-token context; these demos ask for 2048 output tokens, which
+    # does not fit under the 2048 default (the server 400s on every request).
+    require_server(MODEL, STEER, graph=GRAPH, max_model_len=4096)
     client = openai.OpenAI(base_url=base_url(), api_key="EMPTY")
 
     with open(CONFIG) as f:

@@ -8,7 +8,7 @@ from _serve import STEER, base_url, require_server
 
 if __name__ == "__main__":
     model = "microsoft/Phi-3-mini-4k-instruct"
-    require_server(model, STEER)
+    require_server(model, STEER, max_model_len=4096)
     cfg_file = config_path(f'activation_steer/{model.split("/")[-1]}-chinese.json')
 
     with open(cfg_file) as f:
