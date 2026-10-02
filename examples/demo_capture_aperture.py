@@ -197,23 +197,37 @@ def main() -> None:
     if not det_ok:
         print(f"[check 1/2] mismatches (first 5): {det_mismatches[:5]}")
 
-    llm.llm_engine.reset_prefix_cache()
-    run_id = "capture_aperture_demo_writer_process"
-    t0 = time.perf_counter()
-    out3 = llm.generate(prompts, sampling, save_to_disk=True, run_id=run_id)
-    elapsed3 = time.perf_counter() - t0
-    n_tokens3 = sum(len(o.outputs[0].token_ids) for o in out3)
-    stats3 = llm.analyze(analyzer_spec={"reduce": "none"}, run_id=run_id)
-    text3 = [o.outputs[0].text for o in out3]
-
-    wp_ok, wp_mismatches = _all_equal(stats1["hidden_states"], stats3["hidden_states"])
     wp_on = os.environ.get("MIA_WRITER_PROCESS", "1") != "0"
-    print(f"\n[check 2/2] writer_process={'on' if wp_on else 'off'} (shipped default): "
-          f"disk-retrieved capture vs the in-memory capture from check 1")
-    _print_evidence(elapsed3, n_tokens3, "disk-path")
-    print(f"[check 2/2] generated text identical to check 1: {text1 == text3}")
-    print(f"[check 2/2] disk-retrieved hidden states byte-identical to in-memory capture: {wp_ok}")
-    if not wp_ok:
+    if graph_mode:
+        # Offline save_to_disk is a no-op under FULL CUDA graphs: _patched_llm_generate
+        # guards the flush with `if disk_by_run and not _graph_mode()`, so nothing is
+        # written for the run and analyze(run_id=...) would raise FileNotFoundError. The
+        # graph path's own bytes go to MIA_APERTURE_DIR and are read with
+        # mia.graph.aperture_reader, not with analyze().
+        print(f"\n[check 2/2] writer_process={'on' if wp_on else 'off'} (shipped default): "
+              f"SKIPPED under FULL CUDA graphs")
+        print("[check 2/2] offline save_to_disk does not write under graphs (the flush "
+              "barrier is skipped), so there is no disk artifact to compare against. Re-run "
+              "with MIA_ALLOW_CUDAGRAPH=0 for this one.")
+        wp_ok, wp_mismatches = None, []
+    else:
+        llm.llm_engine.reset_prefix_cache()
+        run_id = "capture_aperture_demo_writer_process"
+        t0 = time.perf_counter()
+        out3 = llm.generate(prompts, sampling, save_to_disk=True, run_id=run_id)
+        elapsed3 = time.perf_counter() - t0
+        n_tokens3 = sum(len(o.outputs[0].token_ids) for o in out3)
+        stats3 = llm.analyze(analyzer_spec={"reduce": "none"}, run_id=run_id)
+        text3 = [o.outputs[0].text for o in out3]
+
+        wp_ok, wp_mismatches = _all_equal(stats1["hidden_states"], stats3["hidden_states"])
+        print(f"\n[check 2/2] writer_process={'on' if wp_on else 'off'} (shipped default): "
+              f"disk-retrieved capture vs the in-memory capture from check 1")
+        _print_evidence(elapsed3, n_tokens3, "disk-path")
+        print(f"[check 2/2] generated text identical to check 1: {text1 == text3}")
+        print(f"[check 2/2] disk-retrieved hidden states byte-identical to in-memory "
+              f"capture: {wp_ok}")
+    if wp_ok is False:
         print(f"[check 2/2] mismatches (first 5): {wp_mismatches[:5]}")
     print("[check 2/2] NOT checked here (would need a second engine): the writer_process=off "
           "timing comparison and its disk-SLO-knee claim -- see LEVER_NOTES['writer_process'].")

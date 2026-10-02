@@ -11,7 +11,6 @@ from _serve import QK, completion_text, completion_tokens, print_evidence, requi
 MODEL = os.environ.get("MIA_DEMO_MODEL", "ibm-granite/granite-3.1-8b-instruct")
 CONFIG = os.environ.get(
     "MIA_CONFIG_FILE", config_path(f'attention_tracker/{MODEL.split("/")[-1]}.json'))
-GRAPH = os.environ.get("MIA_ALLOW_CUDAGRAPH", "1") != "0"
 
 
 def messages_and_range(tokenizer, model_name: str, instruction: str, data: str):
@@ -43,7 +42,10 @@ def messages_and_range(tokenizer, model_name: str, instruction: str, data: str):
 
 
 if __name__ == "__main__":
-    url = require_server(MODEL, QK, graph=GRAPH)
+    # Eager: Q/K last_token on this model is already past the RPC crossover
+    # (MIA_ROUTER_T_RPC, ~100 KB for QK), so the router takes the disk route -- which
+    # under FULL graphs stages the aperture layout that analyze()/probes cannot read.
+    url = require_server(MODEL, QK, graph=False)
     client = MiaClient(base_url=url, analyzer_name="attn_tracker", config_file=CONFIG)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 

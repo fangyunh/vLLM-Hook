@@ -336,7 +336,10 @@ def main() -> None:
     out_dir = args.out_dir or Path("cache") / ("attnlink_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f"))
     out_dir.mkdir(parents=True, exist_ok=False)
 
-    url = require_server(args.model, QK, max_model_len=4096)
+    # Eager: Q/K last_token on this model is already past the RPC crossover
+    # (MIA_ROUTER_T_RPC, ~100 KB for QK), so the router takes the disk route -- which
+    # under FULL graphs stages the aperture layout that analyze()/probes cannot read.
+    url = require_server(args.model, QK, graph=False, max_model_len=4096)
     client = MiaClient(base_url=url, analyzer_name="attnlink", config_file=str(CONFIG),
                        hook_dir=str(out_dir / "hooks"), tokenizer_for=args.model)
     try:
