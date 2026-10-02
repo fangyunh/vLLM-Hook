@@ -1,16 +1,22 @@
+"""Science hallucination demo: classify SciHal answers from captured hidden states.
+Runs over `vllm serve`. Both passes go through /v1/completions with exact token ids, and
+the second pass needs the token ids the FIRST one generated -- `return_token_ids` is how
+the server reports them, so the continuation is rebuilt from ids, never from detokenized
+text (detokenize-then-retokenize is not an identity).
+"""
 import json
 import os
+import sys
 import multiprocessing as mp
-import torch
 
 mp.set_start_method("spawn", force=True)
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ.setdefault("VLLM_HOOK_USE_SAFETENSORS", "1")
-os.environ.setdefault("VLLM_HOOK_ASYNC_SAVE", "1")
+os.environ.setdefault("MIA_USE_SAFETENSORS", "1")
 
-from vllm import SamplingParams, TokensPrompt
-from vllm_hook_plugins import HookLLM
+from mia import MiaClient
+from _serve import HS, require_server
+from _paths import config_path
 
 PROMPT_TEMPLATE_PREFIX = (
     "\n"
@@ -46,7 +52,7 @@ def load_scihal_split(cache_dir: str, filename: str) -> list:
 
 
 def build_few_shot_middle(train_dataset: list, count_target: int = 2, total_target: int = 6) -> str:
-    """Build few shot examples following https://github.com/InfintyLab/SciHal-Challenge/blob/97817c788bde330c61f8ed2fc750d83b19fa1590/llama3_finetunec3_just_task1.py#L141."""
+    """Build few-shot examples following the SciHal-Challenge reference implementation."""
     middle = ""
     count_dict = {"entailment": 0, "contradiction": 0, "unverifiable": 0}
     total = 0
@@ -67,9 +73,7 @@ def build_few_shot_middle(train_dataset: list, count_target: int = 2, total_targ
 
 
 def build_prompt_ids(tokenizer, few_shot_middle: str, claim: str, reference: str) -> list:
-    """Build SciHal prompt token IDs following the original authors' doubled-BOS practice: apply_chat_template returns a string already prefixed
-    with <|begin_of_text|>, then tokenizer() with add_special_tokens=True prepends ANOTHER <|begin_of_text|>. The classifier was trained on hidden
-    states extracted from this prefix."""
+    """Build SciHal prompt token IDs with the authors' doubled-BOS convention."""
     my_input = "#Claim: " + claim + "\n #Reference: " + reference
     user_msg = few_shot_middle + PROMPT_TEMPLATE_SUFFIX.replace("!INPUT!", my_input)
     chat = [
@@ -81,67 +85,68 @@ def build_prompt_ids(tokenizer, few_shot_middle: str, claim: str, reference: str
 
 
 if __name__ == "__main__":
-
     cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-    hook_dir = "/dev/shm/vllm_hook" # None #
+    hook_dir = "/dev/shm/mia"
     model = "meta-llama/Llama-3.1-8B-Instruct"
-    n_test = 9 # number of test samples
+    n_test = 9
 
-    dtype_map = {
-        'meta-llama/Llama-3.1-8B-Instruct': torch.float16
-    }
-
-    llm = HookLLM(
-        model=model,
-        worker_name="probe_hidden_states",
+    url = require_server(model, HS, max_model_len=8192)
+    client = MiaClient(
+        base_url=url,
         analyzer_name="science_hallucination",
-        config_file=f'model_configs/hidden_states/{model.split("/")[-1]}.json',
-        download_dir=cache_dir,
+        config_file=config_path(f'hidden_states/{model.split("/")[-1]}.json'),
         hook_dir=hook_dir,
-        gpu_memory_utilization=0.7,
-        max_model_len=8192,
-        trust_remote_code=True,
-        dtype=dtype_map[model],
-        enable_prefix_caching=True,
-        enable_hook=True,
-        tensor_parallel_size=1  # the number of gpus
+        tokenizer_for=model,
     )
 
-    tokenizer = llm.tokenizer
+    tokenizer = client.tokenizer
     train = load_scihal_split(cache_dir, "subtask1_train_batch3.json")
     few_shot_middle = build_few_shot_middle(train)
     test_cases = load_scihal_split(cache_dir, "subtask1_test.json")[:n_test]
     prompt_ids_list = [build_prompt_ids(tokenizer, few_shot_middle, q["claim"], q["reference"]) for q in test_cases]
 
-    # normal generation pass 
-    gen_outputs = llm.generate(
-        [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids_list],
-        SamplingParams(temperature=0.0, max_tokens=1024),
-        use_hook=False,
+    # Pass 1: plain generation, nothing armed (`capture=False` == offline use_hook=False).
+    gen = client.generate_tokens(
+        prompt_ids_list, model=model, max_tokens=1024, temperature=0.0,
+        capture=False, extra_body={"return_token_ids": True},
     )
-    response_token_ids = [list(gen_output.outputs[0].token_ids) for gen_output in gen_outputs]
+    by_index = sorted(gen.choices, key=lambda c: c.index)
+    response_token_ids = [list(c.token_ids or []) for c in by_index]
+    if len(response_token_ids) != len(prompt_ids_list) or not all(response_token_ids):
+        raise RuntimeError(
+            "the server returned no generated token ids; pass return_token_ids and check "
+            "this is vLLM 0.29, where completion choices carry `token_ids`.")
 
-    # re-prefill (prompt_ids + response_ids[:-2]) and capture last-token hidden state
-    # following https://github.com/InfintyLab/SciHal-Challenge/blob/97817c788bde330c61f8ed2fc750d83b19fa1590/llama3_finetunec3_just_task1.py#L262
-    capture_prompts = [
-        TokensPrompt(prompt_token_ids=list(p) + list(r[:-2]))
-        for p, r in zip(prompt_ids_list, response_token_ids)
-    ]
-    output = llm.generate(capture_prompts, SamplingParams(temperature=0.0, max_tokens=1), save_to_disk=True)
+    # Pass 2: re-prompt on prompt+response and capture the hidden states at that point.
+    capture_prompts = [list(p) + list(r[:-2])
+                       for p, r in zip(prompt_ids_list, response_token_ids)]
+    client.generate_tokens(capture_prompts, model=model, max_tokens=1, temperature=0.0,
+                           save_to_disk=True)
 
-    # classify with the science_hallucination analyzer
-    config_file = f"model_configs/hidden_states/{model.split('/')[-1]}.json"
+    config_file = config_path(f"hidden_states/{model.split('/')[-1]}.json")
     with open(config_file) as f:
-        clf_path = json.load(f)["scihal"]["clf_path"]
+        config_clf_path = json.load(f)["scihal"]["clf_path"]
+    clf_path = os.environ.get("MIA_SCIHAL_CLF", config_clf_path)
+    if not os.path.isfile(clf_path):
+        print(
+            f"[demo_scihal] SciHal classifier not found: {clf_path}\n"
+            f"  This joblib file is produced by the SciHal-Challenge repo linked "
+            f"above (https://github.com/InfintyLab/SciHal-Challenge) -- train/export "
+            f"a classifier there, then point this demo at it by either:\n"
+            f"    export MIA_SCIHAL_CLF=/path/to/your_classifier.joblib\n"
+            f"  or updating \"scihal.clf_path\" in {config_file}."
+        )
+        sys.exit(1)
     LABEL_NAMES = ["entailment", "contradiction", "unverifiable"]
     spec = {
         "label_names": LABEL_NAMES,
         "clf_path": clf_path,
         "model_id": model,
     }
-    stats = llm.analyze(probes=getattr(output[0], "probes", None), analyzer_spec=spec)
-    
+    stats = client.analyze(analyzer_spec=spec)
+
     labels = stats["prediction_labels"]
     print("=" * 50)
     for case, label in zip(test_cases, labels):
         print(f"classifier label: {label}")
+

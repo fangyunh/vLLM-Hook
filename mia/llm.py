@@ -203,7 +203,7 @@ class MiaLLM:
         extra["qk_capture"] = pick
         if self._autosel_log_n < 16:
             self._autosel_log_n += 1
-            print(f"[hookllm/D2] auto-select qk_capture={pick} (S={prompt_len} "
+            print(f"[miallm/D2] auto-select qk_capture={pick} (S={prompt_len} "
                   f"mode={req_mode} accepts={self._analyzer_accepts})", flush=True)
 
     def generate(
@@ -236,7 +236,7 @@ class MiaLLM:
         if hook and self.worker_name:
             if run_id is None:
                 run_id = str(uuid.uuid4())
-            with PROF.timed("hookllm.build_extra"):
+            with PROF.timed("miallm.build_extra"):
                 new_sp_list = []
                 for prompt, sp in zip(prompts, sp_list):
                     sp = copy.copy(sp)
@@ -266,16 +266,16 @@ class MiaLLM:
                                     "min_p", "n", "seed", "stop", "stop_token_ids",
                                     "presence_penalty", "frequency_penalty",
                                     "repetition_penalty")}
-        PROF.incr("hookllm.generate.calls")
-        PROF.gauge("hookllm.prompts", len(prompts))
-        with PROF.timed("hookllm.generate"):
+        PROF.incr("miallm.generate.calls")
+        PROF.gauge("miallm.prompts", len(prompts))
+        with PROF.timed("miallm.generate"):
             if all(sp is sp_list[0] for sp in sp_list):
                 outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
             else:
                 outputs = self.llm.generate(prompts, sp_list, **passthrough)
 
         if hook and self.worker_name and not save_to_disk and len(outputs) > 1 and getattr(outputs[0], "probes", None) is not None:
-            with PROF.timed("hookllm.merge_probes"):
+            with PROF.timed("miallm.merge_probes"):
                 all_probes = [o.probes for o in outputs]
                 merged = {k: v for k, v in all_probes[0].items()
                           if k not in ("qk_cache", "hs_cache")}
@@ -332,15 +332,15 @@ class MiaLLM:
             print("No analyzer configured")
             return None
 
-        PROF.incr("hookllm.analyze.calls")
+        PROF.incr("miallm.analyze.calls")
 
         if probes is not None:
-            with PROF.timed("hookllm.analyze"):
+            with PROF.timed("miallm.analyze"):
                 with PROF.timed("analyzer.kernel"):
                     return self.analyzer.analyze(analyzer_spec=analyzer_spec, probes=probes)
 
         effective_run_id = run_id or getattr(self, "_last_run_id", None)
-        with PROF.timed("hookllm.analyze"):
+        with PROF.timed("miallm.analyze"):
             return dispatch_disk_analyze(self.analyzer, analyzer_spec,
                                          run_id=effective_run_id, run_ids=run_ids)
 

@@ -1,102 +1,56 @@
-import os
+"""Activation steering over `vllm serve`: the same prompt, steered and unsteered.
+
+Steering produces no artifact, so there is nothing to analyze and nothing for `MiaClient`
+to do — a plain OpenAI client is enough. Each request carries its own steer config under
+``vllm_xargs["steer"]``, JSON-encoded because `vllm_xargs` only accepts scalars.
+"""
 import json
-import multiprocessing as mp
-import torch
+import os
+import time
 
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_USE_V1"] = "1"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+import openai
 
-from vllm_hook_plugins import HookLLM
-from vllm import SamplingParams
+from _paths import config_path
+from _serve import STEER, base_url, print_evidence, require_server
+
+MODEL = os.environ.get("MIA_DEMO_MODEL", "microsoft/Phi-3-mini-4k-instruct")
+CONFIG = os.environ.get(
+    "MIA_CONFIG_FILE", config_path(f'activation_steer/{MODEL.split("/")[-1]}.json'))
+GRAPH = os.environ.get("MIA_ALLOW_CUDAGRAPH", "1") != "0"
+
+PROMPTS = [
+    "Write a dialogue between two people, one is dressed up in a ball gown and the other "
+    "is dressed down in sweats. The two are going to a nightly event. Your answer must "
+    "contain exactly 3 bullet points in the markdown format (use \"* \" to indicate each "
+    "bullet) such as:\n* This is the first point.\n* This is the second point.",
+    "What is the difference between the 13 colonies and the other British colonies in "
+    "North America? Your answer must contain exactly 6 bullet point in Markdown using the "
+    "following format:\n* Bullet point one.\n* Bullet point two.\n...\n* Bullet point fix.",
+]
 
 if __name__ == "__main__":
+    require_server(MODEL, STEER, graph=GRAPH)
+    client = openai.OpenAI(base_url=base_url(), api_key="EMPTY")
 
-    cache_dir = "./cache/"
-    model = 'microsoft/Phi-3-mini-4k-instruct'
-    
-    dtype_map = {
-        'microsoft/Phi-3-mini-4k-instruct': 'auto',
-        'mistralai/Mistral-7B-Instruct-v0.3': torch.float16,
-        'ibm-granite/granite-3.1-8b-instruct': torch.float16,
-        'Qwen/Qwen2-1.5B-Instruct': torch.float
-    }
+    with open(CONFIG) as f:
+        base_steer = json.load(f)["steering"]
+    steer = {**base_steer, "method": "add_vector", "coefficient": 10}
 
-    llm = HookLLM(
-        model=model,
-        worker_name="steer_hook_act",
-        config_file=f'model_configs/activation_steer/{model.split("/")[-1]}.json',
-        download_dir=cache_dir,
-        gpu_memory_utilization=0.7,
-        max_model_len=2048,
-        trust_remote_code=True,
-        dtype=dtype_map[model],
-        enforce_eager=True,
-        enable_prefix_caching=True,
-        enable_hook=True, 
-        tensor_parallel_size=1  # the number of gpus
-    )
-    
-    test_cases = [
-        "Write a dialogue between two people, one is dressed up in a ball gown and the other is dressed down in sweats. The two are going to a nightly event. Your answer must contain exactly 3 bullet points in the markdown format (use \"* \" to indicate each bullet) such as:\n* This is the first point.\n* This is the second point.",
-        "What is the difference between the 13 colonies and the other British colonies in North America? Your answer must contain exactly 6 bullet point in Markdown using the following format:\n* Bullet point one.\n* Bullet point two.\n...\n* Bullet point fix."
-    ]
-
-    # Per-request steering: uses the JSON config as-is vs. overrides method+coefficient
-    config_path = f'model_configs/activation_steer/{model.split("/")[-1]}.json'
-    with open(config_path) as f:
-        config = json.load(f)
-    default_config   = config["steering"]
-    sampling_params_list = [
-        SamplingParams(
-            temperature=0.0,
-            max_tokens=2048,
-            stop_token_ids=[llm.tokenizer.eos_token_id, 32007],
-        ),
-        SamplingParams(
-            temperature=0.0,
-            max_tokens=2048,
-            stop_token_ids=[llm.tokenizer.eos_token_id, 32007],
-            extra_args={"steer": {**default_config  , "method": "add_vector", "coefficient": 10}},
-        ),
-    ]
-
-    for case, sampling_params in zip(test_cases, sampling_params_list):
-        print("=" * 50)
-        prompt = case
-        messages = [{"role": "user", "content": prompt}]
-        example = llm.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-
-        output = llm.generate(example, sampling_params)
-        print("With activation steering:")
-        print(output[0].outputs[0].text)
-        
-        llm.llm_engine.reset_prefix_cache()
-        output = llm.generate(example, sampling_params, use_hook=False)
-        print("Without activation steering:")
-        print(output[0].outputs[0].text)
-        llm.llm_engine.reset_prefix_cache()
-
-
-    ### batch processing 
-    print("=" * 50)
-    print("Batch processing examples...")
-    examples = [
-        llm.tokenizer.apply_chat_template(
-            [{"role": "user", "content": case}], add_generation_prompt=True, tokenize=False
-        )
-        for case in test_cases
-    ]
-
-    outputs = llm.generate(examples, sampling_params_list)
-    llm.llm_engine.reset_prefix_cache()
-    outputs_original = llm.generate(examples, sampling_params_list, use_hook=False)
-    llm.llm_engine.reset_prefix_cache()
-
-    for steered, original in zip(outputs, outputs_original):
-        print("=" * 50)
-        print("With activation steering:")
-        print(steered.outputs[0].text)
-        print("Without activation steering:")
-        print(original.outputs[0].text)
-
+    for prompt in PROMPTS:
+        for label, extra_body in (
+            ("unsteered", None),
+            ("steered", {"vllm_xargs": {"steer": json.dumps(steer)}}),
+        ):
+            print("=" * 50)
+            print(f"[{label}] {prompt[:70]}...")
+            t0 = time.time()
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2048,
+                temperature=0.0,
+                extra_body=extra_body,
+            )
+            elapsed = time.time() - t0
+            print(response.choices[0].message.content)
+            print_evidence(elapsed, response.usage.completion_tokens, label)

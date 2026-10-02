@@ -1,4 +1,8 @@
-"""Single-example AttnLink-U schema linking with the stock QK worker."""
+"""Single-example AttnLink-U schema linking with the stock QK worker.
+Runs over `vllm serve`. It prompts with exact token ids through /v1/completions, which
+applies no chat template, so the tokens the model sees are the ones the spans were aligned
+to; the token count is checked against the server's own `usage.prompt_tokens`.
+"""
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -9,6 +13,10 @@ from pathlib import Path
 
 os.environ.setdefault("VLLM_USE_V1", "1")
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+from mia import MiaClient
+from _serve import QK, require_server
+from mia.analyzers.attnlink_analyzer import select_columns
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
@@ -235,24 +243,22 @@ account@trans
 
 """
 
-POSITIVE_COLS = ['client.client_id',
- 'client.gender',
- 'client.district_id',
- 'district.district_id',
- 'district.A2']
-SOURCE = {'conversion': 'Unchanged input_seq, positive_cols, positive_tables and SQL from the '
-               'AttnLink artifact; includes schema descriptions, copying instructions '
-               'and column@table candidates.',
- 'dataset': 'BIRD development split',
- 'dataset_sha256': 'b3a3631495508a90eead7c0caaf92a63466a37ebeefa99ab8aa4b4a5a5009b1e',
- 'derived_from': 'https://github.com/Songjw133/AttnLink',
- 'index': 128,
- 'license': 'CC-BY-SA-4.0',
- 'url': 'https://bird-bench.github.io/'}
+POSITIVE_COLS = ["client.client_id", "client.gender", "client.district_id",
+                 "district.district_id", "district.A2"]
+SOURCE = {
+    "conversion": "Unchanged input_seq, positive_cols, positive_tables and SQL from the "
+                  "AttnLink artifact; includes schema descriptions, copying instructions "
+                  "and column@table candidates.",
+    "dataset": "BIRD development split",
+    "dataset_sha256": "b3a3631495508a90eead7c0caaf92a63466a37ebeefa99ab8aa4b4a5a5009b1e",
+    "derived_from": "https://github.com/Songjw133/AttnLink",
+    "index": 128,
+    "license": "CC-BY-SA-4.0",
+    "url": "https://bird-bench.github.io/",
+}
 
 
-
-def prepare_prompt(tokenizer, input_seq):
+def prepare_prompt(tokenizer, input_seq: str) -> tuple:
     """Map identifiers in the final candidate block to full-prompt token spans."""
     rendered = tokenizer.apply_chat_template(
         [{"role": "user", "content": input_seq}], tokenize=False,
@@ -286,19 +292,19 @@ def prepare_prompt(tokenizer, input_seq):
                  "prompt_length": len(ids)}
 
 
-def column_ref(candidate):
+def column_ref(candidate: str) -> str:
     column, separator, table = candidate.rpartition("@")
     if not separator or not column or not table:
         raise ValueError(f"Invalid column@table identifier: {candidate!r}")
     return f"{table}.{column}".casefold()
 
 
-def gold_ref(value):
+def gold_ref(value: str) -> str:
     table, column = value.split(".", 1)
     return ".".join(part.strip().strip('`"[]').casefold() for part in (table, column))
 
 
-def evaluate_ranking(candidates, ranking, positive_cols):
+def evaluate_ranking(candidates: list, ranking: list, positive_cols: list) -> tuple:
     """Average precision over the complete ranking, with input-order tie breaks."""
     refs = [column_ref(c) for c in candidates]
     gold = {gold_ref(c) for c in positive_cols}
@@ -316,7 +322,7 @@ def evaluate_ranking(candidates, ranking, positive_cols):
     return total / len(gold), [ref in gold for ref in refs]
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=MODEL, help="Model ID or local path to the same model.")
     parser.add_argument("--out-dir", type=Path, default=None, help="New directory for this run.")
@@ -326,39 +332,35 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.8,
                         help="Select the shortest prefix reaching this candidate probability mass.")
     args = parser.parse_args()
-    from vllm_hook_plugins.analyzers.attnlink_analyzer import select_columns
-    # Validate selection settings before loading the model.
     select_columns([1.0], args.temperature, args.top_p)
     out_dir = args.out_dir or Path("cache") / ("attnlink_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f"))
     out_dir.mkdir(parents=True, exist_ok=False)
 
-    from vllm import SamplingParams
-    from vllm_hook_plugins import HookLLM
-
-    llm = HookLLM(
-        model=args.model, worker_name="probe_hook_qk", analyzer_name="attnlink",
-        config_file=str(CONFIG), hook_dir=str(out_dir / "hooks"),
-        dtype="bfloat16", tensor_parallel_size=1, enforce_eager=True,
-        enable_prefix_caching=False, enable_chunked_prefill=False,
-        max_model_len=4096, max_num_batched_tokens=4096, max_num_seqs=1,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-    )
+    url = require_server(args.model, QK, max_model_len=4096)
+    client = MiaClient(base_url=url, analyzer_name="attnlink", config_file=str(CONFIG),
+                       hook_dir=str(out_dir / "hooks"), tokenizer_for=args.model)
     try:
-        ids, spec = prepare_prompt(llm.tokenizer, INPUT_SEQ)
+        ids, spec = prepare_prompt(client.tokenizer, INPUT_SEQ)
         if len(ids) + 1 > 4096:
             raise ValueError("Sample exceeds the demo's 4096-token context limit.")
-        outputs = llm.generate(
-            [{"prompt_token_ids": ids}],
-            SamplingParams(temperature=0.0, max_tokens=1, seed=0),
-            save_to_disk=False,
+        # Exact token ids, via /v1/completions: no chat template is applied, so the tokens
+        # the model sees are the ones the spans above were computed against.
+        response = client.generate_tokens(
+            ids, model=args.model, max_tokens=1, temperature=0.0, seed=0,
+            save_to_disk=False, extra_body={"return_token_ids": True},
         )
-        if outputs[0].prompt_token_ids != ids:
-            raise RuntimeError("Inference token IDs differ from span-alignment token IDs.")
-        probes = getattr(outputs[0], "probes", None)
-        if probes is None:
-            raise RuntimeError("QK probes are missing; check the stock Hook installation.")
+        # The server echoes what it actually prompted on, so the original exact-equality
+        # guard survives the move to serve.
+        if list(getattr(response.choices[0], "prompt_token_ids", []) or []) != list(ids):
+            raise RuntimeError(
+                "the server prompted on different token IDs than the span alignment used; "
+                "the spans would be meaningless. Is a chat template being applied?")
+        if getattr(response, "probes", None) is None:
+            raise RuntimeError(
+                "QK probes are missing. Start the server with MIA_WORKER=qk and the mia "
+                "plugin installed; see the command this demo prints when it cannot reach one.")
         spec.update(temperature=args.temperature, top_p=args.top_p)
-        result = llm.analyze(analyzer_spec=spec, probes=probes)
+        result = client.analyze(analyzer_spec=spec)
         ap, gold = evaluate_ranking(spec["candidates"], result["ranking"], POSITIVE_COLS)
         selected = set(result["selected"])
         ranking, cumulative = [], 0.0
@@ -380,10 +382,10 @@ def main():
         question = INPUT_SEQ.split("\nQuestion:\n", 1)[1].split("\n\nInstructions:", 1)[0].strip()
         report = {"question": question, "source": SOURCE, "model": args.model,
                   "layer": 22, "head": 12, "pooling": "span_mean", "dtype": "bfloat16",
-                  "execution": "eager", "prompt_tokens": len(ids), "average_precision": ap,
+                  "execution": "serve", "prompt_tokens": len(ids), "average_precision": ap,
                   "input_sha256": hashlib.sha256(INPUT_SEQ.encode()).hexdigest(),
                   "versions": {name: importlib.metadata.version(name) for name in
-                               ("vllm", "vllm-hook-plugins", "torch", "transformers")},
+                               ("vllm", "mia", "torch", "transformers")},
                   "selection": selection, "ranking": ranking}
         (out_dir / "result.json").write_text(json.dumps(report, indent=2) + "\n")
         print(f"\nQuestion: {question}\nModel: {MODEL} | layer 22 / head 12")
@@ -401,7 +403,7 @@ def main():
               f"F1: {selection['f1']:.2%} | AP: {ap:.6f}")
         print(f"Full result: {out_dir / 'result.json'}")
     finally:
-        llm.close()
+        print(f"[attnlink] run directory: {out_dir}  (captured artifacts under hooks/)")
 
 
 if __name__ == "__main__":

@@ -2,8 +2,10 @@
 import pytest
 import torch
 
-from vllm_hook_plugins import HookLLM, register_plugins
-from tests.conftest import ensure_config_for_model
+pytest.importorskip("vllm")  # `import mia` pulls in vLLM (mia/llm.py); skip, never error the whole collection
+
+from mia import MiaLLM, register_plugins
+from tests.conftest import ensure_config_for_model, requires_gpu
 
 TEST_MODELS = [
     "facebook/opt-125m",
@@ -12,15 +14,23 @@ TEST_MODELS = [
 ]
 
 
+@pytest.mark.gpu
+@requires_gpu          # builds a real MiaLLM; see tests/conftest.py::requires_gpu
 @pytest.mark.parametrize("model_id", TEST_MODELS)
 def test_hidden_states_extraction(cache_dir, project_root, model_id):
+    """End-to-end hidden-state capture + analysis through a real MiaLLM engine.
+
+    GPU-only: it boots vLLM, so on a CPU-only node vLLM raises
+    "Device string must not be empty" before the test can assert anything. Skipped
+    (not failed) there by @requires_gpu -- see tests/conftest.py.
+    """
     register_plugins()
 
     cfg = ensure_config_for_model(project_root, "hidden_states", model_id)
 
-    llm = HookLLM(
+    llm = MiaLLM(
         model=model_id,
-        worker_name="probe_hidden_states",
+        worker_name="capture_hs",
         analyzer_name="hidden_states",
         config_file=str(cfg),
         download_dir=str(cache_dir),
