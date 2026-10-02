@@ -89,8 +89,8 @@ cd ./vLLM-Hook
 MIA is validated on **vLLM 0.29.0 with torch 2.13.0**:
 
 ```bash
-conda create -n mia_v029 python=3.12 pip
-conda activate mia_v029
+conda create -n vllm-hook-mia python=3.12 pip
+conda activate vllm-hook-mia
 pip install vllm==0.29.0          # also installs torch 2.13.0
 pip uninstall -y torchcodec       # vLLM's audio/video decoder; MIA does not use it
 pip install -e . --no-deps        # the plugin itself, from the repo root
