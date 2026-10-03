@@ -265,7 +265,7 @@ FILE"), not a hint, and MIA never overrides it.
 | env var | default | effect |
 |---|---|---|
 | `MIA_STORAGE_ROUTER` | `on` | `0` disables the router; the caller's `save_to_disk` (or `MIA_SINK`) then decides alone |
-| `MIA_ROUTER_T_RPC` / `MIA_ROUTER_T_ANALYZE` | derived (HS 552517 B, QK 102949 B) | override the crossover outright, in bytes, for the per-request aperture delivery route. `T_ANALYZE` takes the same derived number because it always did; its true basis is different (how big an artifact a reducible analyzer should hold in host RAM while it reduces), and nothing here measures that |
+| `MIA_ROUTER_T_RPC` / `MIA_ROUTER_T_ANALYZE` | derived (HS 552517 B, QK 102949 B) | override the crossover outright, in bytes, for the in-drain per-request route (Q/K, or hidden states with `MIA_APERTURE_DELIVERY=drain`). `T_ANALYZE` takes the same derived number because it always did; its true basis is different (how big an artifact a reducible analyzer should hold in host RAM while it reduces), and nothing here measures that |
 | `MIA_ROUTER_RPC_INTERCEPT_MS` | `5.0` | the RPC model's fixed term |
 | `MIA_ROUTER_RPC_SLOPE_MS_PER_KB_HS` / `_QK` | `0.03` / `0.157` | the RPC model's per-KB term |
 | `MIA_ROUTER_DISK_HANDOFF_MS` | `20.0` | the disk model's fixed term (**not measured**, see above) |
@@ -367,12 +367,12 @@ per-layer raw files and the sidecar itself; the writer process idles. Two env va
 
 All four modes write the same bytes: the raw files and the sidecar are byte-identical, and the
 readers are unchanged. The synchronous drain (`MIA_APERTURE_SYNC_DRAIN=1`) writes buffered only.
-Per-request delivery writes no shared raw files, so the per-file decision does not apply to it --
-its per-request DISK staging takes the same writer in buffered mode (`legacy` for an A/B; an
-explicit `direct` is refused there). `MIA_APERTURE_MMAP=1` is accepted only with `legacy`. Each
-capturing rank logs one `... aperture write path (tp_rank r): ...` line at install, naming the mode
-per tensor kind, the predicted write size and why it went that way, the thread count and the block
-size.
+The in-drain per-request route (`MIA_APERTURE_DELIVERY=drain`) writes no shared raw files, so the
+per-file decision does not apply to it -- its per-request DISK staging takes the same writer in
+buffered mode (`legacy` for an A/B; an explicit `direct` is refused there).
+`MIA_APERTURE_MMAP=1` is accepted only with `legacy`. Each capturing rank logs one
+`... aperture write path (tp_rank r): ...` line at install, naming the mode per tensor kind, the
+predicted write size and why it went that way, the thread count and the block size.
 
 ---
 
@@ -401,6 +401,7 @@ Capture always happens; where the bytes land, and what can read them, depends on
 |---|---|---|
 | RPC (small artifact, no `save_to_disk`) | on the response | yes — `client.analyze(...)` with no `run_id` |
 | disk, eager (`save_to_disk=True`) | `<hook_dir>/<run_id>/*.pt` or `*.safetensors` | yes — `client.analyze(run_id=...)` |
+| hidden states, FULL graph, per-request (`MIA_APERTURE_PER_REQUEST=1`) | one directory per request under the delivery root, below | **no** — `load_delivered` |
 | disk, FULL graph | `<hook_dir>/<run_id>/hs_layer_<N>.raw` + `hs_aperture_meta.jsonl` | **no** |
 | shared aperture, FULL graph (no per-request delivery) | `$MIA_APERTURE_DIR/tp_rank_<r>/` | **no** |
 
@@ -408,11 +409,37 @@ The last two are the aperture layout. Nothing in `analyze()` reads it — use
 `mia.graph.aperture_reader` (`load_multilayer_aperture_artifact`, or `load_hs_aperture_tp` /
 `load_qk_aperture_tp` to union the ranks).
 
+### Hidden states per request, under FULL graphs
+
+With `MIA_APERTURE_PER_REQUEST=1`, each request's hidden states are written to files while the
+server runs; they are **not** on the response. The delivery root is `MIA_APERTURE_GATHER_DIR` if
+set, else `$MIA_APERTURE_DIR/tp_rank_0/delivered/` at TP = 1 and `$MIA_APERTURE_DIR/delivered/`
+at TP > 1.
+
+```python
+from mia.graph.aperture_gather import load_delivered
+
+data = load_delivered(root)   # {request_id: {layer: Tensor}}, ranks merged at TP > 1
+```
+
+A request appears a few seconds after it finishes, once all of its layers are on disk; requests
+still in flight are skipped. Keys are vLLM's internal request ids: the id vLLM returned for the
+request (`response.id`, `output.request_id`) plus `-<suffix>`; `req_ids=[...]` reads only those.
+Read the delivered files, not the shared `hs_layer_*.raw`: those are reclaimed as requests are
+delivered.
+
+| env var | default | effect |
+|---|---|---|
+| `MIA_APERTURE_DELIVERY` | `auto` | `drain` returns hidden states on the response instead (the route `analyze()` reads). `hybrid` delivers files even without `MIA_APERTURE_PER_REQUEST`. Anything else is refused |
+| `MIA_APERTURE_GATHER_DIR` | unset | the delivery root; ranks go in `tp_rank_<r>/` under it at TP > 1 |
+| `MIA_APERTURE_GATHER_TRIM` | `1` | `0` keeps the shared layer files whole, at twice the disk use |
+
 Consequences worth knowing before you design around it:
 
-- `MIA_APERTURE_PER_REQUEST=1` is what makes a graph-mode capture reach `analyze()`: the drain
-  demuxes one request's rows and returns them on the response. `serve_command()` emits it with
-  the graph flags.
+- `MIA_APERTURE_PER_REQUEST=1` is what makes a graph-mode Q/K capture reach `analyze()`: the
+  drain demuxes one request's rows and returns them on the response. Hidden states take that
+  route only with `MIA_APERTURE_DELIVERY=drain`. `serve_command()` emits the flag with the graph
+  flags.
 - It is **per request**, so a flow that reduces over several requests under one `run_id` cannot
   use it.
 - `save_to_disk=True` forces the disk transport, which under graphs is the layout `analyze()`

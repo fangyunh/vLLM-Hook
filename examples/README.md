@@ -42,6 +42,7 @@ difference between finding your artifact and thinking nothing was captured.
 | in host memory (default for small artifacts) | nowhere on disk — it rides back on the response | `client.analyze(...)` |
 | disk (`save_to_disk=True`) | `<hook_dir>/<run_id>/`, default `hook_dir=/dev/shm/mia`; `tp_rank_<r>/` under TP | `client.analyze(...)`, which waits for the files |
 | FULL CUDA-graph capture | `$MIA_APERTURE_DIR/tp_rank_<r>/` — per-layer `hs_layer_<N>.raw` plus an `hs_aperture_meta.jsonl` sidecar | `mia.graph.aperture_reader.load_multilayer_aperture_artifact(run_dir)`, or `load_hs_aperture_tp(dir)` to union the ranks |
+| FULL CUDA-graph hidden states, per request (`MIA_APERTURE_PER_REQUEST=1`) | one directory per request under `$MIA_APERTURE_DIR/tp_rank_0/delivered/` (TP = 1) or `$MIA_APERTURE_DIR/delivered/` (TP > 1) | `mia.graph.aperture_gather.load_delivered(dir)` → `{request_id: {layer: Tensor}}`; a request appears a few seconds after it finishes |
 
 **Set `MIA_APERTURE_DIR`.** Unset, it defaults to `./hs_aperture_dump` (or `./qk_aperture_dump`)
 **relative to the process's working directory** — and since everything here says to run from the
@@ -53,12 +54,13 @@ In graph mode `analyze()` is **not** the way back to the shared aperture files: 
 above. Each capturing rank logs its directory once at install (`... aperture drain ON -> <dir>`),
 so the server's own log tells you where it is going.
 
-**The one graph-mode route `analyze()` does read** is per-request delivery
+**The one graph-mode route `analyze()` does read** is per-request delivery of Q/K
 (`MIA_APERTURE_PER_REQUEST=1`, which `serve_command()` emits with the graph flags): the drain
 demuxes a single request's rows and returns them on the response, and `client.analyze()` picks
-them up with no `run_id`. It is per request, so it covers a demo that analyzes one response and
-not one that reduces over a whole run — and the router sends a payload past the RPC crossover to
-disk anyway, back to the layout `analyze()` cannot read.
+them up with no `run_id`. Per-request hidden states go to files instead (the table above),
+unless the server also sets `MIA_APERTURE_DELIVERY=drain`. It is per request, so it covers a demo
+that analyzes one response and not one that reduces over a whole run — and the router sends a
+payload past the RPC crossover to disk anyway, back to the layout `analyze()` cannot read.
 
 Which mode each demo asks for, and why:
 
