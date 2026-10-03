@@ -863,6 +863,9 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
         _fin_evidence = getattr(scheduler_output, "finished_req_ids", None)
         if _fin_evidence:
             PROF.incr("hook.fire.hs", len(_fin_evidence) * len(layers))
+            if drain is not None and getattr(drain, "gather_stamp", False):
+                for _rid in _fin_evidence:
+                    drain.note_gather_finish(_rid)
 
         registry._pending_plans = []
         registry._hs_step_entries = []

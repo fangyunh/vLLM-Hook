@@ -347,6 +347,11 @@ async def _await_aperture_disk_confirm(engine, request_id) -> bool:
         await asyncio.sleep(_APERTURE_DELIVER_POLL_S)
 
 
+def _apply_delivery_selector():
+    from mia.graph.delivery_selector import apply as _apply
+    return _apply()
+
+
 def _warn_profile_aperture_conflict() -> None:
     if getattr(_warn_profile_aperture_conflict, "_warned", False):
         return
@@ -924,6 +929,56 @@ def _maybe_storage_route(engine, prompt, extra, max_tokens) -> bool | None:
         return None
 
 
+_FLUSH_PROBE_ATTR = "_mia_flush_probe"
+_FLUSH_ANNOUNCED: set = set()
+
+
+async def _flush_disk_coalesced(engine, *, request_id, run_id, hook_dir, wants_hs, wants_qk,
+                                wants_steer, sink, per_request, durable_wait):
+    from mia.graph import disk_flush_probe as _dfp
+
+    cls = None
+    if _dfp.skip_enabled():
+        cls = _dfp.flush_class(graph=_graph_mode(), wants_hs=bool(wants_hs),
+                               wants_qk=bool(wants_qk), wants_steer=bool(wants_steer),
+                               sink=str(sink), per_request=bool(per_request),
+                               durable_wait=bool(durable_wait),
+                               run_id=str(run_id), hook_dir=str(hook_dir))
+    if cls is None:
+        with PROF.timed("rpc.flush_disk"):
+            return await engine.collective_rpc("flush_disk", args=([request_id], run_id, hook_dir))
+
+    probe = getattr(engine, _FLUSH_PROBE_ATTR, None)
+    if probe is None:
+        probe = _dfp.DiskFlushProbe(probe=_dfp.probe_interval())
+        setattr(engine, _FLUSH_PROBE_ATTR, probe)
+        key = id(engine)
+        if key not in _FLUSH_ANNOUNCED:
+            _FLUSH_ANNOUNCED.add(key)
+            print(f"[mia/aperture] {_dfp.announce(probe=probe.probe, enabled=True)}",
+                  flush=True)
+    d = probe.decide(cls, request_id, run_id=str(run_id), hook_dir=str(hook_dir))
+    if not d.flush:
+        PROF.incr("rpc.flush_disk.held")
+        return None
+    with PROF.timed("rpc.flush_disk"):
+        res = await engine.collective_rpc("flush_disk", args=(d.ids, run_id, hook_dir))
+    PROF.incr("rpc.flush_disk.probe" if d.is_probe else "rpc.flush_disk")
+    if d.is_probe and probe.note_result(cls, res):
+        PROF.incr("rpc.flush_disk.nonempty")
+        left = probe.drain_all()
+        print(f"[mia/aperture] flush_disk coalescing DISARMED: a probe found that a rank DID "
+              f"write, so the eager _disk_states bucket is NOT empty on this path. Flushing "
+              f"{sum(len(v) for v in left.values())} held-back request(s) now, EACH UNDER ITS OWN "
+              f"run_id, and issuing one RPC per request for the rest of the run. {probe.stats()}",
+              flush=True)
+        for triples in left.values():
+            for r_id_, run_, hook_ in triples:
+                with PROF.timed("rpc.flush_disk"):
+                    await engine.collective_rpc("flush_disk", args=([r_id_], run_, hook_))
+    return res
+
+
 def _profile_mode() -> bool:
     return os.environ.get("MIA_PROFILE_MODE") == "1"
 
@@ -1227,9 +1282,11 @@ async def _patched_generate(
                       and not _takes_aperture_per_request(extra, wants_hs, wants_qk, wants_steer)):
                     run_id = extra.get("run_id") or request_id
                     hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
-                    with PROF.timed("rpc.flush_disk"):
-                        flushed = await self.collective_rpc(
-                            "flush_disk", args=([request_id], run_id, hook_dir))
+                    flushed = await _flush_disk_coalesced(
+                        self, request_id=request_id, run_id=run_id, hook_dir=hook_dir,
+                        wants_hs=wants_hs, wants_qk=wants_qk, wants_steer=wants_steer,
+                        sink=sink, per_request=False,
+                        durable_wait=bool(extra.get("durable_wait")))
                     if extra.get("durable_wait"):
                         with PROF.timed("disk.await_artifact"):
                             await _await_disk_artifact(
@@ -1452,6 +1509,8 @@ def register() -> None:
     global _original_create_engine_config
     global _original_generate, _original_llm_generate
     global _original_completion_response, _original_chat_full_generator
+
+    _apply_delivery_selector()
 
     from vllm import LLM
     from vllm.engine.arg_utils import EngineArgs

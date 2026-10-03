@@ -20,6 +20,12 @@ from .capture_aperture import CaptureAperture
 from .per_request_delivery import PerRequestIndex
 from .aperture_metadata import (
     HsSidecarLog, LayerEntry, StepMeta, expand_records, write_sidecar)
+from .aperture_gather import (DELIVER_ENV as GATHER_DELIVER_ENV, ApertureGatherProcess,
+                              delivery_enabled)
+from .aperture_trim import (TRIM_ENV as GATHER_TRIM_ENV, trim_chunk_bytes, trim_enabled,
+                            trim_explicit, trim_lag_bytes)
+from .aperture_run_index import (FLUSH_MS_ENV, GATHER_ENV, INDEX_NAME, RunIndex,
+                                 RunIndexFlusher, flush_interval_ms, gather_enabled, new_run_id)
 from .aperture_sink import (
     ApertureWriteConfigError, ApertureWriteError, ApertureWritePath, PerRequestSinks,
     WRITE_MODE_ENV, WriteShape, WriteStats, alloc_host_rows, join_writes, join_writes_quietly,
@@ -135,9 +141,13 @@ def _drain_selective_enabled() -> bool:
 
 
 def _resolve_selective(armed: bool, *, off_loop: bool,
-                       per_request: bool) -> Tuple[bool, Optional[str]]:
+                       per_request: bool, gather: bool = False) -> Tuple[bool, Optional[str]]:
     if not armed:
         return False, None
+    if gather:
+        return False, (f"the run-encoded per-request index ({GATHER_ENV}=1) needs every installed "
+                       f"layer's file rows to BE the aperture's logical rows, so every installed "
+                       f"layer is drained")
     if not off_loop:
         return False, ("the SYNCHRONOUS drain (MIA_APERTURE_SYNC_DRAIN=1) has no selective path; "
                        "every installed layer is drained")
@@ -398,6 +408,60 @@ class MultiLayerApertureDrain:
                           for ln, _ in self.layers}
         self.shape = shape
         self.write_mode, self._write_mode_explicit = resolve_write_mode()
+        self.gather = gather_enabled()
+        self._run_index: Optional[RunIndex] = None
+        self._run_flusher: Optional[RunIndexFlusher] = None
+        self.run_id: Optional[str] = None
+        self._gather_proc: Optional[ApertureGatherProcess] = None
+        self.gather_stamp = False
+        self._flush_ms = 0
+        if self.gather:
+            if not setup_sink:
+                raise ApertureWriteConfigError(
+                    f"{GATHER_ENV}=1 reads the SHARED per-layer raw files, but this drain writes "
+                    f"none: per-request delivery (MIA_APERTURE_PER_REQUEST=1) demuxes every row "
+                    f"into its own request's artifact instead. Unset one of the two.")
+            if os.environ.get("MIA_APERTURE_MMAP", "0") != "0":
+                raise ApertureWriteConfigError(
+                    f"MIA_APERTURE_MMAP={os.environ.get('MIA_APERTURE_MMAP')!r} selects the legacy "
+                    f"mmap sink, which PRE-SIZES each layer file and truncates it at close, but "
+                    f"{GATHER_ENV}=1 reads those files WHILE they are being written: every row past "
+                    f"the write cursor would be read back as ZEROS and delivered as data. Unset "
+                    f"MIA_APERTURE_MMAP (the default write path keeps every raw file open for the "
+                    f"run, which is what the mmap sink was for), or unset {GATHER_ENV}.")
+            if self.write_mode == "legacy":
+                raise ApertureWriteConfigError(
+                    f"{WRITE_MODE_ENV}=legacy "
+                    f"({'set' if self._write_mode_explicit else 'the default'}) keeps the sidecar as "
+                    f"LayerEntry objects, but {GATHER_ENV}=1 derives its run index from the "
+                    f"per-step arrays the other write modes keep. Use auto (the default), direct or "
+                    f"buffered, or unset {GATHER_ENV}.")
+            self._flush_ms = flush_interval_ms()
+        if delivery_enabled():
+            if not self.gather:
+                raise ApertureWriteConfigError(
+                    f"{GATHER_DELIVER_ENV}=1 streams this run's SHARED layer files into per-request "
+                    f"artifacts, but it needs the run index to know which rows belong to whom and "
+                    f"{GATHER_ENV} is off. Set {GATHER_ENV}=1 (and a "
+                    f"{FLUSH_MS_ENV} cadence), or unset {GATHER_DELIVER_ENV}.")
+            if self._flush_ms <= 0:
+                raise ApertureWriteConfigError(
+                    f"{GATHER_DELIVER_ENV}=1 needs the index PUBLISHED while the run is going, but "
+                    f"{FLUSH_MS_ENV} is off, so it is written once at close -- a streaming gather "
+                    f"would deliver nothing until the server stopped, which is the barrier this "
+                    f"path exists to remove. Set {FLUSH_MS_ENV} to a cadence in milliseconds, or "
+                    f"unset {GATHER_DELIVER_ENV}.")
+        if trim_explicit():
+            armed = trim_enabled()
+            trim_chunk_bytes()
+            trim_lag_bytes()
+            if armed and not delivery_enabled():
+                raise ApertureWriteConfigError(
+                    f"{GATHER_TRIM_ENV}=1 frees the shared layer files behind the hybrid GATHER's "
+                    f"cursor, but {GATHER_DELIVER_ENV} is off, so there is no gather and no cursor: "
+                    f"nothing would be trimmed and nothing would say so. It is ON by default and "
+                    f"needs no setting at all when the gather runs. Set {GATHER_DELIVER_ENV}=1 (with "
+                    f"{GATHER_ENV}=1 and a {FLUSH_MS_ENV} cadence), or unset {GATHER_TRIM_ENV}.")
         self._wp: Optional[ApertureWritePath] = None
         self._sidecar: Optional[HsSidecarLog] = None
         self._io_lock = threading.Lock()
@@ -430,6 +494,17 @@ class MultiLayerApertureDrain:
                 direct_refusal=self._DIRECT_REFUSAL, label=f"hs aperture drain ({run_dir})",
                 shape=self.shape)
             self._sidecar = HsSidecarLog([ln for ln, _ in self.layers], _stamp_file_row)
+            if self.gather:
+                self._run_index = RunIndex(self._sidecar)
+                if self._flush_ms > 0:
+                    self.gather_stamp = True
+                    self.run_id = new_run_id()
+                    self._run_flusher = RunIndexFlusher(
+                        self._run_index, run_dir, self.header, self._flush_ms,
+                        name=f"hs run index ({run_dir})", run_id=self.run_id)
+                    self._run_flusher.start()
+                    self._gather_proc = ApertureGatherProcess.from_env(
+                        run_dir, header=self.header, run_id=self.run_id)
         else:
             self._mmap_enabled = os.environ.get("MIA_APERTURE_MMAP", "0") != "0"
             if self._mmap_enabled:
@@ -456,7 +531,7 @@ class MultiLayerApertureDrain:
         self._pending_entries: List[LayerEntry] = []
         self._closed = False
         self.selective, self.selective_disabled_reason = _resolve_selective(
-            _drain_selective_enabled(), off_loop=False, per_request=False)
+            _drain_selective_enabled(), off_loop=False, per_request=False, gather=self.gather)
         self._rows_copied = 0
         self._rows_skipped = 0
         self._degenerate_steps = 0
@@ -496,13 +571,50 @@ class MultiLayerApertureDrain:
     def write_path_summary(self) -> str:
         """Install-line summary: write mode per tensor kind, writer threads, O_DIRECT block."""
         if self._wp is not None:
-            return self._wp.summary()
+            return (self._wp.summary() + self._delivery_summary() + self._run_summary()
+                    + self._trim_summary())
         if self._write_note:
             return self._write_note
         sink = ("pre-sized MAP_SHARED mmap (MIA_APERTURE_MMAP=1)" if self._mmap_enabled
                 else "tobytes + open/append/close per step")
         return (f"write mode=legacy -> hs=legacy ({sink}, on the drain thread) | for A/B "
                 f"validation only ({WRITE_MODE_ENV}=legacy)")
+
+    def _delivery_summary(self) -> str:
+        if self._run_flusher is None:
+            return ""
+        from .delivery_selector import STAMP_ENV
+        stamp = os.environ.get(STAMP_ENV)
+        if not stamp:
+            return (" | delivery: the gather was armed by hand "
+                    f"({GATHER_ENV}/{GATHER_DELIVER_ENV} set directly, no {STAMP_ENV})")
+        mode, _, source = stamp.partition(":")
+        if mode != "hybrid":
+            return f" | delivery selection: {stamp}"
+        if source == "default":
+            return (" | delivery: HYBRID chosen BY DEFAULT (MIA_APERTURE_PER_REQUEST=1 asked for "
+                    "per-request delivery; MIA_APERTURE_DELIVERY=drain takes the in-drain writer "
+                    "instead). Artifacts are FILES under the delivery dir, read with "
+                    "aperture_gather.load_delivered -- NOT in output.probes")
+        return " | delivery: HYBRID chosen explicitly (MIA_APERTURE_DELIVERY=hybrid)"
+
+    def _run_summary(self) -> str:
+        if self._run_flusher is None:
+            return ""
+        return (f" | index chain run id {self.run_id} (stamped into every hs_run_index.seg.*; a "
+                f"gather refuses a segment from another run rather than naming rows this run's "
+                f"layer files do not contain)")
+
+    def _trim_summary(self) -> str:
+        if getattr(self, "_gather_proc", None) is None:
+            return ""
+        if not getattr(self._gather_proc, "trim", False):
+            return f" | gather trim OFF ({GATHER_TRIM_ENV}=0): shared layer files kept WHOLE"
+        return (f" | gather trim ON (default; {GATHER_TRIM_ENV}=0 keeps them): the shared "
+                f"hs_layer_*.raw are hole-punched behind the SLOWEST gather worker's cursor in "
+                f"{self._gather_proc.trim_chunk} B chunks with a {self._gather_proc.trim_lag} B lag "
+                f"-- same LENGTH, blocks freed; rows below the floor in hs_trim.w*of*.json are "
+                f"RECLAIMED and aperture_reader names them rather than returning zeros")
 
     def _selective_active(self) -> bool:
         return bool(self.selective) and not bool(getattr(self, "per_request", False))
@@ -585,6 +697,8 @@ class MultiLayerApertureDrain:
             block = self._sidecar.prepare(self._pending_records, step_start_logical, cursor, None)
             self._pending_records = []
             self._sidecar.commit(block)
+            if self._run_index is not None:
+                self._run_index.note_step(step_start_logical, moved, cursor, None, block)
             t_b = time.perf_counter() - tb
         self.aperture.advance_drain(moved)
         step_s = time.perf_counter() - t0
@@ -592,6 +706,16 @@ class MultiLayerApertureDrain:
                           d2h_s=max(step_s - t_w - t_b, 0.0), write_s=t_w, write_tail_s=0.0,
                           busy_s=t_w, bookkeeping_s=t_b, bytes_by_mode=by_mode, wp=self._wp)
         return moved
+
+    def note_gather_finish(self, req_id) -> None:
+        """Record a finished request for the gather's completion stamp."""
+        if self._run_index is not None and self.gather_stamp:
+            self._run_index.note_finish(req_id)
+
+    def flush_run_index(self, *, up_to=None) -> Optional[str]:
+        """Publish the next index segment now; return its path or None."""
+        f = self._run_flusher
+        return None if f is None else f.flush_once(up_to=up_to)
 
     def close(self) -> None:
         """Flush, truncate and release every layer writer, then write the shared sidecar (idempotent)."""
@@ -627,6 +751,20 @@ def _close_write_path(drain, kind: str) -> None:
                 "leaving them open and writing the sidecar of the committed steps", kind,
                 drain.run_dir, join_s)
         drain._sidecar.write(drain.meta_path, drain.header)
+        fl = getattr(drain, "_run_flusher", None)
+        if fl is not None:
+            fl.stop()
+            try:
+                print(fl.summary_line(getattr(drain, "run_id", None)), flush=True)
+            except Exception:  # noqa: BLE001
+                logger.exception("%s aperture drain close (%s): the flusher summary could not be "
+                                 "written", kind, drain.run_dir)
+        gp = getattr(drain, "_gather_proc", None)
+        if gp is not None:
+            gp.close()
+        ri = getattr(drain, "_run_index", None)
+        if ri is not None:
+            ri.write(os.path.join(drain.run_dir, INDEX_NAME), drain.header)
         drain._closed = True
     finally:
         if got:
@@ -668,7 +806,8 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
                          shape=shape)
         self.per_request = bool(per_request)
         self.selective, self.selective_disabled_reason = _resolve_selective(
-            _drain_selective_enabled(), off_loop=True, per_request=self.per_request)
+            _drain_selective_enabled(), off_loop=True, per_request=self.per_request,
+            gather=self.gather)
         self.index: Optional[PerRequestIndex] = (
             index if index is not None
             else (PerRequestIndex() if self.per_request else None))
@@ -730,9 +869,14 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
 
     def enqueue_finish(self, req_id) -> None:
         """O(1) hand-off of a per-request FINISH."""
-        if not self.per_request:
+        if not (self.per_request or self.gather_stamp):
             return
         self._q.put(_Finish(str(req_id)))
+
+    def note_gather_finish(self, req_id) -> None:
+        """Queue the gather's completion stamp behind this request's rows."""
+        if self.gather_stamp:
+            self._q.put(_Finish(str(req_id)))
 
     def route_to_disk(self, req_id, dest, offload=None) -> None:
         """Route ``req_id`` to per-request disk staging, offloaded to ``dest`` when it finishes."""
@@ -866,7 +1010,10 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
                     break
                 try:
                     if isinstance(item, _Finish):
-                        self._finalize_finish_isolated(item.req_id)
+                        if self.per_request:
+                            self._finalize_finish_isolated(item.req_id)
+                        elif self._run_index is not None:
+                            self._run_index.note_finish(item.req_id)
                     else:
                         self._drain_item(item)
                     self._reclaim_settled_pending()
@@ -1041,6 +1188,10 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
             results = join_writes(futs)
             t4 = time.perf_counter()
             self._sidecar.commit(block)
+            # After join_writes: a segment must never name a row whose write has not returned.
+            if self._run_index is not None:
+                self._run_index.note_step(item.start_logical, item.n_rows, cursor,
+                                          plans if compacting else None, block)
         aperture.advance_drain(item.n_rows)
         by_mode: Dict[str, int] = {}
         busy = 0.0

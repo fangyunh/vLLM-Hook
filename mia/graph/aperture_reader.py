@@ -7,6 +7,8 @@ import numpy as np
 import torch
 
 from .aperture_metadata import read_qk_sidecar, read_sidecar
+from .aperture_trim import (TrimmedRegionError, is_reclaimed, refuse_trimmed_rows,  # noqa: F401
+                            trim_status, trimmed_floor_rows)
 
 
 def _file_row(e) -> int:
@@ -140,7 +142,14 @@ def load_multilayer_qk_aperture_artifact(run_dir: str, meta_path: str | None = N
     return out
 
 
-def load_multilayer_aperture_artifact(run_dir: str, meta_path: str | None = None) -> dict:
+def _note_reclaimed(out: dict | None, req_id, layer) -> None:
+    if out is not None:
+        out.setdefault(req_id, []).append(int(layer))
+
+
+def load_multilayer_aperture_artifact(run_dir: str, meta_path: str | None = None, *,
+                                      skip_trimmed: bool = False,
+                                      reclaimed_out: dict | None = None) -> dict:
     """Reconstruct ``{req_id: {layer: Tensor}}`` from an HS aperture dump and its sidecar."""
     if meta_path is None:
         meta_path = os.path.join(run_dir, "hs_aperture_meta.jsonl")
@@ -167,10 +176,26 @@ def load_multilayer_aperture_artifact(run_dir: str, meta_path: str | None = None
         return mm
 
     entries = [e for s in steps for e in s.entries]
+    floors = trimmed_floor_rows(run_dir)
+    lowest: dict = {}
+    if floors:
+        for e in entries:
+            k = (e.req_id, e.layer)
+            fr = _file_row(e)
+            if k not in lowest or fr < lowest[k]:
+                lowest[k] = fr
+    reclaimed_keys = {k for k, fr in lowest.items() if is_reclaimed(k[1], fr, floors)}
+    if reclaimed_keys and not skip_trimmed:
+        rid, layer = sorted(reclaimed_keys, key=lambda k: (str(k[0]), int(k[1])))[0]
+        refuse_trimmed_rows(run_dir, layer, lowest[(rid, layer)], floors)
+    for k in sorted(reclaimed_keys, key=lambda k: (str(k[0]), int(k[1]))):
+        _note_reclaimed(reclaimed_out, k[0], k[1])
     blocks: dict = {}
     for e in entries:
-        mm = _mm(e.layer)
         fr = _file_row(e)
+        if (e.req_id, e.layer) in reclaimed_keys:
+            continue
+        mm = _mm(e.layer)
         block = np.array(mm[fr: fr + e.n_rows])
         tensor = torch.from_numpy(block)
         if is_bf16:
@@ -184,6 +209,72 @@ def load_multilayer_aperture_artifact(run_dir: str, meta_path: str | None = None
         merged = tensors[0] if len(tensors) == 1 else torch.cat(tensors, dim=0)
         out.setdefault(req_id, {})[layer] = merged
 
+    return out
+
+
+def load_from_run_index(run_dir: str, index_path: str | None = None, *,
+                        skip_trimmed: bool = False, reclaimed_out: dict | None = None) -> dict:
+    """Reconstruct ``{req_id: {layer: Tensor}}`` from the run index instead of the sidecar."""
+    from .aperture_run_index import INDEX_NAME, read_run_index
+
+    if index_path is None:
+        index_path = os.path.join(run_dir, INDEX_NAME)
+    header, reqs = read_run_index(index_path)
+    return _reconstruct_from_runs(run_dir, header, reqs, skip_trimmed=skip_trimmed,
+                                  reclaimed_out=reclaimed_out)
+
+
+def load_from_run_segments(run_dir: str, *, only_complete: bool = False,
+                           skip_trimmed: bool = False, reclaimed_out: dict | None = None) -> dict:
+    """Reconstruct ``{req_id: {layer: Tensor}}`` from the mid-run index segment chain."""
+    from .aperture_run_index import read_run_segments
+
+    header, reqs, complete = read_run_segments(run_dir)
+    if only_complete:
+        reqs = {r: v for r, v in reqs.items() if r in complete}
+    return _reconstruct_from_runs(run_dir, header, reqs, skip_trimmed=skip_trimmed,
+                                  reclaimed_out=reclaimed_out)
+
+
+def _reconstruct_from_runs(run_dir: str, header: dict, reqs: dict, *, skip_trimmed: bool = False,
+                           reclaimed_out: dict | None = None) -> dict:
+    from .aperture_run_index import run_slices
+
+    np_dtype, is_bf16 = _np_dtype_for(header["dtype"])
+    row_shape = tuple(header["row_shape"])
+    floors = trimmed_floor_rows(run_dir)
+
+    mmaps: dict = {}
+
+    def _mm(layer: int):
+        mm = mmaps.get(layer)
+        if mm is None:
+            raw = os.path.join(run_dir, f"hs_layer_{layer}.raw")
+            mm = np.memmap(raw, dtype=np_dtype, mode="r").reshape((-1,) + row_shape)
+            mmaps[layer] = mm
+        return mm
+
+    out: dict = {}
+    for req_id, r in reqs.items():
+        for layer in r.layers:
+            slices = list(run_slices(r.runs))
+            if floors and slices and is_reclaimed(layer, min(a for a, _b, _s in slices), floors):
+                if not skip_trimmed:
+                    refuse_trimmed_rows(run_dir, layer, min(a for a, _b, _s in slices), floors)
+                _note_reclaimed(reclaimed_out, req_id, layer)
+                continue
+            mm = _mm(layer)
+            parts = [np.array(mm[a:b:st]) for a, b, st in slices]
+            if not parts:
+                block = np.array(mm[0:0])
+            elif len(parts) == 1:
+                block = parts[0]
+            else:
+                block = np.concatenate(parts, axis=0)
+            tensor = torch.from_numpy(block)
+            if is_bf16:
+                tensor = tensor.view(torch.bfloat16)
+            out.setdefault(req_id, {})[int(layer)] = tensor
     return out
 
 

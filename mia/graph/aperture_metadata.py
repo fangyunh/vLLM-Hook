@@ -178,6 +178,12 @@ class _Interner:
             self.json.append(json.dumps(v))
         return i
 
+    def values(self) -> list:
+        out: list = [None] * len(self.json)
+        for (_t, v), i in self._idx.items():
+            out[i] = v
+        return out
+
 
 class _LayerLists:
     """Interns a record's layers list, remembering each layer's JSON spelling and position."""
@@ -229,6 +235,14 @@ class HsSidecarLog:
 
     def has_entries(self) -> bool:
         return self.n_entries > 0
+
+    def req_ids(self) -> list:
+        """Interned req-id index -> req_id."""
+        return self._rid.values()
+
+    def layer_lists(self) -> list:
+        """Interned layer-list index -> that record's layer tuple, in fan-out order."""
+        return list(self._lay.lists)
 
     def _cursor_dict(self, cursor) -> dict:
         if isinstance(cursor, int):
