@@ -16,12 +16,11 @@ Then, in four steps:
 
 ```bash
 # 1. start a server for the worker you want (hidden_states | qk | steer)
-MIA_ALLOW_CUDAGRAPH=1 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
-    vllm serve Qwen/Qwen2-1.5B-Instruct --max-model-len 2048 --port 8770 \
-    --compilation-config '{"cudagraph_mode": "FULL"}'
+VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
+    vllm serve Qwen/Qwen2-1.5B-Instruct --max-model-len 2048 --port 8770
 
 # 2. confirm MIA loaded into it — this line comes from the server, not the client
-#    [graph/install_hs] HS aperture drain ON -> ...        (graph mode)
+#    [mia] capture mode: FULL_AND_PIECEWISE CUDA graph (chosen by default) -- ...
 
 # 3. run a demo against it, from the repository root
 python examples/demo_hiddenstate.py
@@ -34,54 +33,33 @@ prints the exact `vllm serve` line it needs, then exits.
 
 ### Where the captured data goes
 
-Two routes, and they put bytes in different places. Knowing which one you are on is the
-difference between finding your artifact and thinking nothing was captured.
-
-| Route | Location | Read it back with |
+| You call | Your data | Ready |
 |---|---|---|
-| in host memory (default for small artifacts) | nowhere on disk — it rides back on the response | `client.analyze(...)` |
-| disk (`save_to_disk=True`) | `<hook_dir>/<run_id>/`, default `hook_dir=/dev/shm/mia`; `tp_rank_<r>/` under TP | `client.analyze(...)`, which waits for the files |
-| FULL CUDA-graph capture | `$MIA_APERTURE_DIR/tp_rank_<r>/` — per-layer `hs_layer_<N>.raw` plus an `hs_aperture_meta.jsonl` sidecar | `mia.graph.aperture_reader.load_multilayer_aperture_artifact(run_dir)`, or `load_hs_aperture_tp(dir)` to union the ranks |
-| FULL CUDA-graph hidden states, per request (`MIA_APERTURE_PER_REQUEST=1`) | one directory per request under `$MIA_APERTURE_DIR/tp_rank_0/delivered/` (TP = 1) or `$MIA_APERTURE_DIR/delivered/` (TP > 1) | `mia.graph.aperture_gather.load_delivered(dir)` → `{request_id: {layer: Tensor}}`; a request appears a few seconds after it finishes |
+| `MiaLLM.generate(...)` | `out[i].probes`; `llm.analyze(probes=out[0].probes, ...)` | on first access to `probes`, which waits for that output (a timeout names the request) |
+| `MiaClient.generate(...)` | `response.probes`; `client.analyze(...)` | shortly after the response; `response.probes` waits for it |
+| either, with `save_to_disk=True, run_id=R` | `<hook_dir>/R/`; `analyze(run_id=R)`, or `mia.run_utils.load_and_merge_hs_cache` / `load_and_merge_qk_cache(hook_dir, R)` | offline: when `generate` returns; served: shortly after the response (`client.analyze()` waits for it) |
+| hidden-state files (CUDA graphs) | `mia.graph.aperture_gather.load_delivered(<capture dir>)` → `{request_id: {layer: Tensor}}` | lists only requests already delivered |
 
-**Set `MIA_APERTURE_DIR`.** Unset, it defaults to `./hs_aperture_dump` (or `./qk_aperture_dump`)
-**relative to the process's working directory** — and since everything here says to run from the
-repository root, that means inside your clone. An all-layers, all-tokens run writes tens of GB
-there. Both names are gitignored, so nothing gets committed, but a home filesystem with a quota
-will notice.
-
-In graph mode `analyze()` is **not** the way back to the shared aperture files: use the reader
-above. Each capturing rank logs its directory once at install (`... aperture drain ON -> <dir>`),
-so the server's own log tells you where it is going.
-
-**The one graph-mode route `analyze()` does read** is per-request delivery of Q/K
-(`MIA_APERTURE_PER_REQUEST=1`, which `serve_command()` emits with the graph flags): the drain
-demuxes a single request's rows and returns them on the response, and `client.analyze()` picks
-them up with no `run_id`. Per-request hidden states go to files instead (the table above),
-unless the server also sets `MIA_APERTURE_DELIVERY=drain`. It is per request, so it covers a demo
-that analyzes one response and not one that reduces over a whole run — and the router sends a
-payload past the RPC crossover to disk anyway, back to the layout `analyze()` cannot read.
-
-Which mode each demo asks for, and why:
-
-| Mode | Demos | Why |
-|---|---|---|
-| FULL graph | `demo_hiddenstate.py` | analyzes one response, and HS `last_token` is under the crossover |
-| FULL graph | `demo_actsteer*.py` | steering reads nothing back |
-| FULL graph | `demo_capture_aperture.py` | in-process, per-request delivery |
-| eager | `demo_attntracker.py`, `demo_attnlink.py` | one token of Q/K on a 40-layer 8B model is ~410 KB against a ~100 KB Q/K crossover, so the router always takes the disk route |
-| eager | `demo_corer.py`, `demo_halludetect.py`, `demo_scihal.py` | each reduces over several requests under one `run_id` |
-| eager | `profiling_longdecode/` | `hooks_on=both` over 128 decode steps, far past the crossover |
-
-Each one says so where it calls `require_server`, and prints the matching command.
+- **`hook_dir`** defaults to `/dev/shm/mia` for `MiaClient`, `~/.cache/_v1_qk_peeks` for `MiaLLM`.
+- **Capture dir** is `$MIA_APERTURE_DIR`, default `./hs_aperture_dump` (or `./qk_aperture_dump`)
+  in the working directory; the server log names it (`... aperture drain ON -> <dir>`). One live
+  engine per capture dir and worker kind: a second is refused.
+- **MIA cleans up neither directory**, and an all-layers, all-tokens run writes tens of GB: keep the
+  capture dir until you have read your probes, then delete it.
+- **Offline, `generate` can return before every output's data has landed.** The rest is finished
+  when the `MiaLLM` is dropped or Python exits normally; killing the process right after
+  `generate` can lose it.
+- A served capture sent without `save_to_disk` may land in `<hook_dir>/<run_id>/` instead of on the
+  response; `client.analyze()` reads it either way.
+- `load_delivered` keys start with the request's id (`response.id`, `output.request_id`).
+- Holding any one layer of an output's `probes` keeps that whole output's data in memory.
 
 ### Did it actually capture anything?
 
 A run that captured nothing looks like a fast run, so check rather than assume:
 
-- **The artifact exists.** `ls <hook_dir>/<run_id>/` on the disk route, or
-  `ls $MIA_APERTURE_DIR/tp_rank_0/` in graph mode — you want `hs_layer_*.raw` **and** the
-  `.jsonl` sidecar. A sidecar with no entries means the drain never saw a row.
+- **The data exists.** `probes` is not `None`, `ls <hook_dir>/<run_id>/` lists files on the disk
+  route, or `load_delivered(<capture dir>)` lists your request.
 - **The analyzer returned something.** `stats["hidden_states"]` empty is a failed capture, not
   an empty model.
 - **The counters moved.** Start the server with `MIA_PROFILE=1` and read its log at shutdown:
@@ -92,18 +70,17 @@ A run that captured nothing looks like a fast run, so check rather than assume:
 
 Add `--tensor-parallel-size N` to the server command. Capture shards across the ranks — hidden
 states by **layer** (rank `r` takes layers where `i % N == r`), Q/K by **head** — and each rank
-writes its own `tp_rank_<r>/`, which the reader unions:
+writes its own `tp_rank_<r>/`, which the readers merge:
 
 ```bash
-MIA_ALLOW_CUDAGRAPH=1 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
+VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
     vllm serve meta-llama/Llama-3.1-70B \
-    --max-model-len 2048 --port 8770 --tensor-parallel-size 4 \
-    --compilation-config '{"cudagraph_mode": "FULL"}'
+    --max-model-len 2048 --port 8770 --tensor-parallel-size 4
 ```
 
 ```python
-from mia.graph.aperture_reader import load_hs_aperture_tp
-per_request = load_hs_aperture_tp(os.environ["MIA_APERTURE_DIR"])   # refuses a gap or duplicate
+from mia.graph.aperture_gather import load_delivered
+per_request = load_delivered(os.environ["MIA_APERTURE_DIR"])   # refuses a missing or duplicate rank
 ```
 
 Three things to know before you try it:
@@ -123,19 +100,14 @@ demo's printed command is runnable as-is.
 ## 1. Start a server
 
 One server serves one worker kind, chosen at launch with `MIA_WORKER`
-(`hidden_states` · `qk` · `steer` — exact, no aliases). **Run it under FULL CUDA graphs**, which
-is what MIA exists for — capture that does not cost the engine its graphs:
+(`hidden_states` · `qk` · `steer` — exact, no aliases). MIA runs it under CUDA graphs by default
+— capture that does not cost the engine its graphs; leave `cudagraph_mode` unset
+([modes](../README.md#-supported-configurations)):
 
 ```bash
-MIA_ALLOW_CUDAGRAPH=1 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
-    vllm serve Qwen/Qwen2-1.5B-Instruct \
-    --max-model-len 2048 --port 8770 \
-    --compilation-config '{"cudagraph_mode": "FULL"}'
+VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
+    vllm serve Qwen/Qwen2-1.5B-Instruct --max-model-len 2048 --port 8770
 ```
-
-Both parts are needed. `MIA_ALLOW_CUDAGRAPH=1` is what stops MIA forcing the engine into eager,
-and the mode has to be named: MIA accepts `FULL` or `NONE`, and vLLM would otherwise resolve to
-one MIA refuses at startup.
 
 Eager is the opt-out, and the reason to reach for it is bit-exactness — graph-mode capture can
 move per-token logprobs slightly, eager cannot:
@@ -146,8 +118,11 @@ VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
     --max-model-len 2048 --port 8770 --enforce-eager
 ```
 
-Every demo prints the exact command it needs if nothing is listening, and prints the graph-mode
-one by default. Set `MIA_ALLOW_CUDAGRAPH=0` to have it print the eager form instead.
+The server exposes captured activations at `/v1/mia/delivered`: protect it with `--api-key KEY`
+(and `MiaClient(..., api_key=KEY)`), or turn it off with `MIA_DELIVERY_ROUTE=0` (hidden states
+are then read from files only).
+
+Every demo prints the exact command it needs if nothing is listening.
 
 ## 2. Skeleton
 
@@ -259,31 +234,23 @@ out   = llm.generate(prompt, sp, save_to_disk=False)
 stats = llm.analyze(probes=out[0].probes, analyzer_spec={...})
 ```
 
-Under `save_to_disk=True`, `out[0].probes` is always `None`.
+Under `save_to_disk=True`, `out[0].probes` is always `None`. When each is ready:
+[Where the captured data goes](#where-the-captured-data-goes).
 
 For raw tensors with no analysis, use the `hidden_states` analyzer with `reduce="none"` — it
 returns what was captured, unchanged.
 
 ## 6. Graph mode for an in-process demo
 
-The server runs under CUDA graphs by default (§1). For an **in-process** demo the env var
-still gates it, because the plugin forces eager without it:
-
-```bash
-MIA_ALLOW_CUDAGRAPH=1 python examples/my_demo.py
-```
-
-An in-process demo must also pass `enforce_eager=False` and
-`compilation_config={"cudagraph_mode": "FULL"}` — MIA accepts `FULL` or `NONE` and refuses what
-vLLM would otherwise resolve to. Without the env var the plugin forces eager regardless. See
-`demo_capture_aperture.py`.
+`MiaLLM` runs under CUDA graphs by default too; pass `enforce_eager=True` for eager. Leave
+`cudagraph_mode` unset. See `demo_capture_aperture.py`.
 
 ## 7. Gotchas
 
 - Set the `mp.set_start_method` / env lines **before** importing `vllm`.
 - Run from the repo root — config and vector paths are relative to it.
-- In-process: `enforce_eager=True` unless you enabled graph mode. Server demos are graph-mode
-  by default; `MIA_ALLOW_CUDAGRAPH=0` gets you the eager command instead.
+- Graph mode is the default, in-process and served; `enforce_eager=True` / `--enforce-eager`
+  opts out.
 - Call `llm.llm_engine.reset_prefix_cache()` between prompts if you capture the same prefix twice.
 - Profiler counters need `MIA_PROFILE=1`; without it they are no-ops.
 - Performance levers: `from mia.optimizations import describe; print(describe())`.
@@ -299,15 +266,14 @@ Run every demo from the repo root, e.g. `python examples/demo_hiddenstate.py`. A
 - **`demo_actsteer_serve.py`** talks to a running server. Start it in another terminal first:
 
   ```bash
-  MIA_ALLOW_CUDAGRAPH=1 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=steer \
-      vllm serve microsoft/Phi-3-mini-4k-instruct --max-model-len 2048 --port 8770 \
-      --compilation-config '{"cudagraph_mode": "FULL"}'
+  VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=steer \
+      vllm serve microsoft/Phi-3-mini-4k-instruct --max-model-len 2048 --port 8770
   ```
 
   Each request carries its own steer config in `extra_body["vllm_xargs"]["steer"]`, JSON-encoded,
   because `vllm_xargs` only accepts scalar values.
-- **`demo_capture_aperture.py`** runs hidden-state capture under FULL CUDA graphs (it sets
-  `MIA_ALLOW_CUDAGRAPH=1` itself). Pick the model with `MIA_DEMO_MODEL`:
+- **`demo_capture_aperture.py`** runs hidden-state capture in-process under MIA's default CUDA
+  graphs. Pick the model with `MIA_DEMO_MODEL`:
 
   ```bash
   MIA_DEMO_MODEL=Qwen/Qwen2-1.5B-Instruct python examples/demo_capture_aperture.py

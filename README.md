@@ -28,8 +28,8 @@ This includes dynamic analysis of:
   - Easy to define new hooks, analyzers, and behaviors  
 - **Introspection** of model internals  
 - **Interventions** (activation steering, attention control, etc.)  
-- **FULL CUDA-graph support** — capture and steering stay graph-safe, no fallback to eager
-  ([one measured caveat on `logprobs`](docs/configs.md))  
+- **CUDA graphs by default** — capture and steering keep the engine's CUDA graphs
+  ([limits](docs/configs.md#limits))  
 - **Example applications**:  
   - Safety guardrails  
   - Reranking  
@@ -55,7 +55,7 @@ Capture saturates at rate 32; steering holds to 64 (+5.2 %).
 
 ## 🧩 Supported Configurations
 
-MIA targets the **server path** (`vllm serve` + `MiaClient`) under FULL CUDA graphs. Each use case
+MIA targets the **server path** (`vllm serve` + `MiaClient`) under CUDA graphs. Each use case
 (attention tracker, activation steering, hidden-state extraction, …) runs across a Cartesian
 product of storage (`rpc` / `disk`) and disk format (`pt` / `safetensors`). See
 [`docs/configs.md`](docs/configs.md) for code snippets showing how to select each config.
@@ -64,8 +64,14 @@ product of storage (`rpc` / `disk`) and disk format (`pt` / `safetensors`). See
 on one machine, and what [`examples/demo_capture_aperture.py`](examples/demo_capture_aperture.py)
 uses.
 
-MIA requires vLLM's **V2 model runner** and accepts `cudagraph_mode` `FULL` or `NONE`; it refuses
-anything else at engine-config time rather than installing and silently capturing nothing.
+MIA requires vLLM's **V2 model runner** and runs every worker under CUDA graphs by default:
+
+- default `cudagraph_mode` is `FULL_AND_PIECEWISE`: FULL graphs for decode, piecewise graphs for
+  mixed steps;
+- `FULL_DECODE_ONLY` is accepted, and is used when the compilation mode is not the default;
+- `FULL` is accepted with a warning: it can compute wrong attention on FlashAttention 3 (vLLM 0.29);
+- `enforce_eager=True` (`vllm serve --enforce-eager`) opts out; other modes (e.g. `PIECEWISE`) are
+  refused.
 
 Tensor parallelism (TP > 1) is supported for `capture_hs`, `capture_qk` and `steer`: each capturing
 rank writes its own `tp_rank_<r>/` directory and MIA's loaders merge them. Pipeline parallelism is
@@ -116,9 +122,8 @@ MIA installs into the **server**, so a demo talks to a `vllm serve` you start yo
 server serves one worker kind at a time, selected with `MIA_WORKER`.
 
 ```bash
-MIA_ALLOW_CUDAGRAPH=1 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
-    vllm serve Qwen/Qwen2.5-3B-Instruct \
-    --max-model-len 2048 --port 8770 --compilation-config '{"cudagraph_mode": "FULL"}'
+VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
+    vllm serve Qwen/Qwen2.5-3B-Instruct --max-model-len 2048 --port 8770
 ```
 
 Then, from the repo root:
@@ -129,7 +134,8 @@ python examples/demo_hiddenstate.py
 
 Every demo prints the exact `vllm serve` command it needs if nothing is listening, so you never
 have to guess. [`examples/README.md`](examples/README.md) is the walkthrough — getting started,
-where captured data lands, how to confirm a capture actually happened, and tensor parallelism.
+[where captured data lands](examples/README.md#where-the-captured-data-goes), how to confirm a
+capture actually happened, and tensor parallelism.
 For the full list of use cases see [`docs/use_cases/`](docs/use_cases/README.md).
 
 ### Use cases

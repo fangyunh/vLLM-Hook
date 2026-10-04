@@ -9,7 +9,7 @@ This document enumerates the supported configs and how to invoke each from user 
 | Axis | Values | How it's selected |
 |---|---|---|
 | **Execution path** | `serve` (`vllm serve` + `MiaClient`) | — |
-| **Storage** | `rpc` (in-memory via `collective_rpc`) · `disk` (artifact under `/dev/shm/mia/<run_id>/`) · `shm` (legacy shared memory, hidden states-only) | per-request `extra_args["save_to_disk"]` (SHM via `MIA_USE_SHM=1`) |
+| **Storage** | `rpc` (on the output: `.probes`) · `disk` (artifact under `<hook_dir>/<run_id>/`) · `shm` (legacy shared memory, hidden states-only) | per-request `extra_args["save_to_disk"]` (SHM via `MIA_USE_SHM=1`) |
 | **Disk format** | `pt` (`torch.save`) · `st` (safetensors ) | `MIA_USE_SAFETENSORS={0,1}` |
 
 > **Async save note:** the old per-request `sync`/`async` save-mode axis (`MIA_ASYNC_SAVE`) has been removed. It is superseded by the **writer process** (`MIA_WRITER_PROCESS`, default **on**) — a persistent child process that serializes and writes disk artifacts off the engine GIL (see the `writer_process` lever in `optimizations.py`). Unlike the old knob, this isn't a per-request axis you opt into: it's a process-wide default that's already on, so it does not appear as a selectable dimension in the coverage matrices below. It runs on **every TP rank that writes artifacts**: vLLM's daemonic TP workers used to fall back to the in-process save. Each rank logs its mode. The child exits when its worker dies (`MIA_CHILD_PARENT_POLL_S`, default `1.0` s, is how often an idle child checks).
@@ -67,9 +67,9 @@ The same code shape covers all four use cases — only `worker_name` / `analyzer
 
 ### Driving an engine in-process (`MiaLLM`)
 
-`MiaLLM` builds a vLLM engine in your own process. It is how every demo under
-`examples/` runs, and the quickest way to exercise capture under FULL CUDA graphs on
-one machine — not a deployment path. For serving, use `vllm serve` with `MiaClient` below.
+`MiaLLM` builds a vLLM engine in your own process, under CUDA graphs by default
+(`enforce_eager=True` opts out) — the quickest way to run capture on one machine, not a
+deployment path. For serving, use `vllm serve` with `MiaClient` below.
 
 ```python
 import torch
@@ -119,21 +119,22 @@ MIA_USE_SHM=1           # legacy shared-memory fast path (hidden states + last_t
 
 ### Serve (`vllm serve` + `MiaClient` / openai client)
 
-Start the server with `MIA_WORKER` set to the worker that matches your use case. FULL CUDA
-graphs are the expected setting; swap the two graph flags for `--enforce-eager` only when you
-need bit-exact logprobs:
+Start the server with `MIA_WORKER` set to the worker that matches your use case. It runs under
+CUDA graphs by default; add `--enforce-eager` only when you need bit-exact logprobs:
 
 ```bash
 # probes (attention tracker / CoRer / hidden states):
-MIA_ALLOW_CUDAGRAPH=1 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=qk \
-  vllm serve ibm-granite/granite-3.1-8b-instruct \
-    --max-model-len 2048 --port 8770 --compilation-config '{"cudagraph_mode": "FULL"}'
+VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=qk \
+  vllm serve ibm-granite/granite-3.1-8b-instruct --max-model-len 2048 --port 8770
 
 # activation steering:
-MIA_ALLOW_CUDAGRAPH=1 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=steer \
-  vllm serve microsoft/Phi-3-mini-4k-instruct \
-    --max-model-len 2048 --port 8770 --compilation-config '{"cudagraph_mode": "FULL"}'
+VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=steer \
+  vllm serve microsoft/Phi-3-mini-4k-instruct --max-model-len 2048 --port 8770
 ```
+
+The server exposes captured activations at `/v1/mia/delivered`: protect it with `--api-key KEY`
+(and `MiaClient(..., api_key=KEY)`), or turn it off with `MIA_DELIVERY_ROUTE=0` (hidden states
+are then read from files only).
 
 For probe use cases, `MiaClient` mirrors the in-process `MiaLLM` API:
 
@@ -246,9 +247,9 @@ prompt length, the captured layers/heads and the capture mode, then compares two
 
 The threshold is **solved** from those two, per worker kind, rather than written down:
 **HS 539.6 KB, QK 100.5 KB** (`run_utils.rpc_disk_crossover_kb`). QK crosses five times earlier
-than HS because its RPC ship is five times dearer per KB. In practice: a `last_token` HS
-capture (256 KB at Llama-3.1-8B, all 32 layers) comes back over **RPC**; an `all_tokens` capture,
-and QK at almost any size, go to **disk**.
+than HS because its RPC ship is five times dearer per KB. In practice QK at almost any size goes
+to **disk**; hidden states come back on `response.probes` under CUDA graphs, and in eager only a
+`last_token` capture (256 KB at Llama-3.1-8B, all 32 layers) does. `client.analyze()` reads either.
 
 > **The one number that is not measured, stated plainly.** `MIA_ROUTER_DISK_HANDOFF_MS` (20.0) is
 > the engine-loop cost of handing a request to the disk route. No bench in this repo has timed it,
@@ -265,7 +266,7 @@ FILE"), not a hint, and MIA never overrides it.
 | env var | default | effect |
 |---|---|---|
 | `MIA_STORAGE_ROUTER` | `on` | `0` disables the router; the caller's `save_to_disk` (or `MIA_SINK`) then decides alone |
-| `MIA_ROUTER_T_RPC` / `MIA_ROUTER_T_ANALYZE` | derived (HS 552517 B, QK 102949 B) | override the crossover outright, in bytes, for the in-drain per-request route (Q/K, or hidden states with `MIA_APERTURE_DELIVERY=drain`). `T_ANALYZE` takes the same derived number because it always did; its true basis is different (how big an artifact a reducible analyzer should hold in host RAM while it reduces), and nothing here measures that |
+| `MIA_ROUTER_T_RPC` / `MIA_ROUTER_T_ANALYZE` | derived (HS 552517 B, QK 102949 B) | override the crossover outright, in bytes, for Q/K under CUDA graphs. `T_ANALYZE` takes the same derived number because it always did; its true basis is different (how big an artifact a reducible analyzer should hold in host RAM while it reduces), and nothing here measures that |
 | `MIA_ROUTER_RPC_INTERCEPT_MS` | `5.0` | the RPC model's fixed term |
 | `MIA_ROUTER_RPC_SLOPE_MS_PER_KB_HS` / `_QK` | `0.03` / `0.157` | the RPC model's per-KB term |
 | `MIA_ROUTER_DISK_HANDOFF_MS` | `20.0` | the disk model's fixed term (**not measured**, see above) |
@@ -354,10 +355,10 @@ Llama-3.1-70B at TP4 rather than 10 GiB.
 
 ---
 
-## FULL-graph capture aperture: how the raw files are written
+## Graph-mode capture aperture: how the raw files are written
 
-In FULL-graph (buffer/aperture) mode the drain consumer thread of each capturing rank writes the
-per-layer raw files and the sidecar itself; the writer process idles. Two env vars choose how:
+In graph mode the drain consumer thread of each capturing rank writes the per-layer raw files and
+the sidecar itself; the writer process idles. Two env vars choose how:
 
 | env var | default | values |
 |---|---|---|
@@ -367,16 +368,16 @@ per-layer raw files and the sidecar itself; the writer process idles. Two env va
 
 All four modes write the same bytes: the raw files and the sidecar are byte-identical, and the
 readers are unchanged. The synchronous drain (`MIA_APERTURE_SYNC_DRAIN=1`) writes buffered only.
-The in-drain per-request route (`MIA_APERTURE_DELIVERY=drain`) writes no shared raw files, so the
-per-file decision does not apply to it -- its per-request DISK staging takes the same writer in
-buffered mode (`legacy` for an A/B; an explicit `direct` is refused there).
+Q/K capture writes no shared raw files, so the per-file decision does not apply to it -- its
+per-request DISK staging takes the same writer in buffered mode (`legacy` for an A/B; an explicit
+`direct` is refused there).
 `MIA_APERTURE_MMAP=1` is accepted only with `legacy`. Each capturing rank logs one
 `... aperture write path (tp_rank r): ...` line at install, naming the mode per tensor kind, the
 predicted write size and why it went that way, the thread count and the block size.
 
 ---
 
-## FULL-graph HS capture under tensor parallelism: which rank captures which layer
+## Graph-mode HS capture under tensor parallelism: which rank captures which layer
 
 The residual stream is replicated on every TP rank, so any rank's copy of a layer IS the layer and
 HS shards by LAYER: rank `r` captures the 0-based decoder layers `i` with `i % tp_size == r` into
@@ -390,61 +391,21 @@ its own `tp_rank_<r>/`, and each rank's aperture, drain thread and writer cover 
 
 `MIA_APERTURE_GPU_BYTES` is a PER-RANK budget: one max-token step of HS now costs
 `max_num_batched_tokens × ceil(L / tp) × hidden × 2` on a rank (2.5 GiB for Llama-3.1-70B at TP4,
-not 10 GiB). Read a run back with `mia.graph.aperture_reader.load_hs_aperture_tp(MIA_APERTURE_DIR)`,
-which unions the rank dirs and refuses a gap or a duplicate. TP = 1 is unchanged, byte for byte.
+not 10 GiB). Read it back as usual: `probes`, `analyze()` and `load_delivered(MIA_APERTURE_DIR)`
+merge the ranks. TP = 1 is unchanged, byte for byte.
 
-## Reading a capture back: which route you are on
+## Reading your data back
 
-Capture always happens; where the bytes land, and what can read them, depends on the route.
+Where each call puts its data, how to read it and when it is ready:
+[examples/README.md](../examples/README.md#where-the-captured-data-goes). In short:
+`out[i].probes` / `llm.analyze()` offline, `response.probes` / `client.analyze()` served,
+`<hook_dir>/<run_id>/` with `save_to_disk`, and `load_delivered(<capture dir>)` for the
+hidden-state files.
 
-| Route | Where | `analyze()` reads it? |
-|---|---|---|
-| RPC (small artifact, no `save_to_disk`) | on the response | yes — `client.analyze(...)` with no `run_id` |
-| disk, eager (`save_to_disk=True`) | `<hook_dir>/<run_id>/*.pt` or `*.safetensors` | yes — `client.analyze(run_id=...)` |
-| hidden states, FULL graph, per-request (`MIA_APERTURE_PER_REQUEST=1`) | one directory per request under the delivery root, below | **no** — `load_delivered` |
-| disk, FULL graph | `<hook_dir>/<run_id>/hs_layer_<N>.raw` + `hs_aperture_meta.jsonl` | **no** |
-| shared aperture, FULL graph (no per-request delivery) | `$MIA_APERTURE_DIR/tp_rank_<r>/` | **no** |
+## Limits
 
-The last two are the aperture layout. Nothing in `analyze()` reads it — use
-`mia.graph.aperture_reader` (`load_multilayer_aperture_artifact`, or `load_hs_aperture_tp` /
-`load_qk_aperture_tp` to union the ranks).
-
-### Hidden states per request, under FULL graphs
-
-With `MIA_APERTURE_PER_REQUEST=1`, each request's hidden states are written to files while the
-server runs; they are **not** on the response. The delivery root is `MIA_APERTURE_GATHER_DIR` if
-set, else `$MIA_APERTURE_DIR/tp_rank_0/delivered/` at TP = 1 and `$MIA_APERTURE_DIR/delivered/`
-at TP > 1.
-
-```python
-from mia.graph.aperture_gather import load_delivered
-
-data = load_delivered(root)   # {request_id: {layer: Tensor}}, ranks merged at TP > 1
-```
-
-A request appears a few seconds after it finishes, once all of its layers are on disk; requests
-still in flight are skipped. Keys are vLLM's internal request ids: the id vLLM returned for the
-request (`response.id`, `output.request_id`) plus `-<suffix>`; `req_ids=[...]` reads only those.
-Read the delivered files, not the shared `hs_layer_*.raw`: those are reclaimed as requests are
-delivered.
-
-| env var | default | effect |
-|---|---|---|
-| `MIA_APERTURE_DELIVERY` | `auto` | `drain` returns hidden states on the response instead (the route `analyze()` reads). `hybrid` delivers files even without `MIA_APERTURE_PER_REQUEST`. Anything else is refused |
-| `MIA_APERTURE_GATHER_DIR` | unset | the delivery root; ranks go in `tp_rank_<r>/` under it at TP > 1 |
-| `MIA_APERTURE_GATHER_TRIM` | `1` | `0` keeps the shared layer files whole, at twice the disk use |
-
-Consequences worth knowing before you design around it:
-
-- `MIA_APERTURE_PER_REQUEST=1` is what makes a graph-mode Q/K capture reach `analyze()`: the
-  drain demuxes one request's rows and returns them on the response. Hidden states take that
-  route only with `MIA_APERTURE_DELIVERY=drain`. `serve_command()` emits the flag with the graph
-  flags.
-- It is **per request**, so a flow that reduces over several requests under one `run_id` cannot
-  use it.
-- `save_to_disk=True` forces the disk transport, which under graphs is the layout `analyze()`
-  cannot read. Omit it and let the router choose if you want the rows on the response.
-- Past the RPC crossover (`MIA_ROUTER_T_RPC`) the router takes the disk route regardless.
-
-So a capture-then-`analyze()`-a-run flow belongs in eager mode today. Graph mode covers
-steering, capture whose bytes you read with the aperture reader, and single-response analysis.
+- Graph-mode capture can move per-token logprobs slightly; `enforce_eager=True`
+  (`--enforce-eager`) is bit-exact.
+- Q/K capture turns prefix caching off unless you set it.
+- Score capture, and Q/K with explicit prefix caching or DP > 1, run eager.
+- Graph steering: at most `MIA_STEER_VMAX` (16) distinct vectors per engine; more are refused.
