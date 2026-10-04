@@ -8,7 +8,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -296,6 +296,7 @@ class GatherPass:
         self.n_workers = int(n_workers)
         self.batch_bytes = int(batch_bytes) if batch_bytes is not None else gather_batch_bytes()
         self.final_seen = False
+        self.on_batch: Optional[Callable[[], None]] = None
         self.run_id = None if run_id is None else str(run_id)
         self._cursor = ChainCursor(expect_run_id=self.run_id)
         self._reqs: Dict[str, _ReqState] = {}
@@ -450,6 +451,8 @@ class GatherPass:
             self.final_seen = True
             self.close()
         self._maybe_trim()
+        if self.on_batch is not None:
+            self.on_batch()
 
     def _scatter_window(self, lo: int, hi: int,
                         merged: Dict[str, Tuple[Tuple[int, ...], list]]) -> None:
@@ -731,7 +734,33 @@ def _foreign_note(req_dir: str, run_ids) -> str:
     return " (only a previous launch's delivery is here)"
 
 
-def load_delivery(req_dir: str, *, allow_shard: bool = False, run_ids=None) -> dict:
+_IOV_MAX = 1024
+
+
+def _read_into(path: str, bufs, want: int) -> None:
+    views = [memoryview(b).cast("B") for b in bufs]
+    if sum(len(v) for v in views) != want:
+        raise GatherError(f"{path}: {sum(len(v) for v in views)} B of buffers for {want} B")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        pos, i = 0, 0
+        while i < len(views):
+            n = os.preadv(fd, views[i:i + _IOV_MAX], pos)
+            if n <= 0:
+                raise GatherError(f"{path}: SHORT -- {pos} of the {want} B its manifest claims "
+                                  f"could be read. Refusing.")
+            pos += n
+            while n:
+                if n >= len(views[i]):
+                    n -= len(views[i])
+                    i += 1
+                else:
+                    views[i], n = views[i][n:], 0
+    finally:
+        os.close(fd)
+
+
+def load_delivery(req_dir: str, *, allow_shard: bool = False, run_ids=None, into=None) -> dict:
     """One request's delivered artifact as ``{layer: Tensor}``, or :class:`GatherError`."""
     mans = read_manifests(req_dir, run_ids)
     if not mans:
@@ -797,6 +826,7 @@ def load_delivery(req_dir: str, *, allow_shard: bool = False, run_ids=None) -> d
     for d in row_shape:
         width *= d
     row_bytes = width * np_dtype.itemsize
+    sink = into(list(layers_all), n_rows, row_shape, dtype_name) if into is not None else None
     out: dict = {}
     for L in layers_all:
         p = os.path.join(req_dir, f"hs_layer_{L}.raw")
@@ -812,6 +842,11 @@ def load_delivery(req_dir: str, *, allow_shard: bool = False, run_ids=None) -> d
                 f"{p}: the manifest claims {n_rows} rows ({want} B) but the file is {size} B -- "
                 f"{how}. A manifest is written only after every row it claims is in the file, so "
                 f"this artifact is not the one the manifest describes. Refusing.")
+        if sink is not None:
+            value, bufs = sink[int(L)]
+            _read_into(p, bufs, want)
+            out[int(L)] = value
+            continue
         with open(p, "rb") as f:
             raw = f.read(want)
         arr = np.frombuffer(raw, dtype=np_dtype).reshape((n_rows,) + row_shape)
@@ -823,7 +858,7 @@ def load_delivery(req_dir: str, *, allow_shard: bool = False, run_ids=None) -> d
 
 
 def _load_delivered_one_rank(out_dir: str, *, allow_shard: bool = False, req_ids=None,
-                             run_ids=None) -> dict:
+                             run_ids=None, into=None) -> dict:
     out: dict = {}
     if not os.path.isdir(out_dir):
         return out
@@ -836,7 +871,7 @@ def _load_delivered_one_rank(out_dir: str, *, allow_shard: bool = False, req_ids
             named = str(mans[0]["req_id"])
             if named != rid:
                 raise GatherError(f"{d}: its manifest names request {named!r}, not {rid!r}")
-            out[rid] = load_delivery(d, allow_shard=allow_shard, run_ids=run_ids)
+            out[rid] = load_delivery(d, allow_shard=allow_shard, run_ids=run_ids, into=into)
         return out
     for name in sorted(os.listdir(out_dir)):
         d = os.path.join(out_dir, name)
@@ -848,7 +883,7 @@ def _load_delivered_one_rank(out_dir: str, *, allow_shard: bool = False, req_ids
         rid = str(mans[0]["req_id"])
         if req_ids is not None and rid not in req_ids:
             continue
-        out[rid] = load_delivery(d, allow_shard=allow_shard, run_ids=run_ids)
+        out[rid] = load_delivery(d, allow_shard=allow_shard, run_ids=run_ids, into=into)
     return out
 
 
@@ -1002,18 +1037,19 @@ def _dup_message(rid: str, a: str, b: str) -> str:
             f"used one id. Refusing to pick one; read one root explicitly.")
 
 
-def load_delivered(out_dir, *, expected_layers=None, req_ids=None, run_ids=None) -> dict:
+def load_delivered(out_dir, *, expected_layers=None, req_ids=None, run_ids=None,
+                   into=None) -> dict:
     """Every complete delivery under ``out_dir`` as ``{req_id: {layer: Tensor}}``, TP-aware."""
     roots = _resolve_all(out_dir)
     want = _as_id_set(req_ids)
     if len(roots) == 1:
         return _load_delivered_root(roots[0], expected_layers=expected_layers, req_ids=want,
-                                    run_ids=run_ids)
+                                    run_ids=run_ids, into=into)
     out: dict = {}
     where: dict = {}
     for root in roots:
         for rid, art in _load_delivered_root(root, expected_layers=expected_layers,
-                                             req_ids=want, run_ids=run_ids).items():
+                                             req_ids=want, run_ids=run_ids, into=into).items():
             if rid in where:
                 raise GatherError(_dup_message(rid, where[rid], root))
             out[rid] = art
@@ -1022,12 +1058,13 @@ def load_delivered(out_dir, *, expected_layers=None, req_ids=None, run_ids=None)
 
 
 def _load_delivered_root(out_dir: str, *, expected_layers=None, req_ids=None,
-                         run_ids=None) -> dict:
+                         run_ids=None, into=None) -> dict:
     from .tp_shard import check_hs_shard_set, merge_hs_layer_maps
 
     ranks = discover_delivery_ranks(out_dir)
     if not ranks:
-        return _load_delivered_one_rank(out_dir, req_ids=_as_id_set(req_ids), run_ids=run_ids)
+        return _load_delivered_one_rank(out_dir, req_ids=_as_id_set(req_ids), run_ids=run_ids,
+                                        into=into)
     want_ids = _as_id_set(req_ids)
     shards = _rank_shards(ranks)
     tp_size, num_layers = shards[0].tp_size, shards[0].num_layers
@@ -1035,7 +1072,7 @@ def _load_delivered_root(out_dir: str, *, expected_layers=None, req_ids=None,
     check_hs_shard_set(shards, _expected_ranks_for(whole, tp_size, num_layers)
                        if whole is not None else None)
     per_rank = {sh.tp_rank: _load_delivered_one_rank(d, allow_shard=True, req_ids=want_ids,
-                                                     run_ids=run_ids)
+                                                     run_ids=run_ids, into=into)
                 for sh, (_r, d) in zip(shards, ranks)}
     present = {sh.tp_rank: sh for sh in shards}
     seen: dict = {}
@@ -1043,6 +1080,18 @@ def _load_delivered_root(out_dir: str, *, expected_layers=None, req_ids=None,
         for rid, layers in art.items():
             if layers:
                 seen.setdefault(str(rid), set()).add(int(r))
+    if into is not None:
+        dirs = {int(sh.tp_rank): d for sh, (_r, d) in zip(shards, ranks)}
+        for rid, have in sorted(seen.items()):
+            rows = {r: max((int(m["n_rows"]) for m in read_manifests(
+                os.path.join(dirs[r], req_dir_name(rid)), run_ids)), default=0)
+                for r in sorted(have)}
+            if len(set(rows.values())) > 1:
+                from .tp_shard import TPShardError
+                raise TPShardError(
+                    f"req {rid!r}: its layers hold different row counts across ranks (rank -> "
+                    f"rows {rows}); every layer of a request captures the same tokens, so the "
+                    f"ranks captured different steps")
     for rid, have in sorted(seen.items()):
         ask = expected_layers.get(rid) if isinstance(expected_layers, dict) else whole
         want = set(_expected_ranks_for(ask, tp_size, num_layers)).intersection(present)
@@ -1209,6 +1258,18 @@ def poll_delivered(roots, req_ids, expected_layers=None, run_ids=None):
     return None, {rid: msg for rid, (msg, _w) in p.pending.items()}, p.mark()
 
 
+def delivery_backlog(roots, req_ids, expected_layers=None, run_ids=None):
+    """``({req_id: what it lacks}, mark)`` for ids not fully delivered; ``mark`` tracks progress."""
+    ids = list(dict.fromkeys(str(x) for x in req_ids))
+    if not ids:
+        return {}, ()
+    given = [os.path.abspath(os.fspath(r)) for r in _as_paths(roots)]
+    p = _poll(roots, ids, expected_layers, given, run_ids, load=False)
+    if p.got is not None:
+        return {}, ()
+    return {rid: msg for rid, (msg, _w) in p.pending.items()}, p.mark()
+
+
 def wait_delivered(roots, req_ids, *, expected_layers=None, timeout_s=None, run_ids=None,
                    load: bool = True) -> dict:
     """Poll until every id in ``req_ids`` is delivered, then load exactly those ids."""
@@ -1261,7 +1322,7 @@ def _gather_child(ctl_q, run_dir: str, out_dir: str, worker: int, n_workers: int
                   batch_bytes: int, poll_s: float, trim: bool = True,
                   trim_chunk: int = 0, trim_lag: int = 0, tp_rank: Optional[int] = None,
                   tp_size: int = 1, num_layers: Optional[int] = None,
-                  run_id: Optional[str] = None) -> None:
+                  run_id: Optional[str] = None, progress=None) -> None:
     import queue as _queue
 
     for k, v in _CHILD_THREAD_ENV.items():
@@ -1274,6 +1335,10 @@ def _gather_child(ctl_q, run_dir: str, out_dir: str, worker: int, n_workers: int
                    trim=trim, trim_chunk=trim_chunk or None, trim_lag=trim_lag if trim_lag >= 0
                    else None, tp_rank=tp_rank, tp_size=tp_size, num_layers=num_layers,
                    run_id=run_id)
+    if progress is not None:
+        def _bump():
+            progress.value += 1
+        p.on_batch = _bump
     stop = False
     try:
         while not stop:
@@ -1333,6 +1398,7 @@ class ApertureGatherProcess:
         self.parent_daemonic = False
         self._procs: list = []
         self._qs: list = []
+        self._progress: list = []
         self._closed = False
 
     @classmethod
@@ -1378,15 +1444,17 @@ class ApertureGatherProcess:
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             for w in range(self.n_workers):
                 q = ctx.Queue()
+                done = ctx.Value("q", 0, lock=False)
                 proc = ctx.Process(target=_gather_child,
                                    args=(q, self.run_dir, self.out_dir, w, self.n_workers,
                                          self.batch_bytes, self.poll_s, self.trim,
                                          self.trim_chunk, self.trim_lag, self.tp_rank,
-                                         self.tp_size, self.num_layers, self.run_id),
+                                         self.tp_size, self.num_layers, self.run_id, done),
                                    daemon=True, name=f"mia-gather-{w}")
                 self.parent_daemonic = start_child(proc)
                 self._qs.append(q)
                 self._procs.append(proc)
+                self._progress.append(done)
         finally:
             for k, v in saved.items():
                 if v is None:
@@ -1424,15 +1492,28 @@ class ApertureGatherProcess:
                 q.put(None, timeout=10)
             except Exception:  # noqa: BLE001
                 pass
-        for p in self._procs:
-            try:
-                p.join(timeout=timeout)
-            except Exception:  # noqa: BLE001
-                pass
+        start = last = time.monotonic()
+        seen, why = None, ""
+        while any(p.is_alive() for p in self._procs):
+            now = time.monotonic()
+            mark = tuple(v.value for v in self._progress)
+            if mark != seen:
+                seen, last = mark, now
+            if now - start >= DELIVERY_HARD_CAP_S:
+                why = f"reached the {DELIVERY_HARD_CAP_S:g} s hard cap"
+                break
+            if now - last >= timeout:
+                why = f"made no progress for {timeout:g} s"
+                break
+            for p in self._procs:
+                try:
+                    p.join(timeout=0.2)
+                except Exception:  # noqa: BLE001
+                    pass
         for p in self._procs:
             if p.is_alive():
-                logger.error("aperture gather child %s did not stop within %.0f s; terminating "
-                             "(its unflushed deliveries are lost)", p.pid, timeout)
+                logger.error("aperture gather child %s %s; terminating (its unflushed deliveries "
+                             "are lost)", p.pid, why)
                 try:
                     p.terminate()
                 except Exception:  # noqa: BLE001
@@ -1442,7 +1523,7 @@ class ApertureGatherProcess:
 __all__ = ["ApertureGatherProcess", "BATCH_BYTES_ENV", "DELIVER_ENV", "DELIVERY_FORMAT",
            "DEFAULT_WORKERS", "DIR_ENV", "GATHER_TRIM_ENV", "GatherError", "GatherPass",
            "DELIVERY_TIMEOUT_ENV", "DeliveryTimeoutError", "NoDeliveryError", "delivery_root",
-           "delivery_timeout_s",
+           "delivery_backlog", "delivery_timeout_s",
            "wait_delivered",
            "GatherWorkers", "MANIFEST_GLOB", "resolve_gather_workers",
            "POLL_MS_ENV", "RANK_MARKER_FORMAT", "RANK_MARKER_NAME", "WORKERS_ENV",

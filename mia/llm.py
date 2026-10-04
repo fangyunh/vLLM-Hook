@@ -325,8 +325,8 @@ class MiaLLM:
             if len(outputs) > 1 and any(s is not None for s in srcs):
                 def merged():
                     with PROF.timed("miallm.merge_probes"):
-                        return _dequantized(_merge_probes(
-                            [s() if s is not None else {} for s in srcs]))
+                        parts = [(s() if s is not None else None) or {} for s in srcs]
+                        return _dequantized(_merge_probes(parts)) if any(parts) else None
                 if any(pending(o) for o in outputs):
                     try:
                         attach_lazy(outputs[0], merged)

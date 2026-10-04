@@ -2060,11 +2060,11 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
         plan.append((out, extra, keys))
     from mia.graph.delivery_route import run_filter
     run_ids = run_filter(info)
+    to_save = [k for _o, e, ks in plan if e.get("save_to_disk") for k in ks]
     with PROF.timed("hybrid.offline_wait"):
-        rows = wait_delivered(info["roots"], [k for _o, _e, ks in plan for k in ks],
-                              expected_layers=exp or None, run_ids=run_ids,
-                              load=False) if plan else {}
-    saved = [k for _o, e, ks in plan if e.get("save_to_disk") for k in ks if rows[k]]
+        rows = wait_delivered(info["roots"], to_save, expected_layers=exp or None,
+                              run_ids=run_ids, load=False) if to_save else {}
+    saved = [k for k in to_save if rows[k]]
     got = load_delivered(info["roots"], expected_layers=exp or None, req_ids=saved,
                          run_ids=run_ids) if saved else {}
     lost = [k for k in saved if k not in got]
@@ -2072,6 +2072,7 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
         raise GatherError(f"requests {lost} were complete under {info['roots']} but did not read "
                           f"back")
     disk: dict = {}
+    lazy: list = []
     for out, extra, keys in plan:
         metas = [{"hs_mode": extra.get("hs_mode", DEFAULT_HS_MODE),
                   "hooks_on": extra.get("hooks_on", DEFAULT_HOOKS_ON),
@@ -2088,34 +2089,187 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
         targets = [(out, keys[0], metas[0])]
         if len(keys) > 1:
             targets += list(zip(out.outputs, keys, metas))
-        for obj, k, m in targets:
-            if rows[k]:
-                _attach_delivered(obj, info, k, m, exp.get(k), run_ids)
+        lazy.extend(targets)
+    if lazy:
+        state = _defer_flush(llm, info, run_ids)
+        for obj, k, m in lazy:
+            _track(state, k, exp.get(k))
+            _attach_delivered(obj, info, k, m, exp.get(k), run_ids, state)
     if disk:
         _save_offline_runs(disk, "hs", "hybrid.offline_save")
     return done | {str(out.request_id) for out, _e, _k in plan}
 
 
-def _attach_delivered(obj, info: dict, key: str, meta: dict, layers, run_ids) -> None:
-    from mia.graph.delivered_probes import attach_lazy, first_pass_probes, offline_probes
+def _attach_delivered(obj, info: dict, key: str, meta: dict, layers, run_ids,
+                      state=None) -> None:
+    from mia.graph.delivered_probes import (attach_lazy, first_pass_probes, offline_probes,
+                                            padded_offline_probes, padded_reader)
 
     roots, names = info["roots"], info["names"]
+    ask = {key: layers} if layers else None
 
-    def rows():
-        from mia.graph.aperture_gather import load_delivered
-        got = load_delivered(roots, expected_layers={key: layers} if layers else None,
-                             req_ids=[key], run_ids=run_ids)
+    def rows(into=None):
+        from mia.graph import aperture_gather as ag
+        from mia.graph.delivered_probes import DeliveryReadTimeout
+        try:
+            n = ag.wait_delivered(roots, [key], expected_layers=ask, run_ids=run_ids,
+                                  load=False)[key]
+        except ag.DeliveryTimeoutError as e:
+            raise DeliveryReadTimeout(str(e), missing=e.missing, roots=e.roots) from None
+        if not n:
+            if state is not None:
+                state["keys"].pop(key, None)
+            return None
+        got = ag.load_delivered(roots, expected_layers=ask, req_ids=[key], run_ids=run_ids,
+                                into=into)
         if key not in got:
             raise MiaDeliveryError(f"the delivery of {key!r} is no longer under {roots}")
+        if state is not None:
+            state["keys"].pop(key, None)
         return got[key]
 
     def probes():
-        return offline_probes(rows(), meta, names)
+        into = padded_reader(meta)
+        r = rows(into)
+        if r is None:
+            return None
+        return offline_probes(r, meta, names) if into is None else padded_offline_probes(
+            r, meta, names)
+
+    def first():
+        r = rows()
+        return None if r is None else first_pass_probes(r, meta, names)
 
     try:
-        attach_lazy(obj, probes, first=lambda: first_pass_probes(rows(), meta, names))
+        attach_lazy(obj, probes, first=first)
     except TypeError:
-        obj.probes = probes()
+        value = probes()
+        if value is not None:
+            obj.probes = value
+
+
+_TRACKED_KEYS = 1 << 16
+
+
+def _defer_flush(llm, info: dict, run_ids) -> dict:
+    import weakref
+    fin = getattr(llm, "_mia_finish", None)
+    if fin is not None and fin.alive:
+        return fin.peek()[2][1]
+    state = {"roots": info["roots"], "run_ids": run_ids, "keys": {}}
+    engine = getattr(llm, "llm_engine", None)
+    if engine is not None:
+        try:
+            # Runs before vLLM's engine finalizer, which kills the gather 5 s after SIGTERM.
+            llm._mia_finish = weakref.finalize(llm, _finish_deliveries, engine, state)
+        except TypeError:
+            pass
+    return state
+
+
+def _track(state: dict, key: str, layers) -> None:
+    keys = state["keys"]
+    keys[key] = layers
+    while len(keys) > _TRACKED_KEYS:
+        keys.pop(next(iter(keys)))
+
+
+def _engine_dead(engine) -> bool:
+    res = getattr(getattr(engine, "engine_core", None), "resources", None)
+    if res is None:
+        return False
+    if getattr(res, "engine_dead", False):
+        return True
+    procs = getattr(getattr(res, "engine_manager", None), "processes", None) or ()
+    return any(callable(getattr(p, "is_alive", None)) and not p.is_alive() for p in procs)
+
+
+def _backlog(state: dict):
+    from mia.graph.aperture_gather import delivery_backlog
+    keys = state["keys"]
+    items = list(keys.items())                   # lazy reads pop keys from other threads
+    if not items:
+        return [], ()
+    exp = {k: v for k, v in items if v}
+    pending, mark = delivery_backlog(state["roots"], [k for k, _v in items],
+                                     expected_layers=exp or None, run_ids=state["run_ids"])
+    for k, _v in items:
+        if k not in pending:
+            keys.pop(k, None)
+    return pending, mark
+
+
+def _abandoned(state: dict, why: str) -> None:
+    try:
+        pending = list(_backlog(state)[0])
+    except Exception as e:  # noqa: BLE001
+        pending = [f"<unknown: {e!r}>"]
+    if pending:
+        print(f"[mia] {why}: {len(pending)} request(s) not delivered under {state['roots']} were "
+              f"abandoned: {pending[:8]}{' ...' if len(pending) > 8 else ''}", flush=True)
+
+
+def _finish_deliveries(engine, state: dict) -> None:
+    import threading
+    if threading.current_thread() is threading.main_thread():
+        _finish_bounded(engine, state)
+    else:
+        threading.Thread(target=_finish_bounded, args=(engine, state),
+                         name="mia-finish-deliveries").start()
+
+
+def _finish_bounded(engine, state: dict) -> None:
+    import threading
+    from mia.graph import aperture_gather as ag
+    rpc = getattr(engine, "collective_rpc", None)
+    if rpc is None:
+        return
+    if _engine_dead(engine):
+        _abandoned(state, "the engine is gone at teardown")
+        return
+    box: dict = {}
+
+    def call():
+        try:
+            rpc("flush_aperture")
+        except BaseException as e:  # noqa: BLE001
+            box["error"] = e
+
+    th = threading.Thread(target=call, name="mia-finish-rpc", daemon=True)
+    th.start()
+    idle = ag.delivery_timeout_s()
+    start = last = time.monotonic()
+    seen, why = None, None
+    while True:
+        th.join(1.0)
+        if not th.is_alive():
+            break
+        now = time.monotonic()
+        if _engine_dead(engine):
+            why = "the engine died while finishing deliveries"
+            break
+        try:
+            mark = _backlog(state)
+        except Exception:  # noqa: BLE001
+            mark = seen
+        if mark != seen:
+            seen, last = mark, now
+        if now - start >= ag.DELIVERY_HARD_CAP_S:
+            why = f"gave up finishing deliveries at the {ag.DELIVERY_HARD_CAP_S:g} s hard cap"
+            break
+        if now - last >= idle:
+            why = f"gave up finishing deliveries after {idle:g} s with no new delivery"
+            break
+    if why is not None:
+        _abandoned(state, why)
+        return
+    e = box.get("error")
+    if e is None:
+        return
+    if type(e).__name__ == "EngineDeadError":
+        _abandoned(state, "the engine is gone at teardown")
+    else:
+        print(f"[mia] finishing deliveries at engine teardown failed: {e!r}", flush=True)
 
 
 def _save_offline_runs(disk: dict, kind: str, timer: str) -> None:

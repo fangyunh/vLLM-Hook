@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import copyreg
+import ctypes
 import json
 import math
 import mmap
@@ -136,30 +137,79 @@ def _fill(out, passes) -> None:
             out[i, :p.shape[0]] = p
 
 
+def _sparse(padded: int, real: int) -> bool:
+    return padded >= max(SPARSE_PAD_MIN_BYTES, 2 * real)
+
+
+def _zero_page_tensors(shapes: Dict[int, tuple], dtype) -> Dict[int, Any]:
+    import torch
+
+    esize = torch.empty((), dtype=dtype).element_size()
+    offsets, total = {}, 0
+    for L, sh in shapes.items():
+        offsets[L] = total
+        total += -(-(math.prod(sh) * esize) // mmap.PAGESIZE) * mmap.PAGESIZE
+    mm = _zero_pages(total)
+    return {L: torch.frombuffer(mm, dtype=dtype, count=math.prod(sh), offset=offsets[L]).view(sh)
+            for L, sh in shapes.items()}
+
+
 def pad_layers(passes_by_layer: Dict[int, list]) -> Dict[int, Any]:
     """``pad_sequence(passes, batch_first=True)`` per layer."""
-    import torch
     from torch.nn.utils.rnn import pad_sequence
 
     shapes = {L: (len(ps), max(int(p.shape[0]) for p in ps)) + tuple(ps[0].shape[1:])
               for L, ps in passes_by_layer.items()}
     padded = sum(math.prod(sh) * passes_by_layer[L][0].element_size() for L, sh in shapes.items())
     real = sum(p.numel() * p.element_size() for ps in passes_by_layer.values() for p in ps)
-    if padded < max(SPARSE_PAD_MIN_BYTES, 2 * real):
+    if not _sparse(padded, real):
         return {L: pad_sequence(ps, batch_first=True) for L, ps in passes_by_layer.items()}
-    offsets, total = {}, 0
-    for L, sh in shapes.items():
-        offsets[L] = total
-        n = math.prod(sh) * passes_by_layer[L][0].element_size()
-        total += -(-n // mmap.PAGESIZE) * mmap.PAGESIZE
-    mm = _zero_pages(total)
-    out = {}
-    for L, sh in shapes.items():
-        ps = passes_by_layer[L]
-        t = torch.frombuffer(mm, dtype=ps[0].dtype, count=math.prod(sh), offset=offsets[L]).view(sh)
-        _fill(t, ps)
-        out[L] = t
+    out = _zero_page_tensors(shapes, next(iter(passes_by_layer.values()))[0].dtype)
+    for L, t in out.items():
+        _fill(t, passes_by_layer[L])
     return out
+
+
+def padded_reader(meta: dict) -> Optional[Callable]:
+    """``into`` for ``load_delivered``: read into the all_tokens padded layout; None otherwise."""
+    if meta["hs_mode"] != "all_tokens":
+        return None
+
+    def into(layers, n_rows, row_shape, dtype_name):
+        import torch
+
+        sizes = pass_sizes(n_rows, meta)
+        dtype = getattr(torch, dtype_name)
+        esize = torch.empty((), dtype=dtype).element_size()
+        row = math.prod(row_shape) * esize
+        shape = (len(sizes), max(sizes)) + tuple(row_shape)
+        shapes = {int(L): shape for L in layers}
+        if _sparse(len(shapes) * math.prod(shape) * esize, len(shapes) * n_rows * row):
+            targets = _zero_page_tensors(shapes, dtype)
+        else:
+            targets = {L: torch.zeros(sh, dtype=dtype) for L, sh in shapes.items()}
+        step = shape[1] * row
+        out = {}
+        for L, t in targets.items():
+            # ctypes, not .numpy(): a numpy export makes the storage non-resizable.
+            flat = memoryview((ctypes.c_char * (t.numel() * esize)).from_address(
+                t.data_ptr())).cast("B")
+            out[L] = (t, [flat[i * step:i * step + n * row] for i, n in enumerate(sizes)])
+        return out
+    return into
+
+
+def padded_offline_probes(padded_by_layer: Dict[int, Any], meta, module_names) -> dict:
+    """:func:`offline_probes` of a delivery read through :func:`padded_reader`."""
+    cache: dict = {}
+    for layer in sorted(int(L) for L in padded_by_layer):
+        if module_names.get(layer) is None:
+            raise MiaDeliveryError(f"no module name for delivered layer {layer}")
+        cache[module_names[layer]] = {"hidden_states": padded_by_layer[layer], "layer_num": layer,
+                                      "hs_mode": meta["hs_mode"]}
+    probes = {"hs_cache": cache, "config": dict(meta["config"])}
+    trim_probes(probes, "hs_cache", int(meta["n_prompt"]) + int(meta["n_gen"]) - 1)
+    return probes
 
 
 def hs_probes(rows_by_layer: Dict[int, Any], meta: dict, module_names: Dict[int, str], *,
