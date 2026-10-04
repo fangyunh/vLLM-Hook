@@ -1,12 +1,12 @@
 """Regression tests for the C3 engine-config policy: MIA requires vLLM's V2 model
-runner and rejects any CUDA-graph mode it has not validated (PIECEWISE, and the
-FULL_AND_PIECEWISE default vLLM 0.29 resolves to on an out-of-the-box engine).
+runner and rejects any CUDA-graph mode it has not validated (PIECEWISE alone). The
+FULL_AND_PIECEWISE default vLLM 0.29 resolves to on an out-of-the-box engine is accepted.
 
 See ``.superpowers/sdd/2026-09-16-mia-v2sup-port/task-C3-brief.md``. MEASURED on a GPU
 node (LSF 1696603, MIA not loaded so vLLM alone decided): vLLM 0.29 selects
 ``use_v2_model_runner=True`` by default, and ``cudagraph_mode`` resolves to
-``FULL_AND_PIECEWISE`` by default -- not ``FULL``. So the FULL_AND_PIECEWISE case is the
-first thing most users hit and gets its own regression test below.
+``FULL_AND_PIECEWISE`` by default -- not ``FULL``. MIA accepts it (FULL decode graphs,
+piecewise graphs for mixed steps); PIECEWISE alone keeps its own regression test below.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def test_piecewise_is_rejected_not_silently_downgraded():
         validate_graph_mode("PIECEWISE")
 
 
-@pytest.mark.parametrize("mode", ["NONE", "FULL"])
+@pytest.mark.parametrize("mode", ["NONE", "FULL", "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"])
 def test_supported_modes_pass(mode):
     validate_graph_mode(mode)
 
@@ -37,14 +37,12 @@ def test_mia_never_forces_the_v1_runner():
     assert '"VLLM_USE_V2_MODEL_RUNNER"] = "0"' not in source
 
 
-def test_default_full_and_piecewise_is_rejected_with_actionable_message():
-    """MEASURED (LSF 1696603): vLLM 0.29's default resolved mode is FULL_AND_PIECEWISE,
-    not FULL -- so this is the very first thing a default engine hits. The error must
-    name the fix (FULL, and enforce_eager for the eager path), not just the complaint."""
+def test_piecewise_alone_is_rejected_with_actionable_message():
+    """The error names the supported modes and enforce_eager for the eager path."""
     with pytest.raises(UnsupportedGraphModeError) as excinfo:
-        validate_graph_mode("FULL_AND_PIECEWISE")
+        validate_graph_mode("PIECEWISE")
     message = str(excinfo.value)
-    assert "FULL" in message
+    assert "FULL_AND_PIECEWISE" in message
     assert "enforce_eager" in message
 
 
