@@ -257,6 +257,7 @@ def dequantize_cache_inplace(modules, keys):
                 sc = list(sc.unbind(0)) if isinstance(sc, torch.Tensor) else sc
             if vals is not None:
                 entry[key] = [
+                    None if t is None else
                     dequantize(t, (sc[i] if (sc is not None and i < len(sc)) else None), None, qm)
                     for i, t in enumerate(vals)
                 ]

@@ -4,8 +4,6 @@ import os
 import json
 import uuid
 from typing import Optional, Dict, List
-if os.environ.get("MIA_ALLOW_CUDAGRAPH") != "1":
-    os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 from vllm import LLM, SamplingParams
 from mia.optimizations import apply_optimizations
@@ -14,6 +12,51 @@ from mia.run_utils import dispatch_disk_analyze
 from mia._profiler import PROF
 from mia.shm_utils import teardown_shm
 from mia.workers.steer_worker import resolve_steer_modes
+
+
+def _merge_probes(all_probes: list) -> dict:
+    first = next((p for p in all_probes if p), {})
+    merged = {k: v for k, v in first.items()
+              if k not in ("qk_cache", "hs_cache")}
+    TENSOR_KEYS = ("q", "k_all", "hidden_states", "scores",
+                   "q_scale", "k_all_scale", "hidden_states_scale")
+    for cache_key in ("qk_cache", "hs_cache"):
+        if not any(cache_key in p for p in all_probes):
+            continue
+        merged[cache_key] = {}
+        layers = []
+        for p in all_probes:
+            for layer in p.get(cache_key, {}):
+                if layer not in layers:
+                    layers.append(layer)
+        for layer in layers:
+            entry = {}
+            for p in all_probes:
+                le = p.get(cache_key, {}).get(layer, {})
+                for k, v in le.items():
+                    if k not in TENSOR_KEYS:
+                        entry.setdefault(k, v)
+            for tensor_key in TENSOR_KEYS:
+                vals = []
+                for p in all_probes:
+                    le = p.get(cache_key, {}).get(layer, {})
+                    v = le.get(tensor_key)
+                    vals.append(v[0] if v is not None and len(v) > 0 else None)
+                if any(v is not None for v in vals):
+                    entry[tensor_key] = vals
+            merged[cache_key][layer] = entry
+    return merged
+
+
+def _dequantized(p0):
+    if p0:
+        from mia.artifact_quant import dequantize_cache_inplace
+        if isinstance(p0.get("qk_cache"), dict):
+            dequantize_cache_inplace(p0["qk_cache"], ("q", "k_all"))
+        if isinstance(p0.get("hs_cache"), dict):
+            dequantize_cache_inplace(p0["hs_cache"], ("hidden_states",))
+    return p0
+
 
 class MiaLLM:
     def __init__(
@@ -25,7 +68,7 @@ class MiaLLM:
         download_dir: Optional[str] = None,
         enable_hook: bool = True,
         hook_dir: str = None,
-        enforce_eager: bool = True,
+        enforce_eager: bool = False,
         **vllm_kwargs
     ):
         self.model_name = model
@@ -70,12 +113,14 @@ class MiaLLM:
         llm_kwargs = dict(vllm_kwargs)
         if download_dir is not None:
             llm_kwargs['download_dir'] = download_dir
-        self.llm = LLM(
-            model=model,
-            worker_extension_cls=worker,
-            enforce_eager=enforce_eager,
-            **llm_kwargs,
-        )
+        from mia._plugin import engine_hints
+        with engine_hints(qk_score=self._qk_capture == "score"):
+            self.llm = LLM(
+                model=model,
+                worker_extension_cls=worker,
+                enforce_eager=enforce_eager,
+                **llm_kwargs,
+            )
 
         self.tokenizer = self.llm.get_tokenizer()
         self.llm_engine = self.llm.llm_engine
@@ -192,8 +237,8 @@ class MiaLLM:
             return
         if self._model_dims is None:
             return
-        from mia._plugin import _engine_tp_size
-        if _engine_tp_size(self.llm) > 1:
+        from mia._plugin import _engine_graph, _engine_tp_size
+        if _engine_tp_size(self.llm) > 1 or _engine_graph(self.llm):
             return
         prompt_len = self._prompt_token_len(prompt)
         if prompt_len is None:
@@ -274,49 +319,23 @@ class MiaLLM:
             else:
                 outputs = self.llm.generate(prompts, sp_list, **passthrough)
 
-        if hook and self.worker_name and not save_to_disk and len(outputs) > 1 and getattr(outputs[0], "probes", None) is not None:
-            with PROF.timed("miallm.merge_probes"):
-                all_probes = [o.probes for o in outputs]
-                merged = {k: v for k, v in all_probes[0].items()
-                          if k not in ("qk_cache", "hs_cache")}
-                TENSOR_KEYS = ("q", "k_all", "hidden_states", "scores",
-                               "q_scale", "k_all_scale", "hidden_states_scale")
-                for cache_key in ("qk_cache", "hs_cache"):
-                    if cache_key not in all_probes[0]:
-                        continue
-                    merged[cache_key] = {}
-                    layers = []
-                    for p in all_probes:
-                        for layer in p.get(cache_key, {}):
-                            if layer not in layers:
-                                layers.append(layer)
-                    for layer in layers:
-                        entry = {}
-                        for p in all_probes:
-                            le = p.get(cache_key, {}).get(layer, {})
-                            for k, v in le.items():
-                                if k not in TENSOR_KEYS:
-                                    entry.setdefault(k, v)
-                        for tensor_key in TENSOR_KEYS:
-                            vals = []
-                            for p in all_probes:
-                                le = p.get(cache_key, {}).get(layer, {})
-                                v = le.get(tensor_key)
-                                if v is not None and len(v) > 0:
-                                    vals.append(v[0])
-                            if vals:
-                                entry[tensor_key] = vals
-                        merged[cache_key][layer] = entry
-                outputs[0].probes = merged
-
         if hook and self.worker_name and not save_to_disk:
-            p0 = getattr(outputs[0], "probes", None)
-            if p0:
-                from mia.artifact_quant import dequantize_cache_inplace
-                if isinstance(p0.get("qk_cache"), dict):
-                    dequantize_cache_inplace(p0["qk_cache"], ("q", "k_all"))
-                if isinstance(p0.get("hs_cache"), dict):
-                    dequantize_cache_inplace(p0["hs_cache"], ("hidden_states",))
+            from mia.graph.delivered_probes import attach_lazy, merge_source, pending
+            srcs = [merge_source(o) for o in outputs]
+            if len(outputs) > 1 and any(s is not None for s in srcs):
+                def merged():
+                    with PROF.timed("miallm.merge_probes"):
+                        return _dequantized(_merge_probes(
+                            [s() if s is not None else {} for s in srcs]))
+                if any(pending(o) for o in outputs):
+                    try:
+                        attach_lazy(outputs[0], merged)
+                    except TypeError:
+                        outputs[0].probes = merged()
+                else:
+                    outputs[0].probes = merged()
+            elif not pending(outputs[0]):
+                _dequantized(getattr(outputs[0], "probes", None))
 
         return outputs
 

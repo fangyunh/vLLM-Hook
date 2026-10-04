@@ -18,6 +18,7 @@ from mia.workers._common import (
     iter_matched_modules,
     iter_matching_req_ids,
     match_attn,
+    match_internal_ids,
     quant_clone,
     resolve_capture_quant,
     save_pt_atomic,
@@ -56,7 +57,11 @@ def _cpu_list(tensors, acc: dict | None):
     return [t.cpu() for t in tensors]
 
 
-def key_cache_from_layer_kv(kv_cache):
+class CachedKeysUnavailable(RuntimeError):
+    """A request's cached prefix keys cannot be read from the KV cache."""
+
+
+def key_cache_from_layer_kv(kv_cache, num_kv_heads=None, head_size=None):
     """Return the KEY cache as ``[num_blocks, block_size, num_kv_heads, head_size]``."""
     kv = kv_cache
     if isinstance(kv, (list, tuple)) and len(kv) == 1 and hasattr(kv[0], "ndim"):
@@ -64,13 +69,22 @@ def key_cache_from_layer_kv(kv_cache):
     if isinstance(kv, (list, tuple)) and len(kv) == 2 and hasattr(kv[0], "ndim"):
         return kv[0]
     if not hasattr(kv, "ndim"):
-        return kv
+        raise CachedKeysUnavailable(f"the layer's kv_cache is a {type(kv).__name__}")
     if kv.ndim == 5:
         if kv.shape[1] == 2:
             return kv[:, 0]
         if kv.shape[0] == 2:
             return kv[0]
-    return kv
+    if kv.ndim == 4:
+        if num_kv_heads is None or head_size is None:
+            raise CachedKeysUnavailable("the attention layer has no num_kv_heads / head_size")
+        h, d = int(num_kv_heads), int(head_size)
+        if kv.shape[1] == h and kv.shape[3] > d:
+            return kv[..., :d].transpose(1, 2)
+        if kv.shape[2] == h and kv.shape[3] == d:
+            return kv
+    raise CachedKeysUnavailable(f"unknown KV cache layout {tuple(kv.shape)} for "
+                                f"num_kv_heads={num_kv_heads} head_size={head_size}")
 
 
 def _read_cached_keys(
@@ -82,13 +96,14 @@ def _read_cached_keys(
 ):
     try:
         ctx = get_forward_context()
-        kv_cache = ctx.no_compile_layers[module_name].kv_cache
-        key_cache = key_cache_from_layer_kv(kv_cache)
+        layer = ctx.no_compile_layers[module_name]
+        kv_cache = layer.kv_cache
+        key_cache = key_cache_from_layer_kv(kv_cache, getattr(layer, "num_kv_heads", None),
+                                            getattr(layer, "head_size", None))
 
         num_blocks   = key_cache.shape[0]
         block_size   = key_cache.shape[1]
-        num_kv_heads = key_cache.shape[2]
-        head_size    = key_cache.shape[3]
+        row_width    = math.prod(key_cache.shape[2:])
 
         block_table = attn_metadata.block_table
         num_blocks_needed = math.ceil(total_len / block_size)
@@ -96,13 +111,40 @@ def _read_cached_keys(
 
         if block_ids.numel() == 0 or int(block_ids.max()) >= num_blocks \
                 or int(block_ids.min()) < 0:
-            return None
+            raise CachedKeysUnavailable(f"block ids out of range for {num_blocks} blocks")
 
-        prefix_keys = key_cache[block_ids].reshape(-1, num_kv_heads * head_size)
+        prefix_keys = key_cache[block_ids].reshape(-1, row_width)
 
         return prefix_keys[:num_cached].detach()
-    except Exception:
-        return None
+    except CachedKeysUnavailable:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise CachedKeysUnavailable(repr(e)) from None
+
+
+def _prepend_cached_keys(module_name, metadata, i: int, k, seq_lens, start: int, end: int,
+                         num_computed: int = 0):
+    if seq_lens is None:
+        if num_computed > 0:
+            raise CachedKeysUnavailable("the attention metadata has no seq_lens")
+        return k
+    try:
+        total_len = int(seq_lens[i].item()) if hasattr(seq_lens[i], "item") else int(seq_lens[i])
+    except Exception as e:  # noqa: BLE001
+        raise CachedKeysUnavailable(f"sequence length unreadable ({e!r})") from None
+    num_cached = total_len - (end - start)
+    if num_cached <= 0:
+        return k
+    PROF.incr("kv.prefix_recon")
+    md = metadata.get(module_name) if isinstance(metadata, dict) else metadata
+    if md is None:
+        raise CachedKeysUnavailable("no attention metadata for this layer")
+    with PROF.timed("kv.prefix_recon"):
+        prefix_k = _read_cached_keys(module_name, md, i, num_cached, total_len)
+    if tuple(prefix_k.shape) != (num_cached, k.shape[-1]):
+        raise CachedKeysUnavailable(f"{tuple(prefix_k.shape)} cached key rows, expected "
+                                    f"({num_cached}, {k.shape[-1]})")
+    return torch.cat([prefix_k.to(k.device, dtype=k.dtype), k], dim=0)
 
 
 def _k_all_cpu_list(entry: dict, _census_acc: dict | None = None) -> list:
@@ -225,7 +267,12 @@ def _attach_tp_shard(payload: dict, worker) -> dict:
     return payload
 
 
-def _marshal_perreq_qk(per_layer: dict, conf: dict, hookq_mode: str, shard=None) -> bytes:
+def _marshal_qk_error(msg: str) -> bytes:
+    return _ZSTD_COMPRESSOR.compress(pickle.dumps({"mia_error": str(msg)}))
+
+
+def _marshal_perreq_qk(per_layer: dict, conf: dict, hookq_mode: str, shard=None,
+                       module_names=None) -> bytes:
     qk_cache = {}
     for layer, rec in per_layer.items():
         layer = int(layer)
@@ -238,6 +285,8 @@ def _marshal_perreq_qk(per_layer: dict, conf: dict, hookq_mode: str, shard=None)
             "hookq_mode": hookq_mode,
         }
     payload = {"qk_cache": qk_cache, "config": conf}
+    if module_names:
+        payload["module_names"] = {int(L): str(n) for L, n in module_names.items()}
     if shard is not None and shard.tp_size > 1:
         from mia.graph.tp_shard import TP_SHARD_KEY
         payload[TP_SHARD_KEY] = shard.as_header()
@@ -351,10 +400,14 @@ class QKCaptureWorker:
 
             layer_num = match_attn(module_name)
 
+            refused = getattr(self, "_qk_refused", None)
+            n_comp = getattr(step, "num_computed_tokens_np", None)
             for i in range(bs):
                 req_id = step.req_ids[i]
                 extra = step.extra_args_for(i)
                 if not extra or extra.get("output_qk") is None:
+                    continue
+                if refused and req_id in refused:
                     continue
                 output_spec = extra.get("output_qk")
                 if isinstance(output_spec, dict):
@@ -379,6 +432,7 @@ class QKCaptureWorker:
 
                 start = int(last_indices[i].item())
                 end = int(last_indices[i + 1].item())
+                n_done = int(n_comp[i]) if n_comp is not None else 0
 
                 if is_prefill and req_mode == "last_token":
                     chunk_len = end - start
@@ -401,18 +455,12 @@ class QKCaptureWorker:
                     else:
                         q_view = input[0][start:end, :].detach()
                     k_view = input[1][start:end, :].detach()
-                    if seq_lens is not None and attn_module is not None:
-                        try:
-                            total_len = int(seq_lens[i].item()) if hasattr(seq_lens[i], 'item') else int(seq_lens[i])
-                            num_cached = total_len - (end - start)
-                            if num_cached > 0:
-                                PROF.incr("kv.prefix_recon")
-                                with PROF.timed("kv.prefix_recon"):
-                                    prefix_k = _read_cached_keys(module_name, metadata if not isinstance(metadata, dict) else next(iter(metadata.values())), i, num_cached, total_len)
-                                if prefix_k is not None:
-                                    k_view = torch.cat([prefix_k.to(k_view.device, dtype=k_view.dtype), k_view], dim=0)
-                        except Exception:
-                            PROF.incr("kv.prefix_recon.errors")
+                    try:
+                        k_view = _prepend_cached_keys(module_name, metadata, i, k_view,
+                                                      seq_lens, start, end, n_done)
+                    except CachedKeysUnavailable as e:
+                        self._refuse_qk_request(req_id, layer_num, e)
+                        continue
                     score = compute_head_scores(q_view, k_view, score_heads, self._conf, self._score_dtype)
                     PROF.incr("hook.fire.qk")
                     PROF.gauge("captured.bytes.qk", score.numel() * score.element_size())
@@ -431,19 +479,12 @@ class QKCaptureWorker:
                     q_tok = input[0][end - 1, :].detach().clone()
                 k_tok = input[1][start:end, :].detach().clone()
 
-                if seq_lens is not None and attn_module is not None:
-                    try:
-                        total_len = int(seq_lens[i].item()) if hasattr(seq_lens[i], 'item') else int(seq_lens[i])
-                        query_len = end - start
-                        num_cached = total_len - query_len
-                        if num_cached > 0:
-                            PROF.incr("kv.prefix_recon")
-                            with PROF.timed("kv.prefix_recon"):
-                                prefix_k = _read_cached_keys(module_name, metadata if not isinstance(metadata, dict) else next(iter(metadata.values())), i, num_cached, total_len)
-                            if prefix_k is not None:
-                                k_tok = torch.cat([prefix_k.to(k_tok.device, dtype=k_tok.dtype), k_tok], dim=0)
-                    except Exception:
-                        PROF.incr("kv.prefix_recon.errors")
+                try:
+                    k_tok = _prepend_cached_keys(module_name, metadata, i, k_tok, seq_lens,
+                                                 start, end, n_done)
+                except CachedKeysUnavailable as e:
+                    self._refuse_qk_request(req_id, layer_num, e)
+                    continue
 
                 q_tok, q_scale, q_qmeta = quant_clone(
                     q_tok, self._artifact_tag, self._artifact_gran, self._artifact_gsize)
@@ -481,6 +522,13 @@ class QKCaptureWorker:
 
         print(f"Installed {len(self._hooks)} hooks on layers: {matched}")
 
+
+    def _refuse_qk_request(self, req_id, layer_num, err) -> None:
+        refused = self.__dict__.setdefault("_qk_refused", {})
+        if req_id not in refused:
+            refused[req_id] = f"layer {layer_num}: its cached keys could not be read ({err})"
+            PROF.incr("kv.prefix_recon.errors")
+            print(f"[mia/qk] request {req_id!r} refused: {refused[req_id]}", flush=True)
 
     def graph_install(self):
         """Install the CUDA-graph QK capture path (static buffers + wrap)."""
@@ -533,6 +581,9 @@ class QKCaptureWorker:
             residency_after = len(index.live_req_ids())
         deliverables: dict = {}
         for req_id, per_layer in popped:
+            if isinstance(per_layer, Exception):
+                deliverables[str(req_id)] = {"mia_error": str(per_layer)}
+                continue
             deliverables[str(req_id)] = {
                 int(layer): {
                     "q": rec["q"].detach().cpu().contiguous(),
@@ -558,10 +609,12 @@ class QKCaptureWorker:
         if index is None:
             return None
         stash = self._drain_aperture_into_stash(drain, index)
-        match = next(iter(iter_matching_req_ids(stash, external_req_id)), None)
-        if match is None:
+        matches = match_internal_ids(list(stash), external_req_id)
+        if len(matches) > 1:
+            return _marshal_qk_error(f"{len(matches)} captured requests match {external_req_id!r}")
+        if not matches:
             return None
-        return stash.pop(match)
+        return stash.pop(matches[0])
 
     def _drain_aperture_into_stash(self, drain, index, free_external: str | None = None) -> dict:
         stash = getattr(self, "_aperture_perreq_stash", None)
@@ -576,11 +629,15 @@ class QKCaptureWorker:
             for req_id, _ in popped:
                 index.free(req_id)
             if free_external is not None:
-                for rid in list(iter_matching_req_ids(index.live_req_ids(), free_external)):
+                for rid in match_internal_ids(list(index.live_req_ids()), free_external):
                     index.free(rid)
+        names = getattr(self, "_qk_module_names", None)
         for req_id, per_layer in popped:
+            if isinstance(per_layer, Exception):
+                stash[str(req_id)] = _marshal_qk_error(str(per_layer))
+                continue
             stash[str(req_id)] = _marshal_perreq_qk(per_layer, conf, mode,
-                                                    getattr(self, "_qk_shard", None))
+                                                    getattr(self, "_qk_shard", None), names)
         return stash
 
     def clear_aperture_request(self, external_req_id: str) -> None:
@@ -599,7 +656,7 @@ class QKCaptureWorker:
             self._drain_aperture_into_stash(drain, index, free_external=external_req_id)
             stash = getattr(self, "_aperture_perreq_stash", None)
             if stash:
-                for rid in list(iter_matching_req_ids(stash, external_req_id)):
+                for rid in match_internal_ids(list(stash), external_req_id):
                     stash.pop(rid, None)
         return None
 
@@ -634,6 +691,15 @@ class QKCaptureWorker:
                 unlink(str(req_id))
         return ok
 
+    def mia_delivery_info(self) -> dict:
+        """collective_rpc-callable: module names, config and whether the per-request drain is on."""
+        drain = getattr(self, "_qk_drain", None)
+        names = getattr(self, "_qk_module_names", None) or {}
+        return {"names": [[int(L), str(n)] for L, n in sorted(names.items())],
+                "config": dict(getattr(self, "_conf", {}) or {}),
+                "per_request": bool(drain is not None and getattr(drain, "per_request", False)),
+                "delivery_dir": None}
+
     def aperture_residency(self):
         """Read-only (host_live_count, disk_residency) query for the off-loop QK per-request path."""
         drain = getattr(self, "_qk_drain", None)
@@ -661,6 +727,15 @@ class QKCaptureWorker:
         consumer = getattr(self, "_capture_consumer", None)
         if consumer is not None:
             consumer.drain_writer_done(self)
+        refused = getattr(self, "_qk_refused", None)
+        hit = list(iter_matching_req_ids(refused, external_req_id)) if refused else []
+        if hit:
+            why = "; ".join(refused.pop(r) for r in hit)
+            for r in hit:
+                dropped = self._captured_states.pop(r, None)
+                if dropped is not None and consumer is not None:
+                    consumer.on_pop(r, dropped)
+            return _marshal_qk_error(why)
         for req_id in iter_matching_req_ids(self._captured_states, external_req_id):
             layer_dict = self._captured_states.pop(req_id)
             if consumer is not None:
@@ -799,6 +874,9 @@ class QKCaptureWorker:
     def clear_captured_states(self, external_req_id: str) -> None:
         """Remove captured states without returning them (cleanup on abort/disconnect)."""
         consumer = getattr(self, "_capture_consumer", None)
+        refused = getattr(self, "_qk_refused", None)
+        if refused:
+            clear_states_for_req(refused, external_req_id)
         if consumer is None:
             clear_states_for_req(self._captured_states, external_req_id)
             clear_states_for_req(self._disk_states, external_req_id)
@@ -815,9 +893,16 @@ class QKCaptureWorker:
         cpu_cache: dict = {"config": self._conf, "qk_cache": {}}
         found_any = False
         flushed_ids: list = []
+        refused = getattr(self, "_qk_refused", None) or {}
+        refused_here: dict = {}
 
         with PROF.timed("worker.cpu_transfer.qk"):
             for external_req_id in external_req_ids:
+                for req_id in list(iter_matching_req_ids(refused, external_req_id)):
+                    refused_here[req_id] = refused.pop(req_id)
+                    dropped = self._disk_states.pop(req_id, None)
+                    if dropped is not None and consumer is not None:
+                        consumer.on_pop(req_id, dropped)
                 for req_id in iter_matching_req_ids(self._disk_states, external_req_id):
                     layer_dict = self._disk_states.pop(req_id)
                     if consumer is not None:
@@ -895,14 +980,18 @@ class QKCaptureWorker:
                         census_emit(census_record(worker="qk", sink="disk", req_id=req_id,
                                                    bucket=_census_bucket, acc=_census_acc))
 
-        if not found_any:
-            if consumer is not None:
-                consumer.drain_writer_done(self)
-            return False
-
         from mia.graph.tp_shard import rank_dir_name
         tp_rank = _worker_tp_rank(self)
         run_dir = os.path.join(hook_dir, run_id, rank_dir_name(tp_rank))
+        if refused_here or found_any:
+            from mia.run_utils import write_refused_qk
+            write_refused_qk(run_dir, refused_here)
+
+        if not found_any:
+            if consumer is not None:
+                consumer.drain_writer_done(self)
+            return run_dir if refused_here else False
+
         os.makedirs(run_dir, exist_ok=True)
         _attach_tp_shard(cpu_cache, self)
 

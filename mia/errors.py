@@ -12,3 +12,7 @@ class MiaConfigurationError(MiaRefusal, RuntimeError):
 class MiaSizingError(MiaRefusal, ValueError):
     """A capture aperture that cannot be sized as asked."""
 
+
+
+class MiaDeliveryError(MiaRefusal, RuntimeError):
+    """A request's captured data could not be made retrievable, so the request is not complete."""

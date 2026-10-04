@@ -69,6 +69,19 @@ def segment_name(seq: int) -> str:
     return SEGMENT_FMT % int(seq)
 
 
+def clear_chain(run_dir: str) -> None:
+    """Remove a previous launch's index chain and trim markers from ``run_dir``."""
+    from .aperture_trim import MARKER_GLOB
+
+    stale = glob.glob(os.path.join(run_dir, "hs_run_index.seg.*.jsonl"))
+    stale += glob.glob(os.path.join(run_dir, MARKER_GLOB)) + [os.path.join(run_dir, INDEX_NAME)]
+    for p in stale:
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+
+
 def segment_paths(run_dir: str) -> List[str]:
     """Every index segment in ``run_dir``, in ``seq`` order."""
     out = [p for p in glob.glob(os.path.join(run_dir, "hs_run_index.seg.*.jsonl"))
@@ -100,6 +113,7 @@ class RunIndex:
         self.rows_total = 0
         self.n_steps = 0
         self._finished: Deque[Tuple[str, int]] = deque()
+        self._asked: set = set()
 
     def note_step(self, step_start: int, n_rows: int, cursor, plans=None, block=None) -> None:
         """Check this step keeps the index's invariants, and advance the file watermark."""
@@ -128,9 +142,19 @@ class RunIndex:
         self.rows_total = int(step_start) + int(n_rows)
         self.n_steps += 1
 
-    def note_finish(self, req_id) -> None:
+    def note_finish(self, req_id, asked: bool = False) -> None:
         """Record that ``req_id`` has finished, at the current file watermark."""
+        if asked:
+            self._asked.add(str(req_id))
         self._finished.append((str(req_id), int(self.rows_total)))
+
+    def pop_asked(self, req_id) -> bool:
+        """Whether a finished request had asked for capture (so zero rows is its answer)."""
+        try:
+            self._asked.remove(str(req_id))
+            return True
+        except KeyError:
+            return False
 
     def take_finished(self, up_to: int) -> List[Tuple[str, int]]:
         """Pop every recorded finish at or below ``up_to``, in order."""
@@ -143,6 +167,11 @@ class RunIndex:
             q.popleft()
             out.append((rid, wm))
         return out
+
+    def has_finished(self, up_to: int) -> bool:
+        """Whether a recorded finish could be stamped by a segment published at ``up_to``."""
+        q = self._finished
+        return bool(q) and q[0][1] <= int(up_to)
 
     def snapshot(self, block_lo: int = 0) -> Tuple[int, list]:
         """``(watermark, blocks[block_lo:])``, taken in the one order that is safe."""
@@ -314,6 +343,11 @@ class ChainCursor:
         self.expect_run_id = None if expect_run_id is None else str(expect_run_id)
         self._run_id: Optional[str] = self.expect_run_id
 
+    @property
+    def run_id(self) -> Optional[str]:
+        """The run this chain belongs to (expected, or latched from its first segment)."""
+        return self._run_id
+
     def _check_run(self, path: str, hdr: dict) -> None:
         got = hdr.get(RUN_ID_KEY)
         if self._run_id is None:
@@ -473,7 +507,7 @@ class RunIndexFlusher:
                 raise RunIndexError(
                     f"{self._name}: a segment at watermark {wm} would go backwards from the chain's "
                     f"{self._since}")
-            if wm == self._since and not final:
+            if wm == self._since and not final and not self._index.has_finished(wm):
                 return None
             t0 = time.perf_counter()
             cpu0 = time.thread_time()
@@ -484,10 +518,14 @@ class RunIndexFlusher:
             stamps: List[Tuple[str, int, int]] = []
             for rid, wm_r in self._index.take_finished(wm):
                 n_total = self._rows.pop(rid, None)
+                if self._index.pop_asked(rid) and n_total is None:
+                    n_total = 0
                 if n_total is None:
                     self.skipped_stamps += 1
                     continue
                 stamps.append((rid, wm_r, n_total))
+            if wm == self._since and not final and not stamps:
+                return None
             path = os.path.join(self._run_dir, segment_name(self._seq))
             tw = time.perf_counter()
             write_segment(path, self._header, reqs, since=self._since, up_to=wm, seq=self._seq,

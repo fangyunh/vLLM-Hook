@@ -107,11 +107,10 @@ def load_multilayer_qk_aperture_artifact(run_dir: str, meta_path: str | None = N
             raise NotImplementedError(
                 f"QK capture-aperture prefix reconstruction is deferred (v1): request {req_id!r} "
                 f"layer {layer} first-step num_computed={es[0].num_computed} > 0 "
-                f"(prefix caching or hooks_on=decode). k_full would be short by the cached prefix; "
-                f"refusing to return a wrong k_all. Use a fresh prefill / hooks_on in "
-                f"{{prefill, both}}, or extend the QK aperture path to prepend cached keys.")
+                f"(prefix caching). k_full would be short by the cached prefix; refusing to "
+                f"return a wrong k_all. Capture with prefix caching off (the graph default) or "
+                f"eager.")
 
-        qmm = _mm(q_mmaps, f"qk_q_layer_{layer}.raw", layer, q_dtype, q_row_shape)
         kmm = _mm(k_mmaps, f"qk_k_layer_{layer}.raw", layer, k_dtype, k_row_shape)
 
         k_parts, q_parts, prefix_ends = [], [], []
@@ -121,6 +120,7 @@ def load_multilayer_qk_aperture_artifact(run_dir: str, meta_path: str | None = N
                 kb = kb.view(torch.bfloat16)
             k_parts.append(kb)
             if e.q_rows > 0 and e.q_start >= 0:
+                qmm = _mm(q_mmaps, f"qk_q_layer_{layer}.raw", layer, q_dtype, q_row_shape)
                 qb = torch.from_numpy(np.array(qmm[e.q_start:e.q_start + e.q_rows]))
                 if q_is_bf16:
                     qb = qb.view(torch.bfloat16)
@@ -366,7 +366,8 @@ def load_qk_aperture_tp(aperture_dir: str, *, check_replicas: bool = False) -> d
     return merge_qk_aperture_ranks([d for _, d in found], check_replicas=check_replicas)
 
 
-def merge_hs_aperture_ranks(rank_dirs, meta_paths=None, *, expected_layers=None) -> dict:
+def merge_hs_aperture_ranks(rank_dirs, meta_paths=None, *, expected_layers=None,
+                            skip_trimmed: bool = False, reclaimed_out: dict | None = None) -> dict:
     """Union per-rank HS aperture dumps of the TP LAYER shard into ONE artifact."""
     from .tp_shard import (
         TPShardError, check_hs_shard_set, hs_expected_ranks, hs_requested_layers,
@@ -387,7 +388,9 @@ def merge_hs_aperture_ranks(rank_dirs, meta_paths=None, *, expected_layers=None)
                 f"{len(rank_dirs)} HS dirs without a layer-shard header: each holds every layer "
                 f"(TP = 1, MIA_HS_TP_SHARD=0, or the all-ranks diagnostic's replicas) -- read one "
                 f"with load_multilayer_aperture_artifact, or the run with load_hs_aperture_tp")
-        return load_multilayer_aperture_artifact(rank_dirs[0], meta_paths[0])
+        return load_multilayer_aperture_artifact(rank_dirs[0], meta_paths[0],
+                                                 skip_trimmed=skip_trimmed,
+                                                 reclaimed_out=reclaimed_out)
     if any(s is None for s in shards):
         raise TPShardError("some HS dirs carry a layer-shard header and some do not: two "
                            "different captures, or a rank-0-only dir mixed into a sharded run")
@@ -406,12 +409,14 @@ def merge_hs_aperture_ranks(rank_dirs, meta_paths=None, *, expected_layers=None)
         expected = hs_expected_ranks(
             hs_requested_layers(expected_layers, shards[0].num_layers), shards[0].tp_size)
     order = check_hs_shard_set(shards, expected)
-    items = [(shards[i], load_multilayer_aperture_artifact(rank_dirs[i], meta_paths[i]))
+    items = [(shards[i], load_multilayer_aperture_artifact(rank_dirs[i], meta_paths[i],
+                                                           skip_trimmed=skip_trimmed,
+                                                           reclaimed_out=reclaimed_out))
              for i in order]
     return merge_hs_layer_maps(items)
 
 
-def _hs_replicas_equal(found, headers) -> None:
+def _hs_replicas_equal(found, headers, *, skip_trimmed: bool = False) -> None:
     import torch as _torch
     from .tp_shard import TPShardError
 
@@ -419,12 +424,12 @@ def _hs_replicas_equal(found, headers) -> None:
     ranks = [r for r, _ in found]
     if sorted(ranks) != list(range(tp)):
         raise TPShardError(f"all-ranks HS replicas: expected tp_rank_0..{tp - 1}, found {ranks}")
-    base = load_multilayer_aperture_artifact(dict(found)[0])
+    base = load_multilayer_aperture_artifact(dict(found)[0], skip_trimmed=skip_trimmed)
     keys0 = {(q, L) for q, per in base.items() for L in per}
     for r, d in found:
         if r == 0:
             continue
-        art = load_multilayer_aperture_artifact(d)
+        art = load_multilayer_aperture_artifact(d, skip_trimmed=skip_trimmed)
         keys = {(q, L) for q, per in art.items() for L in per}
         if keys != keys0:
             raise TPShardError(
@@ -439,7 +444,8 @@ def _hs_replicas_equal(found, headers) -> None:
 
 
 def load_hs_aperture_tp(aperture_dir: str, *, check_replicas: bool = False,
-                        expected_layers=None) -> dict:
+                        expected_layers=None, skip_trimmed: bool = False,
+                        reclaimed_out: dict | None = None) -> dict:
     """Load one run's HS capture from its aperture dir, a rank dir, or a bare TP=1 dump."""
     from .tp_shard import TPShardError, discover_rank_dirs, hs_shard_from_header
 
@@ -448,7 +454,8 @@ def load_hs_aperture_tp(aperture_dir: str, *, check_replicas: bool = False,
         raise TPShardError(f"no HS aperture sidecar under {aperture_dir}")
     headers = [read_sidecar_header(os.path.join(d, HS_SIDECAR_NAME)) for _, d in found]
     if any(hs_shard_from_header(h) is not None for h in headers):
-        return merge_hs_aperture_ranks([d for _, d in found], expected_layers=expected_layers)
+        return merge_hs_aperture_ranks([d for _, d in found], expected_layers=expected_layers,
+                                       skip_trimmed=skip_trimmed, reclaimed_out=reclaimed_out)
     for (r, d), h in zip(found, headers):
         if int(h.get("tp_size", 1)) > 1 and r != 0 and not h.get("capture_all_ranks", False):
             raise TPShardError(
@@ -460,6 +467,7 @@ def load_hs_aperture_tp(aperture_dir: str, *, check_replicas: bool = False,
         raise TPShardError(f"no tp_rank_0 HS dir under {aperture_dir} (found ranks "
                            f"{[r for r, _ in found]})")
     if check_replicas and any(h.get("capture_all_ranks", False) for h in headers):
-        _hs_replicas_equal(found, headers)
-    return load_multilayer_aperture_artifact(rank0[0])
+        _hs_replicas_equal(found, headers, skip_trimmed=skip_trimmed)
+    return load_multilayer_aperture_artifact(rank0[0], skip_trimmed=skip_trimmed,
+                                             reclaimed_out=reclaimed_out)
 

@@ -136,6 +136,8 @@ class SteerRegistry:
         self.vec_paths: Dict[str, int] = {}
         self.vec_has_avgproj: set = set()
         self._next_vec_id = 0
+        self.steer_skipped = 0
+        self._skip_warned: set = set()
         self._pending_plans: list = []
 
         self.incremental_enabled = (
@@ -180,6 +182,14 @@ class SteerRegistry:
 
     def register_host(self, host: SteerHost) -> None:
         self.hosts[host.layer_num] = host
+
+    def note_skip(self, path: str, why: str) -> None:
+        """A steer request this table leaves unsteered: counted, and warned once per vector."""
+        self.steer_skipped += 1
+        PROF.incr("steer.skipped")
+        if path not in self._skip_warned:
+            self._skip_warned.add(path)
+            print(f"[mia/steer] WARNING: request(s) run UNSTEERED: {why} ({path})", flush=True)
 
     def assign_views(self) -> None:
         for layer_num, host in self.hosts.items():
@@ -390,6 +400,7 @@ class SteerRegistry:
             if vid is None:
                 continue
             if method == "adjust_rs" and vid not in self.vec_has_avgproj:
+                self.note_skip(vector_path, "adjust_rs vector has no avg_proj")
                 continue
             vid_np[i] = vid
             mode_np[i] = 1 if method == "adjust_rs" else 0
@@ -441,7 +452,8 @@ class SteerRegistry:
         if data is None:
             try:
                 raw = _load_steering_vector(path)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                self.note_skip(path, f"steering vector could not be loaded: {e!r}")
                 return None
             d = raw["dir"]
             data = {"dir": d if torch.is_tensor(d) else torch.tensor(d)}
@@ -451,6 +463,8 @@ class SteerRegistry:
             if cache is not None:
                 cache[path] = data
         if self._next_vec_id >= self.v_max:
+            self.note_skip(path, f"steering vector table is full (MIA_STEER_VMAX={self.v_max} "
+                                 f"distinct vectors per engine)")
             return None
         vid = self._next_vec_id
         self._next_vec_id += 1
@@ -545,6 +559,7 @@ def _build_routing_steer(step: StepView, registry: SteerRegistry) -> list:
         if vid is None:
             continue
         if method == "adjust_rs" and vid not in registry.vec_has_avgproj:
+            registry.note_skip(vector_path, "adjust_rs vector has no avg_proj")
             continue
         mode_val = 1 if method == "adjust_rs" else 0
         coefficient = 0.0 if method == "adjust_rs" else float(cfg.get("coefficient", 0.0))

@@ -86,38 +86,14 @@ class CorerAnalyzer:
             raise NotImplementedError(
                 "CorerAnalyzer requires QK capture (qk_capture='qk'); attention-score "
                 "capture (v0.6.0) is only consumed by AttntrackerAnalyzer.")
-        bs = len(next(iter(cache["qk_cache"].values()))['q'])
-
-        first_layer = list(cache["qk_cache"].keys())[0]
-        k_all_full = False
-        if past_prefill is not None:
-            na_k = cache["qk_cache"][first_layer]['k_all'][0].shape[0]
-            na_q = cache["qk_cache"][first_layer]['q'][0].shape[0]
-            k_all_full = na_k > na_q
-
-        if past_prefill is not None and not k_all_full:
-            qk_cache = {}
-            masks = [~torch.isnan(cache["qk_cache"][list(cache["qk_cache"].keys())[0]]['q'][i]).any(dim=1) for i in range(bs)]
-            for module_name in past_prefill.keys():
-                merged_q = []
-                merged_k = []
-                for prefill_q, prefill_k, cache_q, cache_k, mask in zip(
-                    past_prefill[module_name]['q'],
-                    past_prefill[module_name]['k_all'],
-                    cache["qk_cache"][module_name]['q'],
-                    cache["qk_cache"][module_name]['k_all'],
-                    masks,
-                ):
-                    valid_q = cache_q[mask]
-                    merged_q.append(torch.cat([prefill_q, valid_q], dim=0))
-                    merged_k.append(torch.cat([prefill_k, cache_k[mask]], dim=0))
-                qk_cache[module_name] = {
-                    'q': merged_q,
-                    'k_all': merged_k,
-                    'layer_num': past_prefill[module_name]['layer_num']
-                }
-        else:
-            qk_cache = cache["qk_cache"]
+        bs = len(doc_span)
+        qk_cache = cache["qk_cache"]
+        for module_name, qk_data in qk_cache.items():
+            if not len(qk_data['q']) == len(qk_data['k_all']) == bs:
+                raise ValueError(
+                    f"CorerAnalyzer: run {run_id!r} {module_name}: {len(qk_data['q'])} q and "
+                    f"{len(qk_data['k_all'])} k_all passes for {bs} request(s); CoRe needs one "
+                    f"prefill pass per request (hooks_on='prefill')")
         prefill_qk_cache = {}
 
         all_layer = []
@@ -128,24 +104,16 @@ class CorerAnalyzer:
             layer_num = qk_data['layer_num']
 
             k_all = qk_data['k_all']
-
-            if past_prefill is not None and not k_all_full:
-                q_query = [qk_data['q'][i][:query_end_tok_idx[i]-query_start_tok_idx[i]+1, :] for i in range(bs)]
-            else:
-                q_query = []
-                for i in range(bs):
-                    q_len = qk_data['q'][i].shape[0]
-                    k_len = k_all[i].shape[0]
-                    offset = k_len - q_len
-                    qs = max(0, query_start_tok_idx[i] - offset)
-                    qe = max(0, query_end_tok_idx[i] - offset) + 1
-                    q_query.append(qk_data['q'][i][qs:qe, :])
+            prefill = None if past_prefill is None else past_prefill[module_name]
+            q_query = [self._query_rows(qk_data['q'][i], k_all[i].shape[0], query_start_tok_idx[i],
+                                        query_end_tok_idx[i], prefill, i) for i in range(bs)]
 
             if past_prefill is None:
                 prefill_qk_cache[module_name] = {
-                    'q': [qk_data['q'][i][query_start_tok_idx[i]:after_instruct[i]+1, :] for i in range(bs)],
-                    'k_all': [qk_data['k_all'][i][:after_instruct[i]+1, :] for i in range(bs)],
-                    'layer_num': layer_num
+                    'q': [self._query_rows(qk_data['q'][i], k_all[i].shape[0],
+                                           query_start_tok_idx[i], after_instruct[i], None, i)
+                          for i in range(bs)],
+                    'q_start': list(query_start_tok_idx),
                 }
 
             k_heads, q_heads = [], []
@@ -191,6 +159,23 @@ class CorerAnalyzer:
         torch.cuda.empty_cache()
 
         return batch_doc_results, prefill_qk_cache
+
+    @staticmethod
+    def _query_rows(q, k_len, start, end, prefill, i):
+        cached = k_len - q.shape[0]
+        if cached < 0 or k_len <= end:
+            raise ValueError(f"CorerAnalyzer: request {i}: q has {q.shape[0]} rows and k_all "
+                             f"{k_len}; the keys must cover the prompt through position {end}")
+        cut = min(max(cached, start), end + 1)
+        own = q[cut - cached:end + 1 - cached]
+        if cut == start:
+            return own
+        lo = prefill['q_start'][i] if prefill is not None else None
+        if lo is None or start < lo or cut > lo + prefill['q'][i].shape[0]:
+            raise ValueError(f"CorerAnalyzer: request {i}: positions {start}..{cut - 1} of the "
+                             f"query span were served from the prefix cache and no earlier pass "
+                             f"holds them; capture with prefix caching off")
+        return torch.cat([prefill['q'][i][start - lo:cut - lo], own], dim=0)
 
     def get_attn_all(self, key_states, query_states):
         num_heads, q_len, head_dim = query_states.size()

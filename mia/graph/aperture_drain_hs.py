@@ -25,12 +25,13 @@ from .aperture_gather import (DELIVER_ENV as GATHER_DELIVER_ENV, ApertureGatherP
 from .aperture_trim import (TRIM_ENV as GATHER_TRIM_ENV, trim_chunk_bytes, trim_enabled,
                             trim_explicit, trim_lag_bytes)
 from .aperture_run_index import (FLUSH_MS_ENV, GATHER_ENV, INDEX_NAME, RunIndex,
-                                 RunIndexFlusher, flush_interval_ms, gather_enabled, new_run_id)
+                                 RunIndexFlusher, clear_chain, flush_interval_ms, gather_enabled,
+                                 new_run_id)
 from .aperture_sink import (
     ApertureWriteConfigError, ApertureWriteError, ApertureWritePath, PerRequestSinks,
     WRITE_MODE_ENV, WriteShape, WriteStats, alloc_host_rows, join_writes, join_writes_quietly,
-    record_step_stats, resolve_per_request_write_mode, resolve_write_mode, resolve_write_threads,
-    timed_write)
+    lock_run_dir, record_step_stats, release_run_lock, releases_run_lock_on_failure,
+    resolve_per_request_write_mode, resolve_write_mode, resolve_write_threads, timed_write)
 from .thread_device import bind_thread_to_device
 
 logger = logging.getLogger(__name__)
@@ -395,6 +396,7 @@ class MultiLayerApertureDrain:
     _DIRECT_REFUSAL = ("the synchronous drain (MIA_APERTURE_SYNC_DRAIN=1) writes pageable host "
                        "copies with no alignment guarantee; it writes zero-copy buffered")
 
+    @releases_run_lock_on_failure
     def __init__(self, aperture: CaptureAperture, layers: List[Tuple[int, torch.Tensor]],
                  run_dir: str, header: dict, setup_sink: bool = True,
                  shape: Optional[WriteShape] = None):
@@ -462,6 +464,9 @@ class MultiLayerApertureDrain:
                     f"nothing would be trimmed and nothing would say so. It is ON by default and "
                     f"needs no setting at all when the gather runs. Set {GATHER_DELIVER_ENV}=1 (with "
                     f"{GATHER_ENV}=1 and a {FLUSH_MS_ENV} cadence), or unset {GATHER_TRIM_ENV}.")
+        self._run_lock = lock_run_dir(run_dir, "hs") if setup_sink else None
+        if setup_sink:
+            clear_chain(run_dir)
         self._wp: Optional[ApertureWritePath] = None
         self._sidecar: Optional[HsSidecarLog] = None
         self._io_lock = threading.Lock()
@@ -592,10 +597,10 @@ class MultiLayerApertureDrain:
         if mode != "hybrid":
             return f" | delivery selection: {stamp}"
         if source == "default":
-            return (" | delivery: HYBRID chosen BY DEFAULT (MIA_APERTURE_PER_REQUEST=1 asked for "
-                    "per-request delivery; MIA_APERTURE_DELIVERY=drain takes the in-drain writer "
-                    "instead). Artifacts are FILES under the delivery dir, read with "
-                    "aperture_gather.load_delivered -- NOT in output.probes")
+            return (" | delivery: HYBRID chosen BY DEFAULT (MIA_APERTURE_DELIVERY=drain takes the "
+                    "in-drain writer instead, =off the shared files only). Artifacts are files "
+                    "under the delivery dir (aperture_gather.load_delivered); output.probes / "
+                    "response.probes are read from them")
         return " | delivery: HYBRID chosen explicitly (MIA_APERTURE_DELIVERY=hybrid)"
 
     def _run_summary(self) -> str:
@@ -707,10 +712,10 @@ class MultiLayerApertureDrain:
                           busy_s=t_w, bookkeeping_s=t_b, bytes_by_mode=by_mode, wp=self._wp)
         return moved
 
-    def note_gather_finish(self, req_id) -> None:
+    def note_gather_finish(self, req_id, asked: bool = False) -> None:
         """Record a finished request for the gather's completion stamp."""
         if self._run_index is not None and self.gather_stamp:
-            self._run_index.note_finish(req_id)
+            self._run_index.note_finish(req_id, asked=asked)
 
     def flush_run_index(self, *, up_to=None) -> Optional[str]:
         """Publish the next index segment now; return its path or None."""
@@ -728,6 +733,7 @@ class MultiLayerApertureDrain:
             w.close()
         write_sidecar(self.meta_path, self._steps, self.header)
         self._closed = True
+        release_run_lock(self)
 
     def _close_fast(self) -> None:
         if self._closed:
@@ -766,6 +772,7 @@ def _close_write_path(drain, kind: str) -> None:
         if ri is not None:
             ri.write(os.path.join(drain.run_dir, INDEX_NAME), drain.header)
         drain._closed = True
+        release_run_lock(drain)
     finally:
         if got:
             drain._io_lock.release()
@@ -789,6 +796,7 @@ class _DrainItem:
 class _Finish:
     """Per-request finish signal, queued after that request's row entries."""
     req_id: str
+    asked: bool = False
 
 
 class OffLoopApertureDrain(MultiLayerApertureDrain):
@@ -796,6 +804,7 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
 
     _ALLOW_DIRECT = True
 
+    @releases_run_lock_on_failure
     def __init__(self, aperture: CaptureAperture, layers, run_dir: str, header: dict,
                  per_request: bool = False, index: Optional[PerRequestIndex] = None,
                  offload=None, disk_base: Optional[str] = None,
@@ -873,10 +882,10 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
             return
         self._q.put(_Finish(str(req_id)))
 
-    def note_gather_finish(self, req_id) -> None:
+    def note_gather_finish(self, req_id, asked: bool = False) -> None:
         """Queue the gather's completion stamp behind this request's rows."""
         if self.gather_stamp:
-            self._q.put(_Finish(str(req_id)))
+            self._q.put(_Finish(str(req_id), bool(asked)))
 
     def route_to_disk(self, req_id, dest, offload=None) -> None:
         """Route ``req_id`` to per-request disk staging, offloaded to ``dest`` when it finishes."""
@@ -1013,7 +1022,7 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
                         if self.per_request:
                             self._finalize_finish_isolated(item.req_id)
                         elif self._run_index is not None:
-                            self._run_index.note_finish(item.req_id)
+                            self._run_index.note_finish(item.req_id, asked=item.asked)
                     else:
                         self._drain_item(item)
                     self._reclaim_settled_pending()

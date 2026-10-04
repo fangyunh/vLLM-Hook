@@ -20,7 +20,6 @@ from .aperture_drain_hs import (
     _Finish,
     _close_write_path,
     _dbg,
-    _match_disk_route,
     _raw_bytes,
     _aperture_debug,
     _sanitize_req_id,
@@ -31,13 +30,23 @@ from .aperture_metadata import (
 from .aperture_sink import (
     ApertureWriteConfigError, ApertureWriteError, ApertureWritePath, PerRequestSinks,
     WRITE_MODE_ENV, WriteShape, WriteStats, alloc_host_rows, join_writes, join_writes_quietly,
-    record_step_stats, resolve_per_request_write_mode, resolve_write_mode, resolve_write_threads,
-    timed_write)
+    lock_run_dir, record_step_stats, release_run_lock, releases_run_lock_on_failure,
+    resolve_per_request_write_mode, resolve_write_mode, resolve_write_threads, timed_write)
 from .thread_device import bind_thread_to_device
 
 logger = logging.getLogger(__name__)
 
 _GIB = 1024 ** 3
+
+
+def _match_disk_route(rid: str, route_keys) -> Optional[str]:
+    from mia.workers._common import request_id_base
+
+    rid = str(rid)
+    if rid in route_keys:
+        return rid
+    base = request_id_base(rid)
+    return base if base is not None and base in route_keys else None
 
 
 def _resolve_qk_mmap_capacity_bytes(n_slots: int, row_bytes: int) -> int:
@@ -161,6 +170,7 @@ class MultiLayerQKApertureDrain:
     _DIRECT_REFUSAL = ("the synchronous drain (MIA_APERTURE_SYNC_DRAIN=1) writes pageable host "
                        "copies with no alignment guarantee; it writes zero-copy buffered")
 
+    @releases_run_lock_on_failure
     def __init__(self, aperture: CaptureAperture, layers: List[Tuple[int, torch.Tensor, torch.Tensor]],
                  run_dir: str, header: dict, setup_sink: bool = True,
                  shape: Optional[WriteShape] = None):
@@ -186,6 +196,7 @@ class MultiLayerQKApertureDrain:
         self._mmap_enabled = False
         self._q_writers: Dict[int, _MmapLayerWriter] = {}
         self._k_writers: Dict[int, _MmapLayerWriter] = {}
+        self._run_lock = lock_run_dir(run_dir, "qk") if setup_sink else None
         if not setup_sink:
             self._perreq_write_mode = resolve_per_request_write_mode(
                 self.write_mode, self._write_mode_explicit)
@@ -349,6 +360,7 @@ class MultiLayerQKApertureDrain:
             w.close()
         write_qk_sidecar(self.meta_path, self._steps, self.header)
         self._closed = True
+        release_run_lock(self)
 
 
 class OffLoopQKApertureDrain(MultiLayerQKApertureDrain):
@@ -356,6 +368,7 @@ class OffLoopQKApertureDrain(MultiLayerQKApertureDrain):
 
     _ALLOW_DIRECT = True
 
+    @releases_run_lock_on_failure
     def __init__(self, aperture, layers, run_dir: str, header: dict,
                  per_request: bool = False, index: Optional[PerRequestIndex] = None,
                  offload=None, disk_base: Optional[str] = None,
@@ -797,11 +810,11 @@ class OffLoopQKApertureDrain(MultiLayerQKApertureDrain):
                          f"{list(routed_keys)} -> host index")
                 staged.append((e.req_id, int(e.layer),
                                None if q_slice is None else q_slice.clone(),
-                               k_slice.clone(), int(e.prefix_end)))
+                               k_slice.clone(), int(e.prefix_end), int(e.num_computed)))
         with self._index_lock:
             ab_host = tuple(self._host_aborted) if self._host_aborted else ()
             ab_disk = tuple(self._disk_aborted) if self._disk_aborted else ()
-            for req_id, layer, q_clone, k_clone, prefix_end in staged:
+            for req_id, layer, q_clone, k_clone, prefix_end, num_computed in staged:
                 if ((ab_host and _match_disk_route(req_id, ab_host) is not None)
                         or (ab_disk and _match_disk_route(req_id, ab_disk) is not None)):
                     if _aperture_debug():
@@ -812,7 +825,8 @@ class OffLoopQKApertureDrain(MultiLayerQKApertureDrain):
                     lst = self._qk_kmeta.setdefault(req_id, {}).setdefault(layer, [])
                     lst.append(prefix_end)
                     kmeta = {"prefix_ends": list(lst)}
-                self.index.note_rows(req_id, ("k", layer), k_clone, kmeta=kmeta)
+                self.index.note_rows(req_id, ("k", layer), k_clone, kmeta=kmeta,
+                                     num_computed=num_computed)
                 if q_clone is not None:
                     self.index.note_rows(req_id, ("q", layer), q_clone)
 

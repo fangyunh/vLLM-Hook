@@ -17,6 +17,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import torch
 
 from mia._profiler import PROF, is_enabled as is_prof_enabled
+from mia.errors import MiaRefusal
 from .thread_device import bind_thread_to_device
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,72 @@ class ApertureWriteConfigError(ValueError):
 
 class ApertureWriteError(RuntimeError):
     """A raw-file write failed or would have violated O_DIRECT's alignment rules."""
+
+
+class RunDirInUseError(ApertureWriteConfigError, MiaRefusal):
+    """Another live engine holds this aperture run dir (a refusal: the engine must not start)."""
+
+
+class RunDirLockError(ApertureWriteConfigError, MiaRefusal):
+    """The run-dir lock failed for a reason other than another engine holding it."""
+
+
+def lock_run_dir(run_dir: str, kind: str):
+    """Exclusive per-kind lock on ``run_dir`` for one live drain."""
+    import fcntl
+
+    path = os.path.join(run_dir, f".{kind}_aperture.lock")
+    while True:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o666)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            os.close(fd)
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                raise RunDirInUseError(
+                    f"{run_dir} is in use by another live engine, whose {kind.upper()} capture "
+                    f"files this one would truncate. Give each engine its own MIA_APERTURE_DIR."
+                ) from None
+            if e.errno in (errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS):
+                logger.warning("%s: this filesystem takes no flock (%s); a second engine on "
+                               "this dir would not be refused", run_dir, e)
+                print(f"[mia/aperture] {run_dir}: no run-dir lock on this filesystem ({e}); "
+                      f"give each engine its own MIA_APERTURE_DIR", flush=True)
+                return None
+            raise RunDirLockError(f"{path}: cannot take the run-dir lock: {e!r}") from e
+        try:
+            same = os.fstat(fd).st_ino == os.stat(path).st_ino
+        except FileNotFoundError:
+            same = False
+        if same:
+            return (fd, path)
+        os.close(fd)
+
+
+def release_run_lock(drain) -> None:
+    lock = getattr(drain, "_run_lock", None)
+    if lock is not None:
+        drain._run_lock = None
+        fd, path = lock
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        os.close(fd)
+
+
+def releases_run_lock_on_failure(init):
+    """Decorate a drain ``__init__``: a construction that raises gives its run-dir lock back."""
+    import functools
+
+    @functools.wraps(init)
+    def wrapper(self, *args, **kwargs):
+        try:
+            init(self, *args, **kwargs)
+        except BaseException:
+            release_run_lock(self)
+            raise
+    return wrapper
 
 
 def resolve_write_mode() -> Tuple[str, bool]:

@@ -52,6 +52,41 @@ def parse_rank_dir(name: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+DP_DIR_PREFIX = "dp_rank_"
+_DP_DIR_RE = re.compile(r"^dp_rank_(\d+)$")
+
+
+def dp_dir_name(dp_rank: int) -> str:
+    return f"{DP_DIR_PREFIX}{int(dp_rank)}"
+
+
+def parse_dp_dir(name: str) -> Optional[int]:
+    """The DP rank encoded in a ``dp_rank_<N>`` directory name, else None."""
+    m = _DP_DIR_RE.match(os.path.basename(os.path.normpath(str(name))))
+    return int(m.group(1)) if m else None
+
+
+def dp_layout(worker) -> dict:
+    """``{"dp_rank": i, "dp_size": n}`` when ``MIA_DP_SIZE`` > 1, else ``{}``."""
+    from .delivery_selector import DP_SIZE_ENV, _dp_size
+
+    n = _dp_size(os.environ)
+    if n <= 1:
+        return {}
+    pc = getattr(worker, "parallel_config", None)
+    idx = getattr(pc, "data_parallel_index", None)
+    if idx is None or not 0 <= int(idx) < n:
+        raise MiaConfigurationError(
+            f"{DP_SIZE_ENV}={n} but this worker's parallel_config.data_parallel_index is {idx!r}: "
+            f"without it every DP engine would write the same run dir. Refusing.")
+    return {"dp_rank": int(idx), "dp_size": n}
+
+
+def dp_run_base(base: str, dp: dict) -> str:
+    """``base`` itself, or ``base/dp_rank_<i>`` for a :func:`dp_layout` that names a DP engine."""
+    return os.path.join(base, dp_dir_name(dp["dp_rank"])) if dp else base
+
+
 def refuse_pipeline_parallel(pp_size, where: str = "") -> None:
     """Raise if pipeline parallelism is on."""
     try:
@@ -678,6 +713,7 @@ __all__ = [
     "hs_rows_for_mode", "hs_max_owned_layers", "hs_requested_layers", "hs_expected_ranks",
     "hs_shard_from_header", "check_hs_shard_set", "merge_hs_layer_maps", "merge_hs_payloads",
     "rank_dir_name", "parse_rank_dir", "refuse_pipeline_parallel", "resolve_tp_coords",
+    "DP_DIR_PREFIX", "dp_dir_name", "parse_dp_dir", "dp_layout", "dp_run_base",
     "qk_shard", "qk_shard_from_header", "qk_conf_head_dim", "check_attn_modules_match_shard",
     "check_complete_shard_set", "merge_head_tensors",
     "merge_qk_entries", "merge_qk_payloads", "drain_holds_data", "discover_rank_dirs",

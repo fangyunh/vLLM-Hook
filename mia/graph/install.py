@@ -20,6 +20,8 @@ from mia.graph.aperture_metadata import QKReqCaptureRecord
 from mia.graph.aperture_sizing import aperture_bytes_is_explicit, resolve_aperture_bytes_auto
 from mia.graph.tp_shard import (
     check_attn_modules_match_shard,
+    dp_layout,
+    dp_run_base,
     qk_conf_head_dim,
     qk_shard,
     rank_dir_name,
@@ -279,6 +281,7 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
     num_layers = max(layer_num for _, _, layer_num in matched) + 1
     check_attn_modules_match_shard(matched, shard)
     worker._qk_num_layers = num_layers
+    worker._qk_module_names = {int(ln): str(name) for name, _, ln in matched}
 
     buf_dtype = model.dtype if hasattr(model, "dtype") else next(model.parameters()).dtype
 
@@ -392,11 +395,9 @@ def _build_routing(step: StepView, registry: HostRegistry) -> list:
 
         is_prefill = bool(step.is_prefilling_np[i])
         hooks_on = extra.get("hooks_on", default_hooks_on)
-        if hooks_on != "both":
-            if hooks_on == "prefill" and not is_prefill:
-                continue
-            if hooks_on == "decode" and is_prefill:
-                continue
+        if hooks_on == "prefill" and not is_prefill:
+            continue
+        decode_prefill = hooks_on == "decode" and is_prefill
 
         req_mode = extra.get("hookq_mode", default_hookq_mode)
         cap_mode = extra.get("qk_capture", "score" if score_mode_default else "qk")
@@ -427,8 +428,8 @@ def _build_routing(step: StepView, registry: HostRegistry) -> list:
         if not req_layers:
             continue
 
-        emit_q = True
-        if req_mode == "last_token" and is_prefill:
+        emit_q = not decode_prefill
+        if emit_q and req_mode == "last_token" and is_prefill:
             num_prompt = int(step.prompt_len_np[i])
             emit_q = abs_end >= num_prompt
 
@@ -492,6 +493,7 @@ def _capture_idle_key(step: StepView, registry, output_attr: str) -> Optional[tu
     if not req_ids:
         return None
     default_hooks_on = getattr(registry, "_default_hooks_on", "prefill")
+    qk = output_attr == "output_qk"
     for i in range(step.num_reqs):
         extra = step.extra_args_for(i)
         if not extra or extra.get(output_attr) is None:
@@ -501,7 +503,7 @@ def _capture_idle_key(step: StepView, registry, output_attr: str) -> Optional[tu
             is_prefill = bool(step.is_prefilling_np[i])
             if hooks_on == "prefill" and not is_prefill:
                 continue
-            if hooks_on == "decode" and is_prefill:
+            if hooks_on == "decode" and is_prefill and not qk:
                 continue
         return None
     return _IDLE_ROUTE_KEY
@@ -641,7 +643,8 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         buf_dtype = layers[0][1].dtype if layers else torch.float32
         q_dim = int(layers[0][1].shape[1]) if layers else 0
         k_dim = int(layers[0][2].shape[1]) if layers else 0
-        base = os.environ.get("MIA_APERTURE_DIR", "./qk_aperture_dump")
+        base = dp_run_base(os.environ.get("MIA_APERTURE_DIR", "./qk_aperture_dump"),
+                           dp_layout(worker))
         shard = getattr(worker, "_qk_shard", None)
         tp_rank = shard.tp_rank if shard is not None else resolve_tp_coords(worker)[0]
         run_dir = os.path.join(base, rank_dir_name(tp_rank))

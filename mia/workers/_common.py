@@ -103,6 +103,29 @@ def iter_matching_req_ids(state_dict: dict, external_req_id: str) -> Iterator[st
             yield req_id
 
 
+_HEX = frozenset("0123456789abcdef")
+
+
+def _randomized() -> bool:
+    import vllm.envs as envs
+    return not envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION
+
+
+def request_id_base(rid: str, randomized: bool | None = None):
+    """``rid`` without vLLM's random ``-<8 hex>`` suffix, or None when it carries none."""
+    if randomized is None:
+        randomized = _randomized()
+    if not randomized or len(rid) < 10 or rid[-9] != "-" or not set(rid[-8:]) <= _HEX:
+        return None
+    return rid[:-9]
+
+
+def match_internal_ids(keys, key: str) -> list:
+    """Ids in ``keys`` that are request ``key``: itself, or it plus vLLM's 8-hex suffix."""
+    key, rnd = str(key), _randomized()
+    return [k for k in keys if str(k) == key or request_id_base(str(k), rnd) == key]
+
+
 def clear_states_for_req(state_dict: dict, external_req_id: str) -> None:
     """Pop all internal req_ids matching ``external_req_id`` from ``state_dict``."""
     for req_id in iter_matching_req_ids(state_dict, external_req_id):

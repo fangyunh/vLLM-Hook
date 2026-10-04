@@ -33,7 +33,9 @@ _RPC_SLOPE_MS_PER_KB = {"qk": 0.157, "hs": 0.03}
 _DISK_HANDOFF_MS = 20.0
 _DISK_SLOPE_MS_PER_KB = {"qk": 0.0078, "hs": 0.0022}
 
-_ARTIFACT_WAIT_S = float(os.environ.get("MIA_ARTIFACT_WAIT_S", "10") or 10)
+def _artifact_wait_s() -> float:
+    from mia.graph.run_artifact import artifact_wait_s
+    return artifact_wait_s()
 
 
 DEFAULT_GEN_LEN = 256
@@ -336,21 +338,35 @@ def _load_and_merge_hs_safetensors(
     return _merge_shards_by_module(shards, "hs_cache", ["hidden_states"])
 
 
+def _empty_run_note(hook_dir: str, run_id: str) -> str:
+    from mia.graph.run_artifact import read_manifest
+    try:
+        man = read_manifest(hook_dir, str(run_id)) or {}
+    except (OSError, ValueError):
+        return ""
+    keys = list(man.get("requests") or [])
+    if keys and set(keys) <= set(man.get("empty") or []):
+        return (f": its manifest lists every request as empty (captured nothing): {keys}. The "
+                f"last save_to_disk write to this run replaced it with that empty capture.")
+    return ""
+
+
 def load_and_merge_hs_cache(hook_dir: str, run_id: str) -> Dict[str, Any]:
     """Load all hidden-state artifacts for run_id and merge across TP ranks."""
     import torch
 
     safetensors = os.environ.get("MIA_USE_SAFETENSORS", "0") == "1"
     if safetensors:
-        st_paths = _artifact_glob(hook_dir, run_id, "hidden_states.safetensors", timeout=_ARTIFACT_WAIT_S)
+        st_paths = _artifact_glob(hook_dir, run_id, "hidden_states.safetensors", timeout=_artifact_wait_s())
         if st_paths:
             return _load_and_merge_hs_safetensors(hook_dir, run_id, st_paths)
 
     paths = _artifact_glob(hook_dir, run_id, "hidden_states.pt",
-                           timeout=0.0 if safetensors else _ARTIFACT_WAIT_S)
+                           timeout=0.0 if safetensors else _artifact_wait_s())
     if not paths:
         raise FileNotFoundError(
             f"No hidden-state artifacts found for run_id={run_id} under {hook_dir}"
+            + _empty_run_note(hook_dir, run_id)
         )
 
     shards = []
@@ -431,21 +447,62 @@ def _load_and_merge_qk_safetensors(hook_dir: str, run_id: str, st_paths: List[st
                                    where=os.path.join(hook_dir, run_id))
 
 
+QK_REFUSED_FILE = "qk_refused.json"
+
+
+def write_refused_qk(run_dir: str, refused: dict) -> None:
+    """Record exactly this flush's refused requests for ``run_dir``."""
+    import json
+    path = os.path.join(run_dir, QK_REFUSED_FILE)
+    if not refused:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    os.makedirs(run_dir, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({str(k): str(v) for k, v in refused.items()}, f)
+    os.replace(tmp, path)
+
+
+def read_refused_qk(hook_dir: str, run_id: str) -> dict:
+    """``{internal id: reason}`` of every request refused in ``run_id`` (all ranks)."""
+    import json
+    out: dict = {}
+    for p in glob.glob(os.path.join(hook_dir, str(run_id), "**", QK_REFUSED_FILE),
+                       recursive=True):
+        with open(p, encoding="utf-8") as f:
+            out.update(json.load(f))
+    return out
+
+
 def load_and_merge_qk_cache(hook_dir: str, run_id: str):
     """Load all QK shards for run_id and merge them into a single cache."""
     import torch
 
+    refused = read_refused_qk(hook_dir, run_id)
+    if refused:
+        from mia.errors import MiaDeliveryError
+        files = sorted(glob.glob(os.path.join(hook_dir, str(run_id), "**", QK_REFUSED_FILE),
+                                 recursive=True))
+        raise MiaDeliveryError(
+            f"Q/K run {run_id!r} under {hook_dir} holds refused request(s), which its artifact "
+            f"omits: " + "; ".join(f"{r!r}: {why}" for r, why in sorted(refused.items()))
+            + f". The next save_to_disk flush to this run replaces the record; to read the "
+            f"other requests anyway, delete {files}.")
+
     safetensors = os.environ.get("MIA_USE_SAFETENSORS", "0") == "1"
     if safetensors:
-        st_paths = _artifact_glob(hook_dir, run_id, "qk.safetensors", timeout=_ARTIFACT_WAIT_S)
+        st_paths = _artifact_glob(hook_dir, run_id, "qk.safetensors", timeout=_artifact_wait_s())
         if st_paths:
             return _load_and_merge_qk_safetensors(hook_dir, run_id, st_paths)
 
     paths = _artifact_glob(hook_dir, run_id, "qk.pt",
-                           timeout=0.0 if safetensors else _ARTIFACT_WAIT_S)
+                           timeout=0.0 if safetensors else _artifact_wait_s())
     if not paths:
         raise FileNotFoundError(
             f"No Q/K cache artifacts found for run_id={run_id} under {hook_dir}"
+            + _empty_run_note(hook_dir, run_id)
         )
 
     shareds = []

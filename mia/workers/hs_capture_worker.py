@@ -512,6 +512,19 @@ class HSCaptureWorker:
             return compressed
         return None
 
+    def mia_delivery_info(self) -> dict:
+        """This rank's layer names, config, delivery dir and run id (None without a gather)."""
+        names = getattr(self, "_mia_layer_names", None)
+        if names is None:
+            model = getattr(getattr(self, "model_runner", None), "model", None)
+            names = ([] if model is None else
+                     [[ln + 1, n] for n, _m, ln in iter_matched_modules(model, match_layer)])
+        gp = getattr(getattr(self, "_hs_drain", None), "_gather_proc", None)
+        return {"names": [[int(ln), str(n)] for ln, n in names],
+                "config": dict(getattr(self, "_conf", None) or {}),
+                "delivery_dir": os.path.abspath(gp.out_dir) if gp is not None else None,
+                "run_id": gp.run_id if gp is not None else None}
+
     def dump_profiler(self) -> str | None:
         """Dump this worker's profiler snapshot to MIA_PROFILE_DIR; return the path or None."""
         from mia._profiler import PROF

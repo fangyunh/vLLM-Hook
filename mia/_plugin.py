@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 import pickle
+import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -11,32 +16,36 @@ from typing import Any
 import zstandard as zstd
 
 from mia._profiler import PROF
-from mia.errors import MiaConfigurationError, MiaRefusal
+from mia.errors import MiaConfigurationError, MiaDeliveryError, MiaRefusal
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
 
 _original_create_engine_config: Callable | None = None
 _original_generate: Callable | None = None
+_original_add_request: Callable | None = None
 _original_llm_generate: Callable | None = None
 _original_completion_response: Callable | None = None
 _original_chat_full_generator: Callable | None = None
+
+_ADDED_IDS: contextvars.ContextVar = contextvars.ContextVar("mia_added_ids", default=None)
 
 _WORKER_EXT_HS = "mia.workers.hs_capture_worker.HSCaptureWorker"
 _WORKER_EXT_QK = "mia.workers.qk_capture_worker.QKCaptureWorker"
 _WORKER_EXT_STEER = "mia.workers.steer_worker.SteerWorker"
 
-MIA_WORKER_VALUES = ("hidden_states", "qk", "steer")
+from mia.graph.run_mode import (  # noqa: E402
+    DEFAULT_MIA_WORKER,
+    MIA_WORKER_VALUES,
+    UnknownMiaWorkerError,
+    capture_mode_from_env,
+    parse_mia_worker_env,
+)
 _WORKER_EXT_BY_KIND = {
     "hidden_states": _WORKER_EXT_HS,
     "qk": _WORKER_EXT_QK,
     "steer": _WORKER_EXT_STEER,
 }
-DEFAULT_MIA_WORKER = "hidden_states"
-
-
-class UnknownMiaWorkerError(MiaRefusal, ValueError):
-    """MIA_WORKER was set to something that is not one of MIA_WORKER_VALUES."""
 
 
 class MiaWorkerConflictError(MiaConfigurationError):
@@ -52,24 +61,6 @@ def _kind_from_extension(worker_ext):
             return kind
     return None
 
-
-def parse_mia_worker_env(raw):
-    """Parse a raw MIA_WORKER value into 'hidden_states' | 'qk' | 'steer', or None."""
-    if raw is None or raw == "":
-        return None
-    if raw in MIA_WORKER_VALUES:
-        return raw
-    raise UnknownMiaWorkerError(
-        f"MIA_WORKER={raw!r} is not a MIA worker. Accepted values (exact, no aliases): "
-        f"{', '.join(MIA_WORKER_VALUES)}; unset means {DEFAULT_MIA_WORKER!r}. "
-        f"This is refused on BOTH paths. Under `vllm serve` an unrecognized value used to "
-        f"install the hidden-states worker, so a run asking for QK captured hidden states "
-        f"and reported success. Offline (MiaLLM(worker_name=...)) the variable is read too "
-        f"-- first and authoritatively, ahead of the worker class -- so a stale value there "
-        f"used to mis-size the capture-aperture OOM guard: HS row shape for a QK run, or no "
-        f"guard at all for 'steer'. Fix the spelling or unset the variable; MIA will not "
-        f"guess which of the two you meant."
-    )
 
 _DEFAULT_HOOK_DIR = "/dev/shm/mia"
 
@@ -89,7 +80,7 @@ def _decompress(data: bytes) -> Any:
 
 def _aperture_per_request_mode() -> bool:
     return (os.environ.get("MIA_APERTURE_PER_REQUEST") == "1"
-            and os.environ.get("MIA_ALLOW_CUDAGRAPH") == "1")
+            and (os.environ.get("MIA_ALLOW_CUDAGRAPH") == "1" or _graph_mode()))
 
 
 def _aperture_per_request_kind(extra: dict, wants_hs: bool, wants_qk: bool,
@@ -110,6 +101,180 @@ def _takes_aperture_per_request(extra: dict, wants_hs: bool, wants_qk: bool,
     return _aperture_per_request_kind(extra, wants_hs, wants_qk, wants_steer) is not None
 
 
+def _hybrid_serves(extra: dict, wants_hs: bool, wants_qk: bool, wants_steer: bool) -> bool:
+    from mia.graph.delivery_selector import STAMP_ENV
+    stamp = os.environ.get(STAMP_ENV) or ""
+    return (stamp.partition(":")[0] == "hybrid" and _graph_mode()
+            and wants_hs and not wants_qk and not wants_steer
+            and _resolve_sink(extra) != "drop" and not _profile_mode())
+
+
+def _hs_ask_is_empty(extra: dict, num_layers) -> bool:
+    layers = extra.get("output_hidden_states")
+    if not isinstance(layers, (list, tuple)) or not num_layers:
+        return False
+    try:
+        return not any(1 <= int(L) <= int(num_layers) for L in layers)
+    except (TypeError, ValueError):
+        return False
+
+
+def _hybrid_marker(output, extra: dict, explicit_save, gen_counts: dict, nonce=None,
+                   key=None) -> dict:
+    from mia.graph.install_hs import DEFAULT_HOOKS_ON, DEFAULT_HS_MODE
+    outs = list(getattr(output, "outputs", None) or [])
+    n = max(len(outs), 1)
+    n_gen = [int(gen_counts.get(getattr(o, "index", j), len(o.token_ids or [])))
+             for j, o in enumerate(outs)] or [0]
+    layers = extra.get("output_hidden_states")
+    return {"delivery": "hybrid", "n": n,
+            "layers": list(layers) if isinstance(layers, (list, tuple)) else None,
+            "hs_mode": extra.get("hs_mode", DEFAULT_HS_MODE),
+            "hooks_on": extra.get("hooks_on", DEFAULT_HOOKS_ON),
+            "n_prompt": len(getattr(output, "prompt_token_ids", None) or []),
+            "n_gen": n_gen, "n_cached": int(getattr(output, "num_cached_tokens", 0) or 0),
+            "save_to_disk": explicit_save, "run_id": extra.get("run_id"),
+            "hook_dir": extra.get("hook_dir"), "nonce": nonce, "key": key}
+
+
+def _sample_metas(mark: dict) -> list:
+    return [{"hs_mode": mark["hs_mode"], "hooks_on": mark["hooks_on"],
+             "n_prompt": mark["n_prompt"], "n_gen": g, "n_cached": mark.get("n_cached", 0)}
+            for g in mark["n_gen"]]
+
+
+def _spawn_hybrid_writer(engine, request_id, mark: dict, extra: dict, internal=None,
+                         start=None) -> None:
+    from mia.graph.delivered_probes import response_id
+    from mia.graph.delivery_route import spawn_writer
+    spawn_writer(engine, ext=str(request_id), n=mark["n"], layers=mark["layers"],
+                 metas=_sample_metas(mark),
+                 hook_dir=extra.get("hook_dir") or _DEFAULT_HOOK_DIR,
+                 run_id=str(extra.get("run_id") or request_id),
+                 unit=response_id(str(request_id)), stamp=time.time_ns(),
+                 nonce=mark.get("nonce"),
+                 keys=_sample_keys(str(internal), mark["n"]) if internal else None, start=start)
+
+
+def _sample_keys(base: str, n: int) -> list:
+    return [base] if n <= 1 else [f"{j}_{base}" for j in range(n)]
+
+
+def _qk_dest(hook_dir: str, run_id, key: str) -> str:
+    from urllib.parse import quote
+    return os.path.join(hook_dir, str(run_id), ".mia_qk", quote(str(key), safe=""))
+
+
+def _qk_ask_is_empty(extra: dict, num_layers) -> bool:
+    spec = extra.get("output_qk")
+    if not isinstance(spec, (dict, list, tuple)) or not num_layers:
+        return False
+    try:
+        return not any(0 <= int(L) < int(num_layers) for L in spec)
+    except (TypeError, ValueError):
+        return False
+
+
+def _outputs_by_index(output) -> list:
+    outs = list(getattr(output, "outputs", None) or [])
+    return sorted(outs, key=lambda o: getattr(o, "index", 0))
+
+
+def _raise_delivery_errors(request_id, parts) -> None:
+    from mia.errors import MiaDeliveryError
+    for p in parts:
+        if isinstance(p, dict) and "mia_error" in p:
+            raise MiaDeliveryError(
+                f"Q/K capture of request {request_id!r} cannot be delivered: {p['mia_error']}")
+
+
+def _qk_mode(extra: dict) -> str:
+    return extra.get("hookq_mode") or "all_tokens"
+
+
+def _qk_hooks(extra: dict) -> str:
+    return extra.get("hooks_on") or "prefill"
+
+
+async def _qk_serve_rpc(engine, output, keys, mode: str, hooks: str) -> None:
+    from mia.graph.delivered_probes import qk_probes
+    outs = _outputs_by_index(output)
+    n_prompt = len(getattr(output, "prompt_token_ids", None) or [])
+    probes = []
+    for j, key in enumerate(keys):
+        p = await _await_aperture_per_request(engine, key)
+        n_gen = len(outs[j].token_ids or []) if j < len(outs) else 0
+        probes.append(None if p is None else qk_probes(p, n_prompt=n_prompt, n_gen=n_gen,
+                                                       hookq_mode=mode, hooks_on=hooks))
+    if probes and probes[0] is not None:
+        output.probes = probes[0]
+    if len(keys) > 1:
+        for c, p in zip(outs, probes):
+            if p is not None:
+                c.probes = p
+
+
+def _drop_qk_staging(hook_dir: str, run_id, keys) -> None:
+    import shutil
+    for key in keys:
+        shutil.rmtree(_qk_dest(hook_dir, run_id, key), ignore_errors=True)
+    try:
+        os.rmdir(os.path.join(hook_dir, str(run_id), ".mia_qk"))
+    except OSError:
+        pass
+
+
+def _write_qk_run(output, keys, info, hook_dir: str, run_id: str, mode: str, hooks: str,
+                  unit=None, stamp=None, nonce=None, start=None) -> None:
+    from mia.graph import run_artifact
+    from mia.graph.aperture_reader import load_qk_aperture_tp
+    from mia.graph.delivered_probes import qk_probes
+    outs = _outputs_by_index(output)
+    n_prompt = len(getattr(output, "prompt_token_ids", None) or [])
+    try:
+        items = []
+        for j, key in enumerate(keys):
+            try:
+                got = load_qk_aperture_tp(_qk_dest(hook_dir, run_id, key))
+            except NotImplementedError as e:
+                raise MiaDeliveryError(
+                    f"Q/K capture of request {key!r} cannot be delivered: {e}") from None
+            if len(got) != 1:
+                raise MiaDeliveryError(f"Q/K delivery of {key!r} holds {len(got)} requests, not 1")
+            payload = {"qk_cache": next(iter(got.values())), "config": info["config"],
+                       "module_names": info["names"]}
+            n_gen = len(outs[j].token_ids or []) if j < len(outs) else 0
+            items.append((key, qk_probes(payload, n_prompt=n_prompt, n_gen=n_gen,
+                                         hookq_mode=mode, hooks_on=hooks, layout="disk")))
+        run_artifact.append(hook_dir, run_id, kind="qk", items=items, unit=unit, stamp=stamp,
+                            nonce=nonce, start=start)
+    finally:
+        _drop_qk_staging(hook_dir, run_id, keys)
+
+
+async def _qk_serve_disk(engine, output, extra, keys, request_id, start=None) -> None:
+    import asyncio
+
+    from mia.graph.delivered_probes import response_id
+    from mia.graph.delivery_route import _WRITE_POOL, engine_info
+    stamp, nonce = time.time_ns(), uuid.uuid4().hex
+    run_id = str(extra.get("run_id") or request_id)
+    hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
+    loop = asyncio.get_running_loop()
+    for key in keys:
+        with PROF.timed("aperture.await_disk_confirm"):
+            ok = await _await_aperture_disk_confirm(engine, key)
+        if ok is not True:
+            await loop.run_in_executor(_WRITE_POOL, _drop_qk_staging, hook_dir, run_id, keys)
+            raise MiaDeliveryError(f"Q/K capture of request {key!r} did not land under "
+                                   f"{hook_dir} (MIA_APERTURE_DELIVER_TIMEOUT_S)")
+    info = await engine_info(engine)
+    with PROF.timed("aperture.qk_run_write"):
+        await loop.run_in_executor(_WRITE_POOL, _write_qk_run, output, keys, info, hook_dir,
+                                   run_id, _qk_mode(extra), _qk_hooks(extra),
+                                   response_id(str(request_id)), stamp, nonce, start)
+
+
 def _reconstruct_compact_qk(probes: dict) -> None:
     qk = probes.get("qk_cache") if isinstance(probes, dict) else None
     if not isinstance(qk, dict):
@@ -124,15 +289,7 @@ def _reconstruct_compact_qk(probes: dict) -> None:
             entry["k_all"] = pad_sequence([full[:int(L)] for L in ends], batch_first=True)
 
 
-def _trim_probes(probes: dict, key: str, expected_len: int) -> None:
-    for entry in probes.get(key, {}).values():
-        for tkey in ("hidden_states", "q", "k_all"):
-            t = entry.get(tkey)
-            if t is None or isinstance(t, list):
-                continue
-            if t.dim() == 3 and t.shape[1] > expected_len:
-                PROF.incr("trim.event")
-                entry[tkey] = t[:, :expected_len, :]
+from mia.graph.delivered_probes import trim_probes as _trim_probes  # noqa: E402
 
 
 def _stable_artifact_files(run_dir: str) -> list:
@@ -148,6 +305,13 @@ def _stable_artifact_files(run_dir: str) -> list:
 
 _ARTIFACT_WAIT_S = 10.0
 _ARTIFACT_POLL_S = 0.005
+
+
+def _artifact_wait_s() -> float:
+    if os.environ.get("MIA_ARTIFACT_WAIT_S"):
+        from mia.graph.run_artifact import artifact_wait_s
+        return artifact_wait_s()
+    return _ARTIFACT_WAIT_S
 
 
 def _flushed_rank_dirs(results, run_id: str, hook_dir: str):
@@ -173,13 +337,13 @@ def _artifact_barrier_state(run_dir: str, rank_dirs) -> "tuple[list, bool]":
 
 def _log_barrier_timeout(run_id: str, rank_dirs) -> None:
     if not rank_dirs:
-        print(f"[mia/disk] durability barrier TIMEOUT after {_ARTIFACT_WAIT_S:.0f}s for "
+        print(f"[mia/disk] durability barrier TIMEOUT after {_artifact_wait_s():.0f}s for "
               f"run_id {run_id!r}: no artifact landed. A loader will raise FileNotFoundError "
               f"for this run_id -- the write did not finish, the run_id is not wrong.", flush=True)
         return
     missing = [os.path.basename(d) for d in rank_dirs if not _stable_artifact_files(d)]
     if missing:
-        print(f"[mia/disk] durability barrier TIMEOUT after {_ARTIFACT_WAIT_S:.0f}s for "
+        print(f"[mia/disk] durability barrier TIMEOUT after {_artifact_wait_s():.0f}s for "
               f"run_id {run_id!r}: {len(rank_dirs) - len(missing)}/{len(rank_dirs)} rank "
               f"artifact(s) landed, missing {missing}. The run's artifact is INCOMPLETE; the QK "
               f"loader will refuse it until every rank's shard is on disk.", flush=True)
@@ -200,7 +364,7 @@ async def _await_disk_artifact(run_id: str, hook_dir: str, rank_dirs=None) -> bo
     import asyncio
     run_dir = os.path.join(hook_dir, run_id)
     prev = None
-    for _ in range(max(2, int(_ARTIFACT_WAIT_S / _ARTIFACT_POLL_S))):
+    for _ in range(max(2, int(_artifact_wait_s() / _ARTIFACT_POLL_S))):
         files, complete = _artifact_barrier_state(run_dir, rank_dirs)
         if complete and files == prev:
             return True
@@ -216,7 +380,7 @@ def _wait_disk_artifact(run_id: str, hook_dir: str, rank_dirs=None) -> bool:
     import time
     run_dir = os.path.join(hook_dir, run_id)
     prev = None
-    for _ in range(max(2, int(_ARTIFACT_WAIT_S / _ARTIFACT_POLL_S))):
+    for _ in range(max(2, int(_artifact_wait_s() / _ARTIFACT_POLL_S))):
         files, complete = _artifact_barrier_state(run_dir, rank_dirs)
         if complete and files == prev:
             return True
@@ -250,6 +414,7 @@ async def _await_aperture_per_request(engine, request_id, hs_layers=None):
         for i, s in enumerate(states):
             if s is not None and i not in collected:
                 collected[i] = _decompress(s)
+        _raise_delivery_errors(request_id, collected.values())
         if collected:
             parts = [collected[i] for i in sorted(collected)]
             if len(parts) >= _expected_probe_parts(parts, hs_layers):
@@ -263,8 +428,9 @@ async def _await_aperture_per_request(engine, request_id, hs_layers=None):
         await asyncio.sleep(_APERTURE_DELIVER_POLL_S)
 
 
-def _collect_aperture_per_request_sync(rpc, request_id, hs_layers=None):
+def _collect_aperture_per_request_sync(rpc, request_id, hs_layers=None, *, wait=False):
     import time
+    from mia.errors import MiaDeliveryError
     collected: dict = {}
     deadline = None
     while True:
@@ -273,13 +439,19 @@ def _collect_aperture_per_request_sync(rpc, request_id, hs_layers=None):
         for i, s in enumerate(states):
             if s is not None and i not in collected:
                 collected[i] = _decompress(s)
-        if not collected:
+        _raise_delivery_errors(request_id, collected.values())
+        if not collected and not wait:
             return None
         parts = [collected[i] for i in sorted(collected)]
-        if len(parts) >= _expected_probe_parts(parts, hs_layers):
+        if parts and len(parts) >= _expected_probe_parts(parts, hs_layers):
             return merge_probe_parts(parts, hs_layers)
         if deadline is None:
             deadline = time.monotonic() + _aperture_deliver_timeout_s()
+        elif time.monotonic() >= deadline and wait:
+            raise MiaDeliveryError(
+                f"Q/K capture of request {request_id!r} was not delivered within "
+                f"{_aperture_deliver_timeout_s():.1f}s ({len(parts)} rank part(s) held; raise "
+                f"MIA_APERTURE_DELIVER_TIMEOUT_S if the drain is merely slow)")
         elif time.monotonic() >= deadline:
             print(f"[mia/aperture] PER-REQUEST DELIVERY INCOMPLETE for {request_id!r} after "
                   f"{_aperture_deliver_timeout_s():.1f}s: {len(parts)} of "
@@ -348,8 +520,57 @@ async def _await_aperture_disk_confirm(engine, request_id) -> bool:
 
 
 def _apply_delivery_selector():
-    from mia.graph.delivery_selector import apply as _apply
-    return _apply()
+    global _STARTED_STAMPED
+    from mia.graph import delivery_selector as ds
+    if os.environ.get(ds.STAMP_ENV):
+        _STARTED_STAMPED = True
+        return ds.apply()
+    ds.validate(os.environ)
+    return None
+
+
+_STARTED_STAMPED = False
+_MIA_WRITES: list = []
+_MIA_DYNAMO_WRITE = None
+
+
+def _mia_setenv(key: str, value) -> None:
+    prev = os.environ.get(key)
+    if prev == value:
+        return
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
+    _MIA_WRITES.append((key, prev, value))
+
+
+def _revert_mia_writes() -> None:
+    global _MIA_DYNAMO_WRITE
+    for key, prev, written in reversed(_MIA_WRITES):
+        if os.environ.get(key) == written:
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
+    _MIA_WRITES.clear()
+    if _MIA_DYNAMO_WRITE is not None:
+        import torch._dynamo
+        prev, written = _MIA_DYNAMO_WRITE
+        if torch._dynamo.config.disable == written:
+            torch._dynamo.config.disable = prev
+        _MIA_DYNAMO_WRITE = None
+
+
+def _apply_engine_delivery(worker_kind: str, graph: bool):
+    from mia.graph import delivery_selector as ds
+    before = {k: os.environ.get(k) for k in ds.WRITES}
+    sel = ds.apply(os.environ, worker_kind=worker_kind, graph=graph)
+    for k in ds.WRITES:
+        after = os.environ.get(k)
+        if after != before[k]:
+            _MIA_WRITES.append((k, before[k], after))
+    return sel
 
 
 def _warn_profile_aperture_conflict() -> None:
@@ -652,17 +873,24 @@ def stamp_compile_cache_key(engine_args, worker_kind: str) -> None:
 
 
 class UnsupportedGraphModeError(RuntimeError):
-    """MIA supports eager (NONE) and FULL CUDA graphs."""
+    """MIA supports eager (NONE), FULL_DECODE_ONLY and FULL CUDA graphs."""
+
+
+DEFAULT_CUDAGRAPH_MODE = "FULL_DECODE_ONLY"
+
+_FULL_MODE_WARNING = (
+    "[mia] WARNING: cudagraph_mode=FULL replays mixed prefill/decode batches in FULL CUDA graphs, "
+    "which can compute wrong attention (FlashAttention 3, vLLM 0.29); leave cudagraph_mode unset "
+    f"for MIA's default {DEFAULT_CUDAGRAPH_MODE}.")
 
 
 def validate_graph_mode(mode_name: str) -> None:
-    """Accept only the two modes MIA's capture path is validated for."""
-    if str(mode_name).upper() not in {"NONE", "FULL"}:
+    """Accept only the modes MIA's capture path is validated for."""
+    if str(mode_name).upper() not in {"NONE", "FULL_DECODE_ONLY", "FULL"}:
         raise UnsupportedGraphModeError(
-            f"MIA supports cudagraph_mode NONE (eager) and FULL; got {mode_name}. "
-            f"vLLM 0.29 defaults to FULL_AND_PIECEWISE, so this is expected on a default "
-            f"engine: pass compilation_config={{'cudagraph_mode': 'FULL'}} for graph capture, "
-            f"or enforce_eager=True for the eager path."
+            f"MIA supports cudagraph_mode {DEFAULT_CUDAGRAPH_MODE} (its default), FULL and NONE "
+            f"(eager); got {mode_name}. Leave cudagraph_mode unset for {DEFAULT_CUDAGRAPH_MODE}, "
+            f"or pass enforce_eager=True for the eager path."
         )
 
 
@@ -698,6 +926,133 @@ def _cudagraph_mode_name(cudagraph_mode) -> str:
     )
 
 
+_ENGINE_HINTS: contextvars.ContextVar = contextvars.ContextVar("mia_engine_hints", default={})
+
+
+@contextlib.contextmanager
+def engine_hints(**hints):
+    """Hints for engines built inside this block, in this thread (``qk_score=True``)."""
+    token = _ENGINE_HINTS.set({**_ENGINE_HINTS.get(), **hints})
+    try:
+        yield
+    finally:
+        _ENGINE_HINTS.reset(token)
+
+
+@dataclass(frozen=True)
+class CaptureMode:
+    """One engine's capture mode."""
+    graph: bool
+    engine_eager: bool
+    source: str
+    reason: str
+    prefix_caching_off: bool = False
+
+
+def _qk_prefix_unset(engine_args, kind: str) -> bool:
+    return kind == "qk" and getattr(engine_args, "enable_prefix_caching", None) is None
+
+
+def _is_o0(engine_args) -> bool:
+    lvl = getattr(engine_args, "optimization_level", None)
+    if isinstance(lvl, str):
+        lvl = lvl.strip().upper().lstrip("O")
+    try:
+        return lvl is not None and int(lvl) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def resolve_capture_mode(engine_args, env, hints=None, *, kind: str) -> CaptureMode:
+    """Graph or eager for this engine, and who chose."""
+    hints = hints or {}
+    explicit = capture_mode_from_env(env)
+    eager_arg = bool(getattr(engine_args, "enforce_eager", False))
+    o0 = _is_o0(engine_args)
+    if explicit is True:
+        why = ("MIA_ALLOW_CUDAGRAPH=1" + (", enforce_eager=True" if eager_arg else "")
+               + (", optimization_level=O0" if o0 else ""))
+        return CaptureMode(True, eager_arg or o0, "explicit", why,
+                           prefix_caching_off=_qk_prefix_unset(engine_args, kind))
+    if explicit is False:
+        return CaptureMode(False, True, "explicit", "MIA_ALLOW_CUDAGRAPH=0")
+    if eager_arg:
+        return CaptureMode(False, True, "explicit", "enforce_eager=True")
+    if o0:
+        return CaptureMode(False, True, "explicit", "optimization_level=O0")
+    if kind == "qk":
+        if (env.get("MIA_QK_SCORE") == "1" or env.get("MIA_QK_AUTO_SELECT") == "1"
+                or hints.get("qk_score")):
+            return CaptureMode(False, True, "scope", "score capture has no graph path")
+        if getattr(engine_args, "enable_prefix_caching", None) is True:
+            return CaptureMode(False, True, "scope", "QK with prefix caching has no graph path")
+        if int(getattr(engine_args, "data_parallel_size", 1) or 1) > 1:
+            return CaptureMode(False, True, "scope",
+                               "QK per-request delivery cannot be collected across DP engines")
+    return CaptureMode(True, False, "default", "unset",
+                       prefix_caching_off=_qk_prefix_unset(engine_args, kind))
+
+
+def _cc_mode_name(cc):
+    m = cc.get("cudagraph_mode") if isinstance(cc, dict) else getattr(cc, "cudagraph_mode", None)
+    if m is None:
+        return None
+    return m if isinstance(m, str) else getattr(m, "name", str(m))
+
+
+def _with_default_cudagraph(cc):
+    if cc is None:
+        from vllm.config import CompilationConfig, CUDAGraphMode
+        return CompilationConfig(cudagraph_mode=CUDAGraphMode[DEFAULT_CUDAGRAPH_MODE])
+    if isinstance(cc, dict):
+        return (cc if cc.get("cudagraph_mode") is not None
+                else {**cc, "cudagraph_mode": DEFAULT_CUDAGRAPH_MODE})
+    if getattr(cc, "cudagraph_mode", "missing") is None:
+        import copy
+        from vllm.config import CUDAGraphMode
+        new = copy.deepcopy(cc)
+        new.cudagraph_mode = CUDAGraphMode[DEFAULT_CUDAGRAPH_MODE]
+        return new
+    return cc
+
+
+def _disable_dynamo_for_eager_hooks() -> None:
+    global _MIA_DYNAMO_WRITE
+    if os.environ.get("TORCHDYNAMO_DISABLE") is not None:
+        return
+    _mia_setenv("TORCHDYNAMO_DISABLE", "1")
+    import torch._dynamo
+    prev = torch._dynamo.config.disable
+    torch._dynamo.config.disable = True
+    _MIA_DYNAMO_WRITE = (prev, True)
+
+
+_MIA_PKG_DIR = str(Path(__file__).resolve().parent)
+
+
+def _capture_mode_line(mode: CaptureMode, engine_args, cg_explicit: bool = False) -> str:
+    if mode.graph and not mode.engine_eager:
+        cg = str(_cc_mode_name(getattr(engine_args, "compilation_config", None))).upper()
+        who = "chosen explicitly" if cg_explicit else "chosen by default"
+        what = (f"{cg} CUDA graph ({who})" if cg in ("FULL", DEFAULT_CUDAGRAPH_MODE)
+                else f"CUDA graph (cudagraph_mode={cg})")
+    elif mode.graph:
+        what = "graph capture op on an eager engine"
+    else:
+        what = "eager"
+    if mode.source == "default":
+        why = "chosen by default (enforce_eager=True or MIA_ALLOW_CUDAGRAPH=0 selects eager)"
+    elif mode.source == "explicit":
+        why = f"chosen explicitly ({mode.reason})"
+    else:
+        why = mode.reason
+    if mode.graph and not mode.engine_eager:
+        why = "graph mode " + why
+    if mode.prefix_caching_off:
+        why += "; prefix caching off for QK capture (default)"
+    return f"[mia] capture mode: {what} -- {why} mia={_MIA_PKG_DIR}"
+
+
 def _patched_create_engine_config(self, *args, **kwargs):
     if not self.worker_extension_cls:
         worker_type = parse_mia_worker_env(os.environ.get("MIA_WORKER")) or DEFAULT_MIA_WORKER
@@ -717,13 +1072,34 @@ def _patched_create_engine_config(self, *args, **kwargs):
 
     _note_vllm_version()
 
-    graph_mode = os.environ.get("MIA_ALLOW_CUDAGRAPH") == "1"
-    if graph_mode:
-        from mia.graph.install import set_graph_mode
-        set_graph_mode(True)
-        stamp_compile_cache_key(self, _wkind)
-    else:
+    if not _STARTED_STAMPED:
+        _revert_mia_writes()
+    mode = resolve_capture_mode(self, os.environ, _ENGINE_HINTS.get(), kind=_wkind)
+    graph_mode = mode.graph
+    from mia.graph.install import set_graph_mode
+    set_graph_mode(graph_mode)
+    if mode.engine_eager:
         self.enforce_eager = True
+    cg_explicit = False
+    if graph_mode:
+        stamp_compile_cache_key(self, _wkind)
+        if not mode.engine_eager:
+            cc = getattr(self, "compilation_config", None)
+            cg_explicit = _cc_mode_name(cc) is not None
+            self.compilation_config = _with_default_cudagraph(cc)
+        if mode.prefix_caching_off:
+            self.enable_prefix_caching = False
+    else:
+        _disable_dynamo_for_eager_hooks()
+    dp_size = int(getattr(self, "data_parallel_size", 1) or 1)
+    if dp_size > 1:
+        from mia.graph.delivery_selector import DP_SIZE_ENV
+        _mia_setenv(DP_SIZE_ENV, str(dp_size))
+    print(_capture_mode_line(mode, self, cg_explicit), flush=True)
+    if (graph_mode and not mode.engine_eager
+            and str(_cc_mode_name(self.compilation_config)).upper() == "FULL"):
+        print(_FULL_MODE_WARNING, flush=True)
+    _apply_engine_delivery(_wkind, graph_mode)
 
     if graph_mode:
         _max_cap = os.environ.get("MIA_CUDAGRAPH_MAX_CAPTURE")
@@ -1090,6 +1466,10 @@ def _decide_aperture_route_qk(engine, prompt, extra, max_tokens):
         if _resolve_sink(extra) == "disk" and decision.transport != "disk":
             from mia.graph.delivery_router import RouteDecision
             return RouteDecision("disk", decision.analyze_where)
+        if ("save_to_disk" in extra and _resolve_sink(extra) == "rpc"
+                and decision.transport != "rpc"):
+            from mia.graph.delivery_router import RouteDecision
+            return RouteDecision("rpc", decision.analyze_where)
         return decision
     except Exception:  # noqa: BLE001
         return _explicit_disk_route(extra)
@@ -1152,6 +1532,143 @@ def _refuse_unsupported_tp_request(engine, extra) -> None:
             f"at tensor_parallel_size=1.")
 
 
+def _engine_graph(engine) -> bool:
+    for obj in (getattr(engine, "vllm_config", None),
+                getattr(getattr(engine, "llm_engine", None), "vllm_config", None)):
+        ac = getattr(obj, "additional_config", None) if obj is not None else None
+        if isinstance(ac, dict):
+            return _COMPILE_CACHE_STAMP_KEY in ac
+    return _graph_mode()
+
+
+def _engine_attr_dict(engine, name: str) -> dict:
+    d = getattr(engine, name, None)
+    if d is None:
+        d = {}
+        try:
+            setattr(engine, name, d)
+        except Exception:  # noqa: BLE001
+            pass
+    return d
+
+
+def _steer_target(engine, steer_arg):
+    from mia.workers.steer_worker import _parse_steer_layers, _resolve_steer_config
+    cfg = _resolve_steer_config(steer_arg, os.environ.get("MIA_STEER_CONFIG"))
+    if not isinstance(cfg, dict):
+        return None
+    path, method = cfg.get("vector_path"), cfg.get("method", "adjust_rs")
+    n_layers = _hs_num_layers(getattr(engine, "llm_engine", engine))
+    if not path or method not in ("add_vector", "adjust_rs") or (
+            n_layers and not _parse_steer_layers(cfg.get("optimal_layer", -1), n_layers)):
+        return None
+    return str(path), method
+
+
+def _load_steer_info(path: str):
+    from mia.workers.steer_worker import _load_steering_vector
+    try:
+        raw = _load_steering_vector(path)
+        if "dir" not in raw:
+            raise KeyError("dir")
+    except Exception as e:  # noqa: BLE001
+        return repr(e)
+    return "avg_proj" in raw
+
+
+def _steer_info(engine, path, info=None):
+    loaded = _engine_attr_dict(engine, "_mia_steer_loaded")
+    if info is None:
+        info = loaded.get(path)
+    if info is None:
+        info = _load_steer_info(path)
+    if not isinstance(info, str):
+        loaded[path] = info
+    return info
+
+
+def _refuse_on_graph(engine, extra, pending=(), info=None, count=True):
+    if not isinstance(extra, dict) or not (extra.get("qk_capture") == "score"
+                                           or extra.get("steer")):
+        return None
+    if not _engine_graph(engine):
+        return None
+    if extra.get("qk_capture") == "score":
+        raise MiaConfigurationError(
+            "qk_capture='score' (attention-score capture) has no CUDA-graph path and this engine "
+            "runs graph capture. Start the engine for score capture with enforce_eager=True "
+            "(vllm serve: --enforce-eager), or MIA_QK_SCORE=1 without MIA_ALLOW_CUDAGRAPH=1.")
+    target = _steer_target(engine, extra.get("steer"))
+    if target is None:
+        return None
+    path, method = target
+    info = _steer_info(engine, path, info)
+    if isinstance(info, str):
+        raise MiaConfigurationError(
+            f"steering vector {path!r} cannot be loaded ({info}); the request would run "
+            f"unsteered.")
+    if method == "adjust_rs" and not info:
+        raise MiaConfigurationError(
+            f"adjust_rs needs avg_proj, which steering vector {path!r} lacks; the request would "
+            f"run unsteered. Use method='add_vector' or a vector saved with avg_proj.")
+    if path in _engine_attr_dict(engine, "_mia_steer_interned") or path in pending:
+        return None
+    if count:
+        _check_steer_vmax(engine, path, pending)
+    return path
+
+
+def _check_steer_vmax(engine, path, pending=()) -> None:
+    counted = (set(_engine_attr_dict(engine, "_mia_steer_interned"))
+               | set(_engine_attr_dict(engine, "_mia_steer_inflight")) | set(pending))
+    v_max = int(os.environ.get("MIA_STEER_VMAX", "16"))
+    if path not in counted and len(counted) >= v_max:
+        raise MiaConfigurationError(
+            f"steering vector {path!r} would be distinct vector {len(counted) + 1} on this "
+            f"engine, past MIA_STEER_VMAX={v_max}; the request would run unsteered. Start the "
+            f"engine with a larger MIA_STEER_VMAX.")
+
+
+async def _refuse_on_graph_serve(engine, extra):
+    import asyncio
+    info = None
+    if isinstance(extra, dict) and extra.get("steer") and _engine_graph(engine):
+        target = _steer_target(engine, extra.get("steer"))
+        if target is not None and target[0] not in _engine_attr_dict(engine,
+                                                                     "_mia_steer_loaded"):
+            info = await asyncio.get_running_loop().run_in_executor(
+                None, _load_steer_info, target[0])
+    return _refuse_on_graph(engine, extra, info=info, count=False)
+
+
+def _hold_steer(engine, path):
+    if path is None or path in _engine_attr_dict(engine, "_mia_steer_interned"):
+        return None
+    _check_steer_vmax(engine, path)
+    inflight = _engine_attr_dict(engine, "_mia_steer_inflight")
+    inflight[path] = inflight.get(path, 0) + 1
+    return path
+
+
+def _release_steer(engine, path, admitted: bool) -> None:
+    if path is None:
+        return
+    if admitted:
+        _admit_steer(engine, [path])
+    inflight = _engine_attr_dict(engine, "_mia_steer_inflight")
+    n = inflight.get(path, 0) - 1
+    if n > 0:
+        inflight[path] = n
+    else:
+        inflight.pop(path, None)
+
+
+def _admit_steer(engine, paths) -> None:
+    interned = _engine_attr_dict(engine, "_mia_steer_interned")
+    for p in paths:
+        interned[p] = True
+
+
 async def _patched_generate(
     self,
     prompt: Any,
@@ -1191,7 +1708,10 @@ async def _patched_generate(
     wants_steer = isinstance(extra.get("steer"), dict)
     needs_hooks = wants_hs or wants_qk or wants_steer
     save_to_disk = bool(extra.get("save_to_disk"))
+    _explicit_std = bool(extra["save_to_disk"]) if "save_to_disk" in extra else None
     _refuse_unsupported_tp_request(self, extra)
+    _steer_new = await _refuse_on_graph_serve(self, extra)
+    _qk_keys = _sample_keys(str(request_id), int(getattr(effective_params, "n", 1) or 1))
 
     if "save_to_disk" not in extra:
         _routed = _maybe_storage_route(
@@ -1220,11 +1740,13 @@ async def _patched_generate(
         if _aperture_route_qk is not None and _aperture_route_qk.transport == "disk":
             run_id = extra.get("run_id") or request_id
             hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
-            dest = os.path.join(hook_dir, str(run_id))
-            with PROF.timed("rpc.route_aperture_to_disk"):
-                await self.collective_rpc("route_aperture_to_disk", args=(request_id, dest))
+            for _key in _qk_keys:
+                with PROF.timed("rpc.route_aperture_to_disk"):
+                    await self.collective_rpc("route_aperture_to_disk",
+                                              args=(_key, _qk_dest(hook_dir, run_id, _key)))
 
-    if wants_qk and "qk_capture" not in extra and _engine_tp_size(self) <= 1:
+    if (wants_qk and "qk_capture" not in extra and _engine_tp_size(self) <= 1
+            and not _engine_graph(self)):
         if os.environ.get("MIA_QK_AUTO_SELECT") == "1":
             try:
                 _dims = _qk_model_dims(self)
@@ -1258,12 +1780,27 @@ async def _patched_generate(
         setattr(self, "_mia_installed", True)
 
     assert _original_generate is not None
+    _hybrid = _hybrid_serves(extra, wants_hs, wants_qk, wants_steer)
+    _gen_counts: dict = {}
+    _delta = getattr(getattr(effective_params, "output_kind", None), "name", "") == "DELTA"
     _hook_gen_toks = 0
     _prof_capture = needs_hooks and not wants_steer and _profile_mode()
+    _steer_new = _hold_steer(self, _steer_new)
+    _added: list = []
+    _ADDED_IDS.set(_added)
+    _nonce, _start = uuid.uuid4().hex, time.time_ns()
     try:
         async for output in _original_generate(
             self, prompt, sampling_params, request_id, **kwargs
         ):
+            _ADDED_IDS.set(None)
+            if _steer_new:
+                _release_steer(self, _steer_new, admitted=True)
+                _steer_new = None
+            if _hybrid:
+                for _o in (getattr(output, "outputs", None) or []):
+                    _j, _k = getattr(_o, "index", 0), len(getattr(_o, "token_ids", None) or [])
+                    _gen_counts[_j] = _gen_counts.get(_j, 0) + _k if _delta else _k
             if _prof_capture:
                 for _o in (getattr(output, "outputs", None) or []):
                     _hook_gen_toks += len(getattr(_o, "token_ids", None) or [])
@@ -1286,8 +1823,8 @@ async def _patched_generate(
                         self, request_id=request_id, run_id=run_id, hook_dir=hook_dir,
                         wants_hs=wants_hs, wants_qk=wants_qk, wants_steer=wants_steer,
                         sink=sink, per_request=False,
-                        durable_wait=bool(extra.get("durable_wait")))
-                    if extra.get("durable_wait"):
+                        durable_wait=bool(extra.get("durable_wait")) and not _hybrid)
+                    if extra.get("durable_wait") and not _hybrid:
                         with PROF.timed("disk.await_artifact"):
                             await _await_disk_artifact(
                                 run_id, hook_dir, _flushed_rank_dirs(flushed, run_id, hook_dir))
@@ -1313,18 +1850,21 @@ async def _patched_generate(
                         action = ("disk_raw" if (_aperture_route_qk is not None
                                                  and _aperture_route_qk.transport == "disk")
                                   else "rpc_raw")
-                    if action == "disk_raw":
-                        with PROF.timed("aperture.await_disk_confirm"):
-                            await _await_aperture_disk_confirm(self, request_id)
+                    if _qk_ask_is_empty(extra, _hs_num_layers(self)):
+                        pass
+                    elif action == "disk_raw":
+                        await _qk_serve_disk(self, output, extra, _qk_keys, request_id, _start)
                     else:
-                        probes = await _await_aperture_per_request(self, request_id)
-                        if probes is not None:
-                            output.probes = probes
+                        await _qk_serve_rpc(self, output, _qk_keys, _qk_mode(extra),
+                                            _qk_hooks(extra))
+                elif _hybrid:
+                    pass
                 else:
                     with PROF.timed("rpc.get_states"):
                         states = await self.collective_rpc(
                             "get_captured_states", args=(request_id,))
                     parts = [_decompress(s) for s in states if s is not None]
+                    _raise_delivery_errors(request_id, parts)
                     if parts:
                         for _p in parts:
                             _reconstruct_compact_qk(_p)
@@ -1335,13 +1875,271 @@ async def _patched_generate(
                         _trim_probes(probes, "hs_cache", expected_len)
                         _trim_probes(probes, "qk_cache", expected_len)
                         output.probes = probes
+                if _hybrid and not _hs_ask_is_empty(extra, _hs_num_layers(self)):
+                    from mia.graph.delivery_route import route_enabled
+                    _mark = _hybrid_marker(output, extra, _explicit_std, _gen_counts, _nonce,
+                                           _added[0] if _added else None)
+                    if route_enabled():
+                        output.mia = _mark
+                    if _explicit_std:
+                        _spawn_hybrid_writer(self, request_id, _mark, extra,
+                                             _added[0] if _added else None, _start)
             yield output
     finally:
-        if needs_hooks and not wants_steer:
+        _release_steer(self, _steer_new, admitted=False)
+        if needs_hooks and not wants_steer and not _hybrid:
             await self.collective_rpc("clear_captured_states", args=(request_id,))
             if _aperture_per_request_mode() and ((wants_hs and not wants_qk)
                                              or (wants_qk and not wants_hs)):
-                await self.collective_rpc("clear_aperture_request", args=(request_id,))
+                for _key in (_qk_keys if wants_qk else [request_id]):
+                    await self.collective_rpc("clear_aperture_request", args=(_key,))
+
+
+async def _patched_add_request(self, request_id, *args, **kwargs):
+    q = await _original_add_request(self, request_id, *args, **kwargs)
+    added = _ADDED_IDS.get()
+    if added is not None:
+        added.append(str(getattr(q, "request_id", request_id)))
+    return q
+
+
+@contextlib.contextmanager
+def _engine_request_ids(llm):
+    eng = getattr(llm, "llm_engine", None)
+    seen: dict = {}
+    if eng is None or not callable(getattr(eng, "add_request", None)):
+        yield seen
+        return
+    had = "add_request" in vars(eng)
+    orig = eng.add_request
+
+    def add_request(request_id, prompt, params, *args, **kwargs):
+        internal = orig(request_id, prompt, params, *args, **kwargs)
+        seen[str(request_id)] = (str(internal), params)
+        return internal
+
+    eng.add_request = add_request
+    try:
+        yield seen
+    finally:
+        if had:
+            eng.add_request = orig
+        else:
+            del eng.add_request
+
+
+def _offline_delivery_info(llm) -> dict:
+    info = getattr(llm, "_mia_delivery_info", None)
+    if info is not None:
+        return info
+    eng = getattr(llm, "llm_engine", None)
+    pc = getattr(getattr(eng, "vllm_config", None), "parallel_config", None)
+    info = {}
+    if eng is not None and _kind_from_extension(
+            getattr(pc, "worker_extension_cls", None) or "") == "hidden_states":
+        from mia.graph.delivery_route import merge_info
+        info = merge_info(llm.collective_rpc("mia_delivery_info"))
+    llm._mia_delivery_info = info
+    return info
+
+
+def _offline_hybrid_request(extra: dict) -> bool:
+    wants_hs = extra.get("output_hidden_states") is not None
+    return (wants_hs and extra.get("output_qk") is None and not extra.get("steer")
+            and _resolve_sink(extra) != "drop" and not _profile_mode())
+
+
+def _step_inproc_core(llm) -> None:
+    from vllm.v1.engine.core_client import InprocClient
+    eng = llm.llm_engine
+    if isinstance(getattr(eng, "engine_core", None), InprocClient):
+        eng.step()
+
+
+def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
+    reqs = []
+    for out in outputs:
+        rec = engine_ids.get(str(out.request_id))
+        if rec is None:
+            continue
+        internal, params = rec
+        extra = getattr(params, "extra_args", None) or {}
+        if _offline_hybrid_request(extra):
+            reqs.append((out, internal, extra))
+    if not reqs:
+        return set()
+    info = _offline_delivery_info(llm)
+    if not info.get("roots"):
+        return set()
+    from mia.graph.aperture_gather import GatherError, load_delivered, wait_delivered
+    from mia.graph.delivered_probes import hs_probes
+    from mia.graph.install_hs import DEFAULT_HOOKS_ON, DEFAULT_HS_MODE
+    _step_inproc_core(llm)
+    plan, exp, done = [], {}, set()
+    for out, internal, extra in reqs:
+        if _hs_ask_is_empty(extra, info["config"].get("num_layers")):
+            done.add(str(out.request_id))
+            continue
+        n = max(len(out.outputs), 1)
+        keys = [internal] if n == 1 else [f"{j}_{internal}" for j in range(n)]
+        layers = extra.get("output_hidden_states")
+        if isinstance(layers, (list, tuple)):
+            exp.update({k: list(layers) for k in keys})
+        plan.append((out, extra, keys))
+    from mia.graph.delivery_route import run_filter
+    run_ids = run_filter(info)
+    with PROF.timed("hybrid.offline_wait"):
+        rows = wait_delivered(info["roots"], [k for _o, _e, ks in plan for k in ks],
+                              expected_layers=exp or None, run_ids=run_ids,
+                              load=False) if plan else {}
+    saved = [k for _o, e, ks in plan if e.get("save_to_disk") for k in ks if rows[k]]
+    got = load_delivered(info["roots"], expected_layers=exp or None, req_ids=saved,
+                         run_ids=run_ids) if saved else {}
+    lost = [k for k in saved if k not in got]
+    if lost:
+        raise GatherError(f"requests {lost} were complete under {info['roots']} but did not read "
+                          f"back")
+    disk: dict = {}
+    for out, extra, keys in plan:
+        metas = [{"hs_mode": extra.get("hs_mode", DEFAULT_HS_MODE),
+                  "hooks_on": extra.get("hooks_on", DEFAULT_HOOKS_ON),
+                  "n_prompt": len(out.prompt_token_ids or []), "n_gen": len(c.token_ids or []),
+                  "n_cached": int(getattr(out, "num_cached_tokens", 0) or 0),
+                  "config": info["config"]} for c in out.outputs]
+        if extra.get("save_to_disk"):
+            run_id = str(extra.get("run_id") or out.request_id)
+            hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
+            disk.setdefault((hook_dir, run_id), []).extend(
+                (k, hs_probes(got[k], m, info["names"], layout="disk") if rows[k] else None)
+                for k, m in zip(keys, metas))
+            continue
+        targets = [(out, keys[0], metas[0])]
+        if len(keys) > 1:
+            targets += list(zip(out.outputs, keys, metas))
+        for obj, k, m in targets:
+            if rows[k]:
+                _attach_delivered(obj, info, k, m, exp.get(k), run_ids)
+    if disk:
+        _save_offline_runs(disk, "hs", "hybrid.offline_save")
+    return done | {str(out.request_id) for out, _e, _k in plan}
+
+
+def _attach_delivered(obj, info: dict, key: str, meta: dict, layers, run_ids) -> None:
+    from mia.graph.delivered_probes import attach_lazy, first_pass_probes, offline_probes
+
+    roots, names = info["roots"], info["names"]
+
+    def rows():
+        from mia.graph.aperture_gather import load_delivered
+        got = load_delivered(roots, expected_layers={key: layers} if layers else None,
+                             req_ids=[key], run_ids=run_ids)
+        if key not in got:
+            raise MiaDeliveryError(f"the delivery of {key!r} is no longer under {roots}")
+        return got[key]
+
+    def probes():
+        return offline_probes(rows(), meta, names)
+
+    try:
+        attach_lazy(obj, probes, first=lambda: first_pass_probes(rows(), meta, names))
+    except TypeError:
+        obj.probes = probes()
+
+
+def _save_offline_runs(disk: dict, kind: str, timer: str) -> None:
+    import time
+    import uuid
+
+    from mia.graph import run_artifact
+    unit, stamp = f"generate-{uuid.uuid4().hex}", time.time_ns()
+    for (hook_dir, run_id), items in disk.items():
+        with PROF.timed(timer):
+            run_artifact.append(hook_dir, run_id, kind=kind, items=items, unit=unit, stamp=stamp)
+
+
+def _offline_qk_info(llm) -> dict:
+    info = getattr(llm, "_mia_qk_info", None)
+    if info is not None:
+        return info
+    eng = getattr(llm, "llm_engine", None)
+    pc = getattr(getattr(eng, "vllm_config", None), "parallel_config", None)
+    info = {}
+    if eng is not None and _kind_from_extension(
+            getattr(pc, "worker_extension_cls", None) or "") == "qk":
+        res = [r for r in (llm.collective_rpc("mia_delivery_info") or []) if isinstance(r, dict)]
+        info = {"per_request": bool(res) and all(r.get("per_request") for r in res)}
+    llm._mia_qk_info = info
+    return info
+
+
+def _offline_qk_request(extra: dict) -> bool:
+    return (extra.get("output_qk") is not None and extra.get("output_hidden_states") is None
+            and not extra.get("steer") and _resolve_sink(extra) != "drop" and not _profile_mode())
+
+
+def _deliver_offline_qk(llm, outputs, engine_ids: dict) -> set:
+    reqs = []
+    for out in outputs:
+        rec = engine_ids.get(str(out.request_id))
+        if rec is None:
+            continue
+        internal, params = rec
+        extra = getattr(params, "extra_args", None) or {}
+        if _offline_qk_request(extra):
+            reqs.append((out, internal, extra))
+    if not reqs or not _offline_qk_info(llm).get("per_request"):
+        return set()
+    from mia.graph.delivered_probes import qk_probes
+    _step_inproc_core(llm)
+    n_layers = _hs_num_layers(llm.llm_engine)
+    disk: dict = {}
+    refused: dict = {}
+    for out, internal, extra in reqs:
+        if _qk_ask_is_empty(extra, n_layers):
+            continue
+        outs = _outputs_by_index(out)
+        keys = _sample_keys(internal, len(outs))
+        n_prompt = len(out.prompt_token_ids or [])
+        got, bad = [], []
+        with PROF.timed("qk.offline_wait"):
+            for k in keys:
+                try:
+                    got.append(_collect_aperture_per_request_sync(llm.collective_rpc, k,
+                                                                  wait=True))
+                except MiaDeliveryError as e:
+                    got.append(None)
+                    bad.append((k, str(e)))
+        if bad:
+            for k, _why in bad:
+                llm.collective_rpc("clear_aperture_request", args=(k,))
+            refused[str(out.request_id)] = "; ".join(why for _k, why in bad)
+            continue
+        layout = "disk" if extra.get("save_to_disk") else "rpc"
+        probes = [qk_probes(p, n_prompt=n_prompt, n_gen=len(c.token_ids or []),
+                            hookq_mode=_qk_mode(extra), hooks_on=_qk_hooks(extra), layout=layout)
+                  for p, c in zip(got, outs)]
+        if layout == "disk":
+            run_id = str(extra.get("run_id") or out.request_id)
+            hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
+            disk.setdefault((hook_dir, run_id), []).extend(zip(keys, probes))
+            continue
+        if probes and probes[0] is not None:
+            out.probes = probes[0]
+        if len(keys) > 1:
+            for c, p in zip(outs, probes):
+                if p is not None:
+                    c.probes = p
+    if disk:
+        _save_offline_runs(disk, "qk", "qk.offline_save")
+    _raise_refused(refused)
+    return {str(out.request_id) for out, _i, _e in reqs}
+
+
+def _raise_refused(refused: dict) -> None:
+    if refused:
+        raise MiaDeliveryError(
+            f"Q/K capture refused for {len(refused)} request(s): "
+            + "; ".join(f"{r!r}: {why}" for r, why in refused.items()))
 
 
 def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwargs) -> list:
@@ -1358,8 +2156,12 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
         or bool((sp.extra_args or {}).get("steer"))
         for sp in params_list
     )
+    _steer_new: list = []
     for _sp in params_list:
         _refuse_unsupported_tp_request(self, _sp.extra_args or {})
+        _v = _refuse_on_graph(self, _sp.extra_args or {}, _steer_new)
+        if _v:
+            _steer_new.append(_v)
 
     if (needs_hooks and os.environ.get("MIA_STORAGE_ROUTER") == "1"
             and not getattr(_patched_llm_generate, "_router_warned", False)):
@@ -1379,14 +2181,22 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
         self._mia_installed = True
 
     assert _original_llm_generate is not None
-    outputs = _original_llm_generate(self, prompts, sampling_params, **kwargs)
+    with _engine_request_ids(self) as _engine_ids:
+        outputs = _original_llm_generate(self, prompts, sampling_params, **kwargs)
+    _admit_steer(self, _steer_new)
 
     if needs_hooks:
 
+        _hybrid_done = _deliver_offline(self, outputs, _engine_ids)
+        _hybrid_done |= _deliver_offline_qk(self, outputs, _engine_ids)
+
         disk_by_run: dict = {}
+        refused: dict = {}
 
         for idx, output in enumerate(outputs):
             req_id = output.request_id
+            if str(req_id) in _hybrid_done:
+                continue
             sp = params_list[idx] if idx < len(params_list) else params_list[0] if params_list else None
             extra = (sp.extra_args if sp is not None else None) or {}
 
@@ -1407,6 +2217,11 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
                     with PROF.timed("rpc.get_states"):
                         states = self.collective_rpc("get_captured_states", args=(req_id,))
                     parts = [_decompress(s) for s in states if s is not None]
+                    errs = [p["mia_error"] for p in parts
+                            if isinstance(p, dict) and "mia_error" in p]
+                    if errs:
+                        refused[str(req_id)] = "; ".join(errs)
+                        continue
                     if parts:
                         for _p in parts:
                             _reconstruct_compact_qk(_p)
@@ -1433,41 +2248,29 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
                         flushed_by_run.get(run_id), run_id, hook_dir))
                 if not landed:
                     PROF.incr("disk.await_artifact.timeout")
+                from mia.run_utils import read_refused_qk
+                from mia.workers._common import match_internal_ids
+                gone = read_refused_qk(hook_dir, str(run_id))
+                for r, _h in req_list:
+                    hits = match_internal_ids(gone, str(r))
+                    if hits:
+                        refused[str(r)] = "; ".join(gone[h] for h in hits)
+        _raise_refused(refused)
 
     return outputs
 
 
-def _serialize_probes(probes: dict) -> dict:
-    import torch
-    PROF.incr("serve.serialize_probes.calls")
-    with PROF.timed("serve.serialize_probes"):
-        result = {}
-        n_tensors = 0
-        n_elems = 0
-        for key, cache in probes.items():
-            if key == "config" and isinstance(cache, dict):
-                result[key] = cache
-                continue
-            if not isinstance(cache, dict):
-                continue
-            result[key] = {}
-            for mod_name, entry in cache.items():
-                new_entry = {}
-                for k, v in entry.items():
-                    if isinstance(v, torch.Tensor):
-                        n_tensors += 1
-                        n_elems += v.numel()
-                        new_entry[k] = v.tolist()
-                    elif isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
-                        n_tensors += len(v)
-                        n_elems += sum(t.numel() for t in v)
-                        new_entry[k] = [t.tolist() for t in v]
-                    else:
-                        new_entry[k] = v
-                result[key][mod_name] = new_entry
-        PROF.gauge("serve.serialize_probes.tensors", n_tensors)
-        PROF.gauge("serve.serialize_probes.elements", n_elems)
-    return result
+from mia.graph.delivered_probes import serialize_probes as _serialize_probes  # noqa: E402
+
+
+def _attach_choice_probes(response, outs) -> None:
+    choices = list(getattr(response, "choices", None) or [])
+    if len(choices) != len(outs):
+        return
+    for ch, o in zip(choices, outs):
+        p = getattr(o, "probes", None)
+        if p is not None:
+            setattr(ch, "probes", _serialize_probes(p))
 
 
 def _patched_completion_response(self, final_res_batch, *args, **kwargs):
@@ -1478,6 +2281,12 @@ def _patched_completion_response(self, final_res_batch, *args, **kwargs):
         if probes is not None:
             response.probes = _serialize_probes(probes)
             break
+    _attach_choice_probes(response, [o for res in final_res_batch or ()
+                                     for o in (getattr(res, "outputs", None) or [])])
+    marks = [getattr(res, "mia", None) for res in final_res_batch or ()]
+    if marks and all(m is not None for m in marks) and hasattr(response, "model_dump"):
+        response.mia = {"delivery": "hybrid", "kind": "completion",
+                        "items": [{**m, "item": i} for i, m in enumerate(marks)]}
     return response
 
 
@@ -1500,6 +2309,10 @@ async def _patched_chat_full_generator(self, request, result_generator, *args, *
         probes = getattr(last_output, "probes", None)
         if probes is not None:
             response.probes = _serialize_probes(probes)
+        _attach_choice_probes(response, getattr(last_output, "outputs", None) or [])
+        mark = getattr(last_output, "mia", None)
+        if mark is not None:
+            response.mia = {"delivery": "hybrid", "kind": "chat", "items": [{**mark, "item": 0}]}
 
     return response
 
@@ -1507,7 +2320,7 @@ async def _patched_chat_full_generator(self, request, result_generator, *args, *
 def register() -> None:
     """Entry point called by vLLM's plugin system at engine startup."""
     global _original_create_engine_config
-    global _original_generate, _original_llm_generate
+    global _original_generate, _original_add_request, _original_llm_generate
     global _original_completion_response, _original_chat_full_generator
 
     _apply_delivery_selector()
@@ -1528,6 +2341,15 @@ def register() -> None:
 
     _original_generate = AsyncLLM.generate
     AsyncLLM.generate = _patched_generate
+    _original_add_request = AsyncLLM.add_request
+    AsyncLLM.add_request = _patched_add_request
+
+    try:
+        from mia.graph.delivery_route import patch_app_builder
+        patch_app_builder()
+    except Exception as e:  # noqa: BLE001
+        print(f"[mia] delivered-data read route unavailable ({e!r}); MiaClient cannot read "
+              f"hybrid captures from this server.", flush=True)
 
     _original_llm_generate = LLM.generate
     LLM.generate = _patched_llm_generate

@@ -35,11 +35,12 @@ class HiddenStatesAnalyzer:
                     result[layer_name] = tensors
                 elif reduce == "mean":
                     result[layer_name] = [
-                        t.mean(dim=0) if t.dim() > 1 else t for t in tensors
+                        None if t is None else t.mean(dim=0) if t.dim() > 1 else t
+                        for t in tensors
                     ]
                 elif reduce == "norm":
                     result[layer_name] = [
-                        torch.norm(t.float()).item() for t in tensors
+                        None if t is None else torch.norm(t.float()).item() for t in tensors
                     ]
                 else:
                     raise NotImplementedError(f"Unknown reduce: {reduce}")

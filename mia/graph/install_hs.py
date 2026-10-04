@@ -18,8 +18,8 @@ from mia.graph.registry import HostRegistry, get_registry, set_registry
 from mia.graph.aperture_metadata import ReqCaptureRecord
 from mia.graph.aperture_sizing import aperture_bytes_is_explicit, resolve_aperture_bytes_auto
 from mia.graph.tp_shard import (
-    HS_ALL_RANKS_ENV, HS_MODE_RANK0, HS_MODE_ROUND_ROBIN, HS_MODE_SINGLE, HSShard,
-    hs_rows_for_mode, rank_dir_name, refuse_pipeline_parallel, resolve_hs_shard_mode,
+    HS_ALL_RANKS_ENV, HS_MODE_RANK0, HS_MODE_ROUND_ROBIN, HS_MODE_SINGLE, HSShard, dp_layout,
+    dp_run_base, hs_rows_for_mode, rank_dir_name, refuse_pipeline_parallel, resolve_hs_shard_mode,
     resolve_tp_coords)
 from mia.graph.install import (
     _capture_idle_key,
@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 _WRAPPED_LAYER_CLASSES: Dict[type, Any] = {}
 _HS_HOST_ATTR = "_mia_hs_host"
 _capture_dbg = {"n": 0, "cap": 0}
+
+DEFAULT_HS_MODE = "last_token"
+DEFAULT_HOOKS_ON = "prefill"
 
 
 def _require_buffer_mode_hs() -> None:
@@ -148,7 +151,7 @@ def install_hs_hosts(worker) -> Optional[HostRegistry]:
               f"{tp_rank}/{tp_size} captures {len(owned_rows)} of {num_layers} layer(s)",
               flush=True)
     if not hasattr(worker, "hs_mode"):
-        worker.hs_mode = "last_token"
+        worker.hs_mode = DEFAULT_HS_MODE
 
     if not getattr(worker, "_captured_states", None):
         worker._captured_states = {}
@@ -162,6 +165,7 @@ def install_hs_hosts(worker) -> Optional[HostRegistry]:
         mark_no_writer(worker, "HS sink rank: captures nothing")
 
     matched = list(iter_matched_modules(model, match_layer))
+    worker._mia_layer_names = [[ln + 1, name] for name, _m, ln in matched]
     if not matched:
         print("[graph/install_hs] no decoder layers matched LAYER_PATTERNS; "
               "HS graph capture inactive")
@@ -372,6 +376,38 @@ def _aperture_reserve_or_block(aperture: CaptureAperture, n: int, consumer=None)
         f"MIA_APERTURE_GPU_BYTES or the off-loop drain is not keeping up.")
 
 
+def _mid_prefill_chunk(step: StepView, i: int) -> bool:
+    if not bool(step.is_prefilling_np[i]):
+        return False
+    qsl = step.query_start_loc_np
+    chunk = int(qsl[i + 1]) - int(qsl[i])
+    return int(step.num_computed_tokens_np[i]) + chunk < int(step.prompt_len_np[i])
+
+
+def _asks_here(registry, spec) -> bool:
+    owned_set = getattr(registry, "_hs_owned_set", None)
+    if not isinstance(spec, list):
+        owned = getattr(registry, "_hs_owned_rows", None)
+        return owned is None or len(owned) > 0
+    return any(1 <= int(ln) <= registry.num_layers
+               and (owned_set is None or int(ln) - 1 in owned_set) for ln in spec)
+
+
+def _note_asked(step: StepView, registry) -> None:
+    asked = getattr(registry, "_hs_asked", None)
+    if asked is None:
+        return
+    pre = np.flatnonzero(np.asarray(step.is_prefilling_np[:step.num_reqs], dtype=bool))
+    for i in pre.tolist():
+        key = str(step.req_ids[i])
+        if key in asked:
+            continue
+        extra = step.extra_args_for(i)
+        spec = extra.get("output_hidden_states") if extra else None
+        if spec is not None:
+            asked[key] = _asks_here(registry, spec)
+
+
 def _build_routing_hs(step: StepView, registry: HostRegistry,
                       vectorized: Optional[bool] = None,
                       decode_cache: Optional[bool] = None) -> list:
@@ -389,8 +425,8 @@ def _build_routing_hs(step: StepView, registry: HostRegistry,
     bs = step.num_reqs
     capture_index_pinned = registry.capture_index_pinned
     cap = registry.cap
-    default_hooks_on = getattr(registry, "_default_hooks_on", "prefill")
-    default_hs_mode = getattr(registry, "_worker_hs_mode", "last_token")
+    default_hooks_on = getattr(registry, "_default_hooks_on", DEFAULT_HOOKS_ON)
+    default_hs_mode = getattr(registry, "_worker_hs_mode", DEFAULT_HS_MODE)
     owned = getattr(registry, "_hs_owned_rows", None)
     owned_set = getattr(registry, "_hs_owned_set", None)
 
@@ -428,6 +464,8 @@ def _build_routing_hs(step: StepView, registry: HostRegistry,
                 continue
 
         req_mode = extra.get("hs_mode", default_hs_mode)
+        if req_mode == "last_token" and _mid_prefill_chunk(step, i):
+            continue
         start = int(qsl[i])
         end = int(qsl[i + 1])
         if end <= start:
@@ -484,8 +522,8 @@ def _build_routing_hs_vectorized(step: StepView, registry: HostRegistry,
     req_ids = step.req_ids
     bs = step.num_reqs
     qsl = step.query_start_loc_np
-    default_hooks_on = getattr(registry, "_default_hooks_on", "prefill")
-    default_hs_mode = getattr(registry, "_worker_hs_mode", "last_token")
+    default_hooks_on = getattr(registry, "_default_hooks_on", DEFAULT_HOOKS_ON)
+    default_hs_mode = getattr(registry, "_worker_hs_mode", DEFAULT_HS_MODE)
     owned = getattr(registry, "_hs_owned_rows", None)
     owned_set = getattr(registry, "_hs_owned_set", None)
     for i in range(bs):
@@ -508,6 +546,8 @@ def _build_routing_hs_vectorized(step: StepView, registry: HostRegistry,
                 continue
 
         req_mode = extra.get("hs_mode", default_hs_mode)
+        if req_mode == "last_token" and _mid_prefill_chunk(step, i):
+            continue
         start = int(qsl[i])
         end = int(qsl[i + 1])
         if end <= start:
@@ -581,8 +621,8 @@ def _build_routing_hs_decode_cache(step: StepView, registry: HostRegistry) -> li
     qsl = step.query_start_loc_np
     cap = registry.cap
     capture_index_pinned = registry.capture_index_pinned
-    default_hooks_on = getattr(registry, "_default_hooks_on", "prefill")
-    default_hs_mode = getattr(registry, "_worker_hs_mode", "last_token")
+    default_hooks_on = getattr(registry, "_default_hooks_on", DEFAULT_HOOKS_ON)
+    default_hs_mode = getattr(registry, "_worker_hs_mode", DEFAULT_HS_MODE)
     owned = getattr(registry, "_hs_owned_rows", None)
     owned_set = getattr(registry, "_hs_owned_set", None)
     if not hasattr(registry, "_dc_entries"):
@@ -644,6 +684,8 @@ def _build_routing_hs_decode_cache(step: StepView, registry: HostRegistry) -> li
             if hooks_on == "decode" and is_prefill:
                 continue
         req_mode = extra.get("hs_mode", default_hs_mode)
+        if req_mode == "last_token" and _mid_prefill_chunk(step, i):
+            continue
         if layer_filter is None:
             rows_layers = list(range(registry.num_layers)) if owned is None else list(owned)
         else:
@@ -708,6 +750,7 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
     _route_dc = _route_decode_cache_enabled()
 
     def _hs_routing_key(step, registry):
+        _note_asked(step, registry)
         return _capture_idle_key(step, registry, "output_hidden_states")
 
     if _route_dc:
@@ -728,8 +771,8 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
 
     registry: Optional[HostRegistry] = get_registry(worker, "hs")
     if registry is not None:
-        registry._worker_hs_mode = getattr(worker, "hs_mode", "last_token")
-        registry._default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
+        registry._worker_hs_mode = getattr(worker, "hs_mode", DEFAULT_HS_MODE)
+        registry._default_hooks_on = getattr(worker, "_default_hooks_on", DEFAULT_HOOKS_ON)
 
     aperture = getattr(registry, "_hs_aperture", None) if registry is not None else None
     drain = None
@@ -740,7 +783,8 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
         hidden = int(worker._conf["hidden_size"])
         layers = [(host.egress_layer_num, host.hs_buf) for _, host in registry.iter_hosts()]
         buf_dtype = layers[0][1].dtype if layers else torch.float32
-        base = os.environ.get("MIA_APERTURE_DIR", "./hs_aperture_dump")
+        _dp = dp_layout(worker)
+        base = dp_run_base(os.environ.get("MIA_APERTURE_DIR", "./hs_aperture_dump"), _dp)
         tp_rank = getattr(worker, "_tp_rank", None)
         if tp_rank is None:
             tp_rank = resolve_tp_coords(worker)[0]
@@ -755,6 +799,7 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
             "num_layers": _num_layers,
             "capture_all_ranks": bool(getattr(worker, "_hs_capture_all_ranks", False)),
         })
+        header.update(_dp)
         if getattr(worker, "_hs_shard_mode", None) == HS_MODE_ROUND_ROBIN:
             header.update(HSShard.of(int(tp_rank), _tp_size, _num_layers).as_header())
         from mia.graph.install import predict_capture_write_shape
@@ -799,6 +844,7 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
             _mode += " + selective drain OFF (MIA_DRAIN_SELECTIVE=0)"
         worker._hs_drain = drain
         worker._hs_run_dir = run_dir
+        registry._hs_asked = {} if getattr(drain, "gather_stamp", False) else None
         _wline = (f"[graph/install_hs] HS aperture write path (tp_rank {int(tp_rank)}): "
                   f"{drain.write_path_summary()}")
         print(_wline, flush=True)
@@ -821,8 +867,8 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
         if registry is None or not registry.should_capture:
             return orig_execute_model(scheduler_output, *args, **kwargs)
 
-        registry._worker_hs_mode = getattr(worker, "hs_mode", "last_token")
-        registry._default_hooks_on = getattr(worker, "_default_hooks_on", "prefill")
+        registry._worker_hs_mode = getattr(worker, "hs_mode", DEFAULT_HS_MODE)
+        registry._default_hooks_on = getattr(worker, "_default_hooks_on", DEFAULT_HOOKS_ON)
 
         with PROF.timed("graph.forward"):
             result = orig_execute_model(scheduler_output, *args, **kwargs)
@@ -863,9 +909,14 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
         _fin_evidence = getattr(scheduler_output, "finished_req_ids", None)
         if _fin_evidence:
             PROF.incr("hook.fire.hs", len(_fin_evidence) * len(layers))
+            asked = getattr(registry, "_hs_asked", None)
             if drain is not None and getattr(drain, "gather_stamp", False):
                 for _rid in _fin_evidence:
-                    drain.note_gather_finish(_rid)
+                    drain.note_gather_finish(
+                        _rid, asked=bool(asked.pop(str(_rid), False)) if asked else False)
+            elif asked:
+                for _rid in _fin_evidence:
+                    asked.pop(str(_rid), None)
 
         registry._pending_plans = []
         registry._hs_step_entries = []

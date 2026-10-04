@@ -1,9 +1,11 @@
 """MiaClient: OpenAI-compatible client for vllm serve with probe capture and analysis."""
 from __future__ import annotations
 
+import copy
 import glob
 import json
 import os
+import shutil
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -12,6 +14,9 @@ import torch
 
 from mia._profiler import PROF
 from mia.run_utils import dispatch_disk_analyze
+
+
+_UNSET = object()
 
 
 class MiaClient:
@@ -47,6 +52,10 @@ class MiaClient:
         self._last_save_to_disk: bool = False
         self._tokenizer_for = tokenizer_for
         self._tokenizer = None
+        # Hybrid save_to_disk runs: delivered keys, reads and write nonces per run_id.
+        self._run_keys: Dict[str, List[str]] = {}
+        self._run_reads: Dict[str, List[tuple]] = {}
+        self._run_nonces: Dict[str, Dict[str, str]] = {}
 
 
     #: The only `vllm_xargs` keys the plugin JSON-decodes back into Python objects
@@ -113,6 +122,7 @@ class MiaClient:
                 PROF.gauge("client.response_bytes_est", len(response.model_dump_json()))
             except Exception:
                 pass
+        self._attach_delivery(response, run_id)
         self._last_response = response
         self._last_run_id = run_id
         self._last_save_to_disk = save_to_disk
@@ -245,6 +255,9 @@ class MiaClient:
             raise RuntimeError("No generate() call has been made yet.")
 
         raw_probes = getattr(self._last_response, "probes", None)
+        if raw_probes is None and (run_ids or [run_id or self._last_run_id])[0] in self._run_keys:
+            return self._analyze_delivered_run(analyzer_spec, run_id or self._last_run_id,
+                                               run_ids)
         if raw_probes is None:
             effective_run_id = run_id or self._last_run_id
             if not self._last_save_to_disk and not self._artifact_dir_exists(effective_run_id):
@@ -266,6 +279,130 @@ class MiaClient:
             return self.analyzer.analyze(analyzer_spec, probes=probes)
 
 
+    def _attach_delivery(self, response, run_id: str) -> None:
+        """A hybrid server's response: lazy ``probes``, or with save_to_disk the run's keys."""
+        from mia.errors import MiaDeliveryError
+        from mia.graph.delivered_probes import attach_lazy, check_id, external_id
+
+        extra = getattr(response, "__pydantic_extra__", None)
+        mark = extra.pop("mia", None) if isinstance(extra, dict) else None
+        if not isinstance(mark, dict) or mark.get("delivery") != "hybrid":
+            return
+        rid, kind, items = getattr(response, "id", None), mark.get("kind"), mark.get("items") or []
+        try:
+            check_id(rid)
+        except ValueError:
+            def unreadable():
+                raise MiaDeliveryError(f"response id {rid!r} cannot be read back "
+                                       f"(use ids of A-Za-z0-9._:- only)")
+            attach_lazy(response, unreadable)
+            return
+        if any(it.get("save_to_disk") is True for it in items):
+            self._run_keys[run_id], self._run_reads[run_id] = [], []
+            nonces = self._run_nonces.setdefault(run_id, {})
+            nonces.clear()
+            for it in items:
+                ext, n = external_id(rid, kind, int(it["item"])), int(it["n"])
+                keys = [ext] if n == 1 else [f"{j}_{ext}" for j in range(n)]
+                self._run_keys[run_id].extend(keys)
+                self._run_reads[run_id].append((rid, kind, it))
+                if it.get("nonce"):
+                    nonces.update({k: str(it["nonce"]) for k in keys})
+            return
+        fetch = {int(it["item"]): _ItemFetch(self, rid, kind, it) for it in items}
+        n = int(items[0]["n"]) if items else 1
+        targets = [(response, lambda: fetch[0]()[0])]
+        if len(items) > 1 or n > 1:
+            for c, ch in enumerate(getattr(response, "choices", None) or []):
+                c = int(getattr(ch, "index", c))
+                targets.append((ch, lambda i=c // n, j=c % n: fetch[i]()[j]))
+        try:
+            for obj, loader in targets:
+                attach_lazy(obj, loader)
+        except Exception as e:  # noqa: BLE001
+            print(f"[mia] response.probes read eagerly ({e!r})", flush=True)
+            for obj, loader in targets:
+                setattr(obj, "probes", loader())
+
+    def _read_delivered(self, rid: str, kind: str, it: dict):
+        """``(samples, keys, names, config)`` of one response item, from the server's route."""
+        import httpx
+        import openai
+        from mia.errors import MiaDeliveryError
+        from mia.graph.aperture_gather import DELIVERY_HARD_CAP_S
+        from mia.graph.delivered_probes import DeliveryReadTimeout, decode_delivery
+
+        params = {"id": rid, "item": int(it["item"]), "n": int(it["n"]), "kind": kind}
+        if it.get("key"):
+            params["key"] = str(it["key"])
+        if it.get("layers"):
+            params["layers"] = ",".join(str(int(x)) for x in it["layers"])
+        try:
+            with PROF.timed("client.delivered_read"):
+                r = self._openai.get("mia/delivered", cast_to=httpx.Response, options={
+                    "params": params, "max_retries": 0, "timeout": DELIVERY_HARD_CAP_S + 60})
+        except openai.APIStatusError as e:
+            try:
+                msg = e.response.json().get("error") or e.response.text
+            except Exception:  # noqa: BLE001
+                msg = e.response.text
+            if e.status_code == 504:
+                raise DeliveryReadTimeout(f"{rid!r}: {msg}", missing={rid: msg}) from None
+            raise MiaDeliveryError(
+                f"delivered probes for {rid!r}: HTTP {e.status_code}: {msg}") from None
+        return decode_delivery(r.content)
+
+    def _analyze_delivered_run(self, analyzer_spec, run_id, run_ids):
+        """Disk analyze of hybrid save_to_disk runs, once each run holds its requests."""
+        import inspect
+        from mia.graph import run_artifact
+        from mia.graph.delivered_probes import hs_probes, merge_disk
+
+        nonces = {r: self._run_nonces.get(r) or None for r in (run_ids or [run_id])}
+        for rid_ in (run_ids or [run_id]):
+            try:
+                run_artifact.wait_run(self._hook_dir, rid_, self._run_keys.get(rid_, []),
+                                      nonces=nonces[rid_])
+            except run_artifact.RunArtifactError:
+                remote = not os.path.isdir(run_artifact.run_dir(self._hook_dir, rid_))
+                takes = "probes" in inspect.signature(self.analyzer.analyze).parameters
+                if not (remote and takes and not run_ids):
+                    raise
+                cache = None
+                for rid, kind, it in self._run_reads.get(rid_, []):
+                    samples, _k, names, config = self._read_delivered(rid, kind, it)
+                    for j, rows in enumerate(samples):
+                        if rows:
+                            cache = merge_disk(cache, hs_probes(
+                                rows, {**_item_meta(it, j), "config": config}, names,
+                                layout="disk"))
+                with PROF.timed("analyzer.kernel"):
+                    return self.analyzer.analyze(analyzer_spec, probes=cache)
+        runs = run_ids or [run_id]
+        while True:
+            with run_artifact.read_lock(self._hook_dir, runs):
+                if all(not nonces[r] or run_artifact.holds(
+                        run_artifact.read_manifest(self._hook_dir, r),
+                        self._run_keys.get(r, []), nonces[r]) for r in runs):
+                    snap = run_artifact.snapshot(self._hook_dir, runs)
+                    if snap is None:
+                        return dispatch_disk_analyze(self.analyzer, analyzer_spec,
+                                                     run_id=run_id, run_ids=run_ids)
+                    break
+            for r in runs:
+                run_artifact.wait_run(self._hook_dir, r, self._run_keys.get(r, []),
+                                      nonces=nonces[r])
+        an = copy.copy(self.analyzer)
+        an.hook_dir = snap
+        before = dict(vars(an))
+        try:
+            return dispatch_disk_analyze(an, analyzer_spec, run_id=run_id, run_ids=run_ids)
+        finally:
+            shutil.rmtree(snap, ignore_errors=True)
+            for k, v in vars(an).items():
+                if k != "hook_dir" and before.get(k, _UNSET) is not v:
+                    setattr(self.analyzer, k, v)
+
     def _wait_artifact_dir(self, run_id, timeout_s: float = 10.0, poll_s: float = 0.05) -> bool:
         base = os.path.join(self._hook_dir, run_id)
         prev = None
@@ -273,7 +410,7 @@ class MiaClient:
         while time.time() < deadline:
             files = sorted(glob.glob(os.path.join(base, "**", "*"), recursive=True))
             files = [f for f in files if os.path.isfile(f) and not f.endswith(".tmp")
-                     and not os.path.basename(f).startswith(".tmp")]
+                     and not os.path.basename(f).startswith(".")]
             if files and files == prev:
                 return True
             prev = files
@@ -342,3 +479,29 @@ class MiaClient:
                 result[cache_key][mod_name] = restored
         return result
 
+
+def _item_meta(it: dict, j: int) -> dict:
+    return {"hs_mode": it["hs_mode"], "hooks_on": it["hooks_on"], "n_prompt": it["n_prompt"],
+            "n_gen": it["n_gen"][j], "n_cached": it.get("n_cached", 0)}
+
+
+class _ItemFetch:
+    """One response item's samples as client-visible probes, read once on first use."""
+
+    def __init__(self, client: "MiaClient", rid: str, kind: str, it: dict):
+        import threading
+        self._client, self._rid, self._kind, self._it = client, rid, kind, it
+        self._lock = threading.Lock()
+        self._value: Optional[list] = None
+
+    def __call__(self) -> list:
+        from mia.graph.delivered_probes import client_probes
+        with self._lock:
+            if self._value is None:
+                samples, _k, names, config = self._client._read_delivered(
+                    self._rid, self._kind, self._it)
+                with PROF.timed("client.delivered_convert"):
+                    self._value = [client_probes(rows, {**_item_meta(self._it, j),
+                                                        "config": config}, names) if rows else None
+                                   for j, rows in enumerate(samples)]
+            return self._value

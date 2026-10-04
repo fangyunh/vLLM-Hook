@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .aperture_run_index import (ChainCursor, RunIndexError, read_run_index,
+from .aperture_run_index import (RUN_ID_KEY, ChainCursor, RunIndexError, read_run_index,
                                  segment_name, segment_paths)
 from .aperture_trim import (TRIM_ENV as GATHER_TRIM_ENV, TrimError, TrimLog, align_down,
                             floor_row_for_bytes, is_reclaimed, published_cursors, punch_hole,
@@ -45,6 +45,30 @@ DEFAULT_POLL_MS = 100
 
 class GatherError(RuntimeError):
     """The gather cannot deliver what it was asked for, and will not deliver part of it."""
+
+
+DELIVERY_TIMEOUT_ENV = "MIA_DELIVERY_TIMEOUT_S"
+DEFAULT_DELIVERY_TIMEOUT_S = 60.0
+DELIVERY_HARD_CAP_S = 1800.0
+_WAIT_POLL_S = 0.1
+
+
+class NoDeliveryError(GatherError):
+    """No delivery at a path yet: no root, no delivery dir, or a rank's marker missing."""
+
+    def __init__(self, msg: str, what: str = ""):
+        super().__init__(msg)
+        self.what = what or msg
+
+
+class DeliveryTimeoutError(GatherError):
+    """:func:`wait_delivered` gave up; ``missing`` maps each id to what it lacks."""
+
+    def __init__(self, msg: str, missing: Optional[Dict[str, str]] = None,
+                 roots: Optional[List[str]] = None):
+        super().__init__(msg)
+        self.missing = dict(missing or {})
+        self.roots = list(roots or [])
 
 
 def delivery_enabled() -> bool:
@@ -136,11 +160,28 @@ def gather_poll_s() -> float:
     return ms / 1000.0
 
 
-def delivery_dir(run_dir: str, *, tp_rank: Optional[int] = None) -> str:
+def delivery_timeout_s() -> float:
+    """``MIA_DELIVERY_TIMEOUT_S`` (default 60): :func:`wait_delivered`'s no-progress bound."""
+    raw = os.environ.get(DELIVERY_TIMEOUT_ENV)
+    if raw is None or raw.strip() == "":
+        return DEFAULT_DELIVERY_TIMEOUT_S
+    try:
+        v = float(raw)
+    except ValueError:
+        v = float("nan")
+    if not v > 0:
+        raise GatherError(f"{DELIVERY_TIMEOUT_ENV}={raw!r} must be a positive number of seconds")
+    return v
+
+
+def delivery_dir(run_dir: str, *, tp_rank: Optional[int] = None,
+                 dp_rank: Optional[int] = None) -> str:
     """Delivery root: ``MIA_APERTURE_GATHER_DIR`` or ``<run_dir>/delivered``, per rank if sharded."""
-    from .tp_shard import RANK_DIR_PREFIX, parse_rank_dir, rank_dir_name
+    from .tp_shard import RANK_DIR_PREFIX, dp_dir_name, parse_rank_dir, rank_dir_name
 
     d = os.environ.get(DIR_ENV)
+    if d and dp_rank is not None:
+        d = os.path.join(d, dp_dir_name(int(dp_rank)))
     if tp_rank is None:
         return d if d else os.path.join(run_dir, DELIVERY_DIRNAME)
     if d:
@@ -576,9 +617,34 @@ class GatherPass:
                 pass
         st.touched = True
 
+    def _stamp_run(self, man: dict) -> None:
+        if self._cursor.run_id is not None:
+            man[RUN_ID_KEY] = self._cursor.run_id
+
+    def _write_empty(self, rid: str) -> None:
+        d = os.path.join(self.out_dir, req_dir_name(rid))
+        os.makedirs(d, exist_ok=True)
+        hdr = self._header or {}
+        man = {"format": DELIVERY_FORMAT, "req_id": rid, "n_rows": 0, "layers": [],
+               "layers_all": [], "worker": 0, "n_workers": self.n_workers,
+               "dtype": hdr.get("dtype"), "row_shape": [int(x) for x in hdr.get("row_shape", [])],
+               "row_bytes": int(self._row_bytes), "complete": True}
+        self._stamp_run(man)
+        if self.shard is not None:
+            man.update(self.shard.as_header())
+        path = os.path.join(d, manifest_name(0, self.n_workers))
+        with open(f"{path}.tmp", "w", encoding="utf-8") as f:
+            f.write(json.dumps(man, sort_keys=True))
+        os.replace(f"{path}.tmp", path)
+        self._stats["finalized"] += 1
+
     def _finalize(self, rid: str, n_total: int) -> None:
         st = self._reqs.pop(rid, None)
         if st is None:
+            if int(n_total) == 0:
+                if self.worker == 0:
+                    self._write_empty(rid)
+                return
             self._stats["skipped_stamps"] += 1
             return
         if not st.mine:
@@ -603,6 +669,7 @@ class GatherPass:
                "worker": self.worker, "n_workers": self.n_workers,
                "dtype": hdr.get("dtype"), "row_shape": [int(x) for x in hdr.get("row_shape", [])],
                "row_bytes": int(self._row_bytes), "complete": True}
+        self._stamp_run(man)
         if self.shard is not None:
             man.update(self.shard.as_header())
         path = os.path.join(d, manifest_name(self.worker, self.n_workers))
@@ -647,22 +714,31 @@ def discover_delivery_ranks(root: str) -> List[Tuple[int, str]]:
     return []
 
 
-def read_manifests(req_dir: str) -> List[dict]:
+def read_manifests(req_dir: str, run_ids=None) -> List[dict]:
     """Every manifest in one request's delivery directory, in worker order."""
     out = []
     for p in sorted(glob.glob(os.path.join(req_dir, MANIFEST_GLOB))):
         with open(p, "r", encoding="utf-8") as f:
             out.append(json.loads(f.read()))
+    if run_ids is not None:
+        out = [m for m in out if m.get(RUN_ID_KEY) in run_ids]
     return sorted(out, key=lambda m: int(m.get("worker", 0)))
 
 
-def load_delivery(req_dir: str, *, allow_shard: bool = False) -> dict:
+def _foreign_note(req_dir: str, run_ids) -> str:
+    if run_ids is None or not glob.glob(os.path.join(req_dir, MANIFEST_GLOB)):
+        return ""
+    return " (only a previous launch's delivery is here)"
+
+
+def load_delivery(req_dir: str, *, allow_shard: bool = False, run_ids=None) -> dict:
     """One request's delivered artifact as ``{layer: Tensor}``, or :class:`GatherError`."""
-    mans = read_manifests(req_dir)
+    mans = read_manifests(req_dir, run_ids)
     if not mans:
         raise GatherError(
             f"{req_dir}: no manifest ({MANIFEST_GLOB}) -- this request was never stamped complete, "
-            f"so what is here is a PREFIX of its capture, not its artifact. Not delivered.")
+            f"so what is here is a PREFIX of its capture, not its artifact. Not delivered."
+            + _foreign_note(req_dir, run_ids))
     first = mans[0]
     n_workers = int(first.get("n_workers", 1))
     n_rows = int(first["n_rows"])
@@ -696,7 +772,8 @@ def load_delivery(req_dir: str, *, allow_shard: bool = False) -> dict:
             raise GatherError(
                 f"{req_dir}: manifests disagree on the request's layer list {layers_all} vs "
                 f"{m['layers_all']}")
-    expected = {w for w in range(n_workers) if layers_for_worker(layers_all, w, n_workers)}
+    expected = ({w for w in range(n_workers) if layers_for_worker(layers_all, w, n_workers)}
+                if layers_all else {0})
     present = {int(m["worker"]) for m in mans}
     if present != expected:
         raise GatherError(
@@ -745,21 +822,33 @@ def load_delivery(req_dir: str, *, allow_shard: bool = False) -> dict:
     return out
 
 
-def _load_delivered_one_rank(out_dir: str, *, allow_shard: bool = False, req_ids=None) -> dict:
+def _load_delivered_one_rank(out_dir: str, *, allow_shard: bool = False, req_ids=None,
+                             run_ids=None) -> dict:
     out: dict = {}
     if not os.path.isdir(out_dir):
+        return out
+    if req_ids is not None:
+        for rid in sorted(req_ids):
+            d = os.path.join(out_dir, req_dir_name(rid))
+            mans = read_manifests(d, run_ids) if os.path.isdir(d) else []
+            if not mans:
+                continue
+            named = str(mans[0]["req_id"])
+            if named != rid:
+                raise GatherError(f"{d}: its manifest names request {named!r}, not {rid!r}")
+            out[rid] = load_delivery(d, allow_shard=allow_shard, run_ids=run_ids)
         return out
     for name in sorted(os.listdir(out_dir)):
         d = os.path.join(out_dir, name)
         if not os.path.isdir(d):
             continue
-        if not glob.glob(os.path.join(d, MANIFEST_GLOB)):
+        mans = read_manifests(d, run_ids)
+        if not mans:
             continue
-        mans = read_manifests(d)
         rid = str(mans[0]["req_id"])
         if req_ids is not None and rid not in req_ids:
             continue
-        out[rid] = load_delivery(d, allow_shard=allow_shard)
+        out[rid] = load_delivery(d, allow_shard=allow_shard, run_ids=run_ids)
     return out
 
 
@@ -791,26 +880,169 @@ def _expected_ranks_for(ask, tp_size: int, num_layers: int):
     return hs_expected_ranks(hs_requested_layers(list(ask), int(num_layers)), int(tp_size))
 
 
-def load_delivered(out_dir: str, *, expected_layers=None, req_ids=None) -> dict:
+def _listdir(d: str) -> List[str]:
+    try:
+        return sorted(os.listdir(d))
+    except OSError:
+        return []
+
+
+def _aperture_contents(d: str) -> List[str]:
+    from .tp_shard import parse_rank_dir
+
+    out = []
+    for n in _listdir(d):
+        p = os.path.join(d, n)
+        if parse_rank_dir(n) is not None and os.path.isdir(p):
+            out.append(n + "/")
+        elif n.endswith((".raw", ".jsonl")) and os.path.isfile(p):
+            out.append(n)
+    return out
+
+
+def _level_root(d: str) -> Optional[str]:
+    from .tp_shard import parse_rank_dir
+
+    ranks = discover_delivery_ranks(d)
+    if ranks:
+        return os.path.dirname(ranks[0][1])
+    sub = os.path.join(d, DELIVERY_DIRNAME)
+    if os.path.isdir(sub):
+        return sub
+    tps = sorted((r, os.path.join(d, n, DELIVERY_DIRNAME)) for n in _listdir(d)
+                 for r in [parse_rank_dir(n)]
+                 if r is not None and os.path.isdir(os.path.join(d, n, DELIVERY_DIRNAME)))
+    if len(tps) > 1 or (tps and tps[0][0] != 0):
+        raise GatherError(
+            f"{d}: per-rank deliveries {[p for _, p in tps]} carry no {RANK_MARKER_NAME}, so they "
+            f"are not one sharded run (the all-ranks diagnostic writes replicas). Read one of them "
+            f"explicitly.")
+    if tps:
+        return tps[0][1]
+    return None
+
+
+def _check_delivery_root(root: str) -> None:
+    if discover_delivery_ranks(root):
+        return
+    found = _aperture_contents(root)
+    if found:
+        raise NoDeliveryError(
+            f"{root} is a capture-aperture dir (it holds {found[:4]}) with no per-request delivery "
+            f"under it: no {RANK_MARKER_NAME}, no {DELIVERY_DIRNAME}/, no "
+            f"tp_rank_0/{DELIVERY_DIRNAME}. Its capture is in the shared layer files "
+            f"(aperture_reader.load_hs_aperture_tp), or its delivery is under {DIR_ENV}.",
+            "no delivery under the capture dir yet")
+
+
+def _resolve_roots(d, skipped: Optional[List[str]] = None) -> List[str]:
+    from .tp_shard import parse_dp_dir, parse_rank_dir
+
+    d = os.path.abspath(os.fspath(d))
+    if not os.path.isdir(d):
+        raise NoDeliveryError(f"{d}: no such delivery root or aperture dir",
+                              "the delivery root does not exist yet")
+    own = _level_root(d)
+    dps = [os.path.join(d, n) for n in _listdir(d)
+           if parse_dp_dir(n) is not None and os.path.isdir(os.path.join(d, n))]
+    dps.sort(key=parse_dp_dir)
+    if not dps:
+        roots = [own if own is not None else d]
+    else:
+        loose = [n for n in _listdir(d) if os.path.isdir(os.path.join(d, n))
+                 and parse_dp_dir(n) is None and parse_rank_dir(n) is None
+                 and n != DELIVERY_DIRNAME]
+        roots = [own] if own is not None else ([d] if loose else [])
+        for c in dps:
+            r = _level_root(c)
+            if r is None and not _aperture_contents(c):
+                r = c
+            if r is not None:
+                roots.append(r)
+            elif skipped is not None:
+                skipped.append(c)
+        if not roots:
+            raise NoDeliveryError(f"{d}: none of its DP engine dirs {dps} holds a delivery",
+                                  "no DP engine dir holds a delivery yet")
+    for r in roots:
+        _check_delivery_root(r)
+    return roots
+
+
+def _as_paths(roots) -> List[str]:
+    return [roots] if isinstance(roots, (str, os.PathLike)) else list(roots)
+
+
+def _resolve_all(roots, skipped: Optional[List[str]] = None) -> List[str]:
+    out, seen = [], set()
+    for item in _as_paths(roots):
+        for r in _resolve_roots(item, skipped):
+            k = os.path.realpath(r)
+            if k not in seen:
+                seen.add(k)
+                out.append(r)
+    if not out:
+        raise GatherError("no delivery roots given")
+    return out
+
+
+def delivery_base(aperture_dir: Optional[str] = None) -> str:
+    """The dir a run's delivery roots resolve from (``MIA_APERTURE_GATHER_DIR`` first)."""
+    return (os.environ.get(DIR_ENV) or aperture_dir or os.environ.get("MIA_APERTURE_DIR")
+            or "./hs_aperture_dump")
+
+
+def delivery_root(aperture_dir: Optional[str] = None) -> List[str]:
+    """Every delivery root of a run, one per DP engine."""
+    return _resolve_roots(delivery_base(aperture_dir))
+
+
+def _dup_message(rid: str, a: str, b: str) -> str:
+    return (f"request {rid!r} is delivered under both {a} and {b} -- two runs or two DP engines "
+            f"used one id. Refusing to pick one; read one root explicitly.")
+
+
+def load_delivered(out_dir, *, expected_layers=None, req_ids=None, run_ids=None) -> dict:
     """Every complete delivery under ``out_dir`` as ``{req_id: {layer: Tensor}}``, TP-aware."""
+    roots = _resolve_all(out_dir)
+    want = _as_id_set(req_ids)
+    if len(roots) == 1:
+        return _load_delivered_root(roots[0], expected_layers=expected_layers, req_ids=want,
+                                    run_ids=run_ids)
+    out: dict = {}
+    where: dict = {}
+    for root in roots:
+        for rid, art in _load_delivered_root(root, expected_layers=expected_layers,
+                                             req_ids=want, run_ids=run_ids).items():
+            if rid in where:
+                raise GatherError(_dup_message(rid, where[rid], root))
+            out[rid] = art
+            where[rid] = root
+    return out
+
+
+def _load_delivered_root(out_dir: str, *, expected_layers=None, req_ids=None,
+                         run_ids=None) -> dict:
     from .tp_shard import check_hs_shard_set, merge_hs_layer_maps
 
     ranks = discover_delivery_ranks(out_dir)
     if not ranks:
-        return _load_delivered_one_rank(out_dir, req_ids=_as_id_set(req_ids))
+        return _load_delivered_one_rank(out_dir, req_ids=_as_id_set(req_ids), run_ids=run_ids)
     want_ids = _as_id_set(req_ids)
     shards = _rank_shards(ranks)
     tp_size, num_layers = shards[0].tp_size, shards[0].num_layers
     whole = None if isinstance(expected_layers, dict) else expected_layers
     check_hs_shard_set(shards, _expected_ranks_for(whole, tp_size, num_layers)
                        if whole is not None else None)
-    per_rank = {sh.tp_rank: _load_delivered_one_rank(d, allow_shard=True, req_ids=want_ids)
+    per_rank = {sh.tp_rank: _load_delivered_one_rank(d, allow_shard=True, req_ids=want_ids,
+                                                     run_ids=run_ids)
                 for sh, (_r, d) in zip(shards, ranks)}
     present = {sh.tp_rank: sh for sh in shards}
     seen: dict = {}
     for r, art in per_rank.items():
-        for rid in art:
-            seen.setdefault(str(rid), set()).add(int(r))
+        for rid, layers in art.items():
+            if layers:
+                seen.setdefault(str(rid), set()).add(int(r))
     for rid, have in sorted(seen.items()):
         ask = expected_layers.get(rid) if isinstance(expected_layers, dict) else whole
         want = set(_expected_ranks_for(ask, tp_size, num_layers)).intersection(present)
@@ -827,6 +1059,198 @@ def load_delivered(out_dir: str, *, expected_layers=None, req_ids=None) -> dict:
                 + (f" Extra: tp_rank(s) {sorted(have - want)} delivered it and were not expected."
                    if have - want else ""))
     return merge_hs_layer_maps([(sh, per_rank[sh.tp_rank]) for sh in shards])
+
+
+def _worker_gap(req_dir: str, run_ids=None) -> str:
+    if not os.path.isdir(req_dir):
+        return "no rows delivered yet"
+    mans = read_manifests(req_dir, run_ids)
+    if not mans:
+        return "rows arriving, no manifest yet" + _foreign_note(req_dir, run_ids)
+    first = mans[0]
+    nw = int(first.get("n_workers", 1))
+    layers_all = [int(x) for x in first["layers_all"]]
+    need = {w for w in range(nw) if layers_for_worker(layers_all, w, nw)}
+    have = {int(m.get("worker", 0)) for m in mans}
+    if have < need:
+        return (f"gather worker manifest(s) {sorted(have)} present, {sorted(need - have)} "
+                f"missing")
+    return ""
+
+
+class _WaitRoot:
+
+    def __init__(self, root: str, expected_layers):
+        from .tp_shard import check_hs_shard_set
+
+        self.root = root
+        ranks = discover_delivery_ranks(root)
+        self.ranks: Dict[int, str] = {}
+        self.missing: List[int] = []
+        if ranks:
+            shards = _rank_shards(ranks)
+            self.tp_size, self.num_layers = shards[0].tp_size, shards[0].num_layers
+            whole = None if isinstance(expected_layers, dict) else expected_layers
+            need = _expected_ranks_for(whole, self.tp_size, self.num_layers)
+            present = sorted(int(sh.tp_rank) for sh in shards)
+            check_hs_shard_set(shards, present)
+            self.missing = sorted(set(need) - set(present))
+            self.ranks = {int(sh.tp_rank): d for sh, (_r, d) in zip(shards, ranks)}
+
+    def dirs(self) -> List[str]:
+        return list(self.ranks.values()) if self.ranks else [self.root]
+
+    def holds(self, rid: str) -> bool:
+        q = req_dir_name(rid)
+        return any(os.path.isdir(os.path.join(d, q)) for d in self.dirs())
+
+    def gap(self, rid: str, expected_layers, run_ids=None) -> str:
+        q = req_dir_name(rid)
+        if not self.ranks:
+            return _worker_gap(os.path.join(self.root, q), run_ids)
+        if self.missing:
+            return f"tp_rank(s) {self.missing} have no {RANK_MARKER_NAME} yet"
+        ask = expected_layers.get(rid) if isinstance(expected_layers, dict) else expected_layers
+        want = sorted(set(_expected_ranks_for(ask, self.tp_size, self.num_layers))
+                      & set(self.ranks))
+        gaps = {r: _worker_gap(os.path.join(self.ranks[r], q), run_ids) for r in want}
+        late = [r for r in want if gaps[r]]
+        if not late:
+            return ""
+        return (f"tp_rank(s) {[r for r in want if not gaps[r]]} stamped it, {late} not yet ("
+                + "; ".join(f"tp_rank {r}: {gaps[r]}" for r in late) + ")")
+
+
+def _pending(views: List[_WaitRoot], ids: List[str], expected_layers,
+             run_ids=None) -> Dict[str, tuple]:
+    out: Dict[str, tuple] = {}
+    for rid in ids:
+        homes = [v for v in views if v.holds(rid)]
+        if len(homes) > 1:
+            raise GatherError(_dup_message(rid, homes[0].root, homes[1].root))
+        if not homes:
+            out[rid] = ("no delivery yet under any root", None)
+            continue
+        why = homes[0].gap(rid, expected_layers, run_ids)
+        if why:
+            out[rid] = (why, homes[0].root)
+    return out
+
+
+def _progress(views: List[_WaitRoot], ids) -> tuple:
+    sig: list = []
+    for v in views:
+        for d in v.dirs():
+            try:
+                sig.append(os.stat(d).st_mtime_ns)
+            except OSError:
+                sig.append(None)
+            for rid in ids:
+                try:
+                    with os.scandir(os.path.join(d, req_dir_name(rid))) as it:
+                        sig.append(sum(e.stat().st_size if e.name.endswith(".raw") else 1
+                                       for e in it))
+                except OSError:
+                    sig.append(None)
+    return tuple(sig)
+
+
+class _Poll:
+    __slots__ = ("got", "pending", "views", "dirs", "absent", "skipped")
+
+    def __init__(self, got, pending, views, dirs, absent, skipped):
+        self.got, self.pending, self.views = got, pending, views
+        self.dirs, self.absent, self.skipped = dirs, absent, skipped
+
+    def mark(self) -> tuple:
+        """Changes when the gather writes into the roots or the pending requests' dirs."""
+        if self.absent is not None:
+            return (str(self.absent),)
+        return _progress(self.views, list(self.pending)) + (tuple(v.missing for v in self.views),)
+
+
+def _manifest_rows(views: List[_WaitRoot], rid: str, run_ids=None) -> int:
+    q = req_dir_name(rid)
+    return max((int(m["n_rows"]) for v in views if v.holds(rid) for d in v.dirs()
+                for m in read_manifests(os.path.join(d, q), run_ids)), default=0)
+
+
+def _poll(roots, ids: List[str], expected_layers, given: List[str], run_ids=None,
+          load: bool = True) -> _Poll:
+    skipped: List[str] = []
+    try:
+        dirs = _resolve_all(roots, skipped)
+        views = [_WaitRoot(r, expected_layers) for r in dirs]
+    except NoDeliveryError as e:
+        pending = {rid: (e.what, None) for rid in ids}
+        return _Poll(None, pending, [], given, e, skipped)
+    pending = _pending(views, ids, expected_layers, run_ids)
+    if pending:
+        return _Poll(None, pending, views, dirs, None, skipped)
+    if not load:
+        return _Poll({rid: _manifest_rows(views, rid, run_ids) for rid in ids}, {}, views, dirs,
+                     None, skipped)
+    homes = list(dict.fromkeys(v.root for rid in ids for v in views if v.holds(rid)))
+    got = load_delivered(homes, expected_layers=expected_layers, req_ids=ids, run_ids=run_ids)
+    lost = [r for r in ids if r not in got]
+    if lost:
+        raise GatherError(f"requests {lost} were complete on disk under {homes} but "
+                          f"did not read back")
+    return _Poll(got, {}, views, dirs, None, skipped)
+
+
+def poll_delivered(roots, req_ids, expected_layers=None, run_ids=None):
+    """One non-blocking look at whether every id is delivered."""
+    ids = list(dict.fromkeys(str(x) for x in req_ids))
+    given = [os.path.abspath(os.fspath(r)) for r in _as_paths(roots)]
+    p = _poll(roots, ids, expected_layers, given, run_ids)
+    if p.got is not None:
+        return p.got, {}, ()
+    return None, {rid: msg for rid, (msg, _w) in p.pending.items()}, p.mark()
+
+
+def wait_delivered(roots, req_ids, *, expected_layers=None, timeout_s=None, run_ids=None,
+                   load: bool = True) -> dict:
+    """Poll until every id in ``req_ids`` is delivered, then load exactly those ids."""
+    idle = delivery_timeout_s() if timeout_s is None else float(timeout_s)
+    if not idle > 0:
+        raise GatherError(f"timeout_s={timeout_s!r} must be a positive number of seconds")
+    ids = list(dict.fromkeys(str(x) for x in req_ids))
+    if not ids:
+        return {}
+    given = [os.path.abspath(os.fspath(r)) for r in _as_paths(roots)]
+    probe_every = min(1.0, idle / 4)
+    start = last = probed = time.monotonic()
+    seen = None
+    while True:
+        p = _poll(roots, ids, expected_layers, given, run_ids, load)
+        if p.got is not None:
+            return p.got
+        now = time.monotonic()
+        if seen is None or now - probed >= probe_every:
+            probed = now
+            mark = p.mark()
+            if mark != seen:
+                seen, last = mark, now
+        capped = now - start >= DELIVERY_HARD_CAP_S
+        if capped or now - last >= idle:
+            why = (f"the {DELIVERY_HARD_CAP_S:.0f} s hard cap" if capped
+                   else f"{idle:g} s with no new delivery")
+            notes = [str(p.absent)] if p.absent is not None else []
+            notes += [f"{v.root}: tp_rank(s) {v.missing} have no {RANK_MARKER_NAME}"
+                      for v in p.views if v.missing]
+            if p.skipped:
+                notes.append(f"skipped DP engine dirs holding only a capture: {p.skipped}")
+            raise DeliveryTimeoutError(
+                f"{len(p.pending)} of {len(ids)} request(s) not delivered after "
+                f"{now - start:.1f} s ({why}) under {p.dirs}:\n"
+                + "\n".join(f"  {rid!r}: {msg}" + (f" (under {where})" if where else "")
+                            for rid, (msg, where) in p.pending.items())
+                + "".join(f"\n  note: {n}" for n in notes)
+                + f"\nIf the gather is only slow, raise {DELIVERY_TIMEOUT_ENV} (now {idle:g} s; "
+                  f"hard cap {DELIVERY_HARD_CAP_S:.0f} s).",
+                missing={rid: msg for rid, (msg, _w) in p.pending.items()}, roots=p.dirs)
+        time.sleep(_WAIT_POLL_S)
 
 
 _CHILD_THREAD_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
@@ -891,8 +1315,10 @@ class ApertureGatherProcess:
         self.tp_rank = None if self.shard is None else int(self.shard.tp_rank)
         self.tp_size = 1 if self.shard is None else int(self.shard.tp_size)
         self.num_layers = None if self.shard is None else int(self.shard.num_layers)
+        _dp = (header or {}).get("dp_rank")
+        self.dp_rank = None if _dp is None else int(_dp)
         self.out_dir = str(out_dir) if out_dir is not None else delivery_dir(
-            self.run_dir, tp_rank=self.tp_rank)
+            self.run_dir, tp_rank=self.tp_rank, dp_rank=self.dp_rank)
         if n_workers is None:
             _w = resolve_gather_workers(self.tp_size)
             self.n_workers, self.workers_note = _w.n, _w.note
@@ -1015,6 +1441,9 @@ class ApertureGatherProcess:
 
 __all__ = ["ApertureGatherProcess", "BATCH_BYTES_ENV", "DELIVER_ENV", "DELIVERY_FORMAT",
            "DEFAULT_WORKERS", "DIR_ENV", "GATHER_TRIM_ENV", "GatherError", "GatherPass",
+           "DELIVERY_TIMEOUT_ENV", "DeliveryTimeoutError", "NoDeliveryError", "delivery_root",
+           "delivery_timeout_s",
+           "wait_delivered",
            "GatherWorkers", "MANIFEST_GLOB", "resolve_gather_workers",
            "POLL_MS_ENV", "RANK_MARKER_FORMAT", "RANK_MARKER_NAME", "WORKERS_ENV",
            "clip_run", "delivery_dir", "delivery_enabled", "discover_delivery_ranks",
