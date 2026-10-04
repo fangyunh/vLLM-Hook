@@ -156,6 +156,12 @@ def _spawn_hybrid_writer(engine, request_id, mark: dict, extra: dict, internal=N
                  keys=_sample_keys(str(internal), mark["n"]) if internal else None, start=start)
 
 
+def _end_completion_turn(extra: dict, request_id) -> None:
+    from mia.graph.delivery_route import end_turn
+    end_turn(extra.get("hook_dir") or _DEFAULT_HOOK_DIR, str(extra.get("run_id") or request_id),
+             str(request_id))
+
+
 def _sample_keys(base: str, n: int) -> list:
     return [base] if n <= 1 else [f"{j}_{base}" for j in range(n)]
 
@@ -1793,6 +1799,7 @@ async def _patched_generate(
     _added: list = []
     _ADDED_IDS.set(_added)
     _nonce, _start = uuid.uuid4().hex, time.time_ns()
+    _writer_ends_turn = False
     try:
         async for output in _original_generate(
             self, prompt, sampling_params, request_id, **kwargs
@@ -1888,8 +1895,11 @@ async def _patched_generate(
                     if _explicit_std:
                         _spawn_hybrid_writer(self, request_id, _mark, extra,
                                              _added[0] if _added else None, _start)
+                        _writer_ends_turn = True
             yield output
     finally:
+        if needs_hooks and not _writer_ends_turn:
+            _end_completion_turn(extra, request_id)    # frees the next prompt's run write
         _release_steer(self, _steer_new, admitted=False)
         if needs_hooks and not wants_steer and not _hybrid:
             await self.collective_rpc("clear_captured_states", args=(request_id,))

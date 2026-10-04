@@ -266,7 +266,9 @@ def _write_items(ext: str, n: int, samples, metas: List[dict], names, config,
 
 # The longest a completion's prompt waits for an earlier prompt's run write.
 ORDER_WAIT_S = DELIVERY_HARD_CAP_S
+SWEEP_S = 10.0
 _TURNS: Dict[tuple, dict] = {}
+_SWEPT = [0.0]
 
 
 def prompt_index(request_id: str) -> Optional[int]:
@@ -276,39 +278,57 @@ def prompt_index(request_id: str) -> Optional[int]:
     return int(tail) if unit != str(request_id) and tail.isdigit() else None
 
 
+def _shared_index(run_id: str, request_id: str) -> Optional[int]:
+    if str(run_id) == str(request_id):           # no run_id given: the prompt's own run
+        return None
+    return prompt_index(request_id)
+
+
+def _sweep(now: float) -> None:
+    for k in [k for k, v in _TURNS.items() if now - v["t"] > ORDER_WAIT_S]:
+        del _TURNS[k]
+
+
 def _turns(hook_dir: str, run_id: str, request_id: str) -> dict:
     now = time.monotonic()
-    for k in [k for k, v in _TURNS.items() if now - v["t"] > 2 * ORDER_WAIT_S + 60]:
-        del _TURNS[k]
+    if now - _SWEPT[0] >= SWEEP_S:
+        _SWEPT[0] = now
+        _sweep(now)
     key = (str(hook_dir), str(run_id), response_id(str(request_id)))
-    return _TURNS.setdefault(key, {"t": now, "ended": {}})
-
-
-def _ended(turns: dict, i: int) -> asyncio.Event:
-    return turns["ended"].setdefault(i, asyncio.Event())
+    turns = _TURNS.setdefault(key, {"t": now, "ended": set(), "waits": {}})
+    turns["t"] = now
+    return turns
 
 
 async def await_turn(hook_dir: str, run_id: str, request_id: str) -> None:
-    """Return once every earlier prompt of this request's completion ended its run write."""
-    i = prompt_index(request_id)
+    """Return once every earlier prompt of this completion ended its turn on the shared run."""
+    i = _shared_index(run_id, request_id)
     if not i:
         return
     turns = _turns(hook_dir, run_id, request_id)
+    missing = [j for j in range(i) if j not in turns["ended"]]
+    if not missing:
+        return
+    waits = [turns["waits"].setdefault(j, asyncio.Event()) for j in missing]
     try:
-        await asyncio.wait_for(asyncio.gather(*(_ended(turns, j).wait() for j in range(i))),
-                               ORDER_WAIT_S)
+        await asyncio.wait_for(asyncio.gather(*(w.wait() for w in waits)), ORDER_WAIT_S)
     except asyncio.TimeoutError:
         unit = response_id(str(request_id))
-        late = [f"{unit}-{j}" for j in range(i) if not _ended(turns, j).is_set()]
+        late = [f"{unit}-{j}" for j in missing if j not in turns["ended"]]
         print(f"[mia/delivery] save_to_disk: {late} never wrote run {run_id!r} after "
               f"{ORDER_WAIT_S:g} s; writing {request_id!r} out of prompt order", flush=True)
 
 
 def end_turn(hook_dir: str, run_id: str, request_id: str) -> None:
-    """This request's run write is over (written, skipped or failed)."""
-    i = prompt_index(request_id)
-    if i is not None:
-        _ended(_turns(hook_dir, run_id, request_id), i).set()
+    """This completion prompt is done with the shared run (written, skipped, failed or no write)."""
+    i = _shared_index(run_id, request_id)
+    if i is None:
+        return
+    turns = _turns(hook_dir, run_id, request_id)
+    turns["ended"].add(i)
+    w = turns["waits"].get(i)
+    if w is not None:
+        w.set()
 
 
 async def _write_task(engine, ext, n, layers, metas, hook_dir, run_id, unit=None,
