@@ -49,6 +49,9 @@ prints the exact `vllm serve` line it needs, then exits.
 - **Offline, `generate` can return before every output's data has landed.** The rest is finished
   when the `MiaLLM` is dropped or Python exits normally; killing the process right after
   `generate` can lose it.
+  - It gives up after 60 s without progress (30 min cap); a hung engine holds GPU memory until exit.
+  - A `MiaLLM` dropped off the main thread finishes in the background, so exit can wait as long.
+  - One collected off the main thread during shutdown skips this; Python prints "Exception ignored".
 - A served capture sent without `save_to_disk` may land in `<hook_dir>/<run_id>/` instead of on the
   response; `client.analyze()` reads it either way.
 - `load_delivered` keys start with the request's id (`response.id`, `output.request_id`).
