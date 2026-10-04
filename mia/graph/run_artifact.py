@@ -6,6 +6,7 @@ import fcntl
 import glob
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -46,10 +47,10 @@ def artifact_wait_s() -> float:
     try:
         s = float(v)
     except ValueError:
-        raise RunArtifactError(f"{WAIT_ENV}={v!r} is not a number of seconds") from None
-    if not s > 0:
-        raise RunArtifactError(f"{WAIT_ENV}={v!r} must be positive")
-    return s
+        s = math.nan
+    if math.isnan(s):
+        raise RunArtifactError(f"{WAIT_ENV}={v!r} is not a number of seconds")
+    return max(s, 0.0)  # <= 0: no wait
 
 
 def read_manifest(hook_dir: str, run_id: str) -> Optional[dict]:
