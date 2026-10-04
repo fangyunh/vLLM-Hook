@@ -1,10 +1,10 @@
-"""Shared plumbing for MIA's server-mode demos.
+"""Shared plumbing for the demos' server mode.
 
-MIA installs into the **server**: the worker that captures or steers is `vllm serve`'s own
-worker, so every demo here talks to a server you start yourself. The plugin is selected at
-launch with ``MIA_WORKER``, which is why one server serves one worker kind at a time.
+The demos run offline; each keeps its `vllm serve` version as a commented block, and
+`demo_actsteer_serve.py` is server-only. Over `vllm serve` the worker that captures or steers is
+the server's own, selected at launch with ``MIA_WORKER``, so one server serves one worker kind.
 
-Each demo calls :func:`require_server` first. If nothing is listening it prints the exact
+Server code calls :func:`require_server` first. If nothing is listening it prints the exact
 command for that demo and exits, rather than failing later with a connection error.
 """
 from __future__ import annotations

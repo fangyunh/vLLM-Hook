@@ -1,7 +1,7 @@
 """Single-example AttnLink-U schema linking with the stock QK worker.
-Runs over `vllm serve`. It prompts with exact token ids through /v1/completions, which
-applies no chat template, so the tokens the model sees are the ones the spans were aligned
-to; the token count is checked against the server's own `usage.prompt_tokens`.
+
+Runs offline with `MiaLLM`, prompting with exact token ids so the tokens the model sees are the
+ones the spans were aligned to. The same demo over `vllm serve` is kept, commented out, at the end.
 """
 import argparse
 from datetime import datetime, timezone
@@ -11,11 +11,11 @@ import json
 import os
 from pathlib import Path
 
-os.environ.setdefault("VLLM_USE_V1", "1")
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-from mia import MiaClient
-from _serve import QK, require_server
+from vllm import SamplingParams, TokensPrompt
+
+from mia import MiaLLM
 from mia.analyzers.attnlink_analyzer import select_columns
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -322,7 +322,7 @@ def evaluate_ranking(candidates: list, ranking: list, positive_cols: list) -> tu
     return total / len(gold), [ref in gold for ref in refs]
 
 
-def main() -> None:
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=MODEL, help="Model ID or local path to the same model.")
     parser.add_argument("--out-dir", type=Path, default=None, help="New directory for this run.")
@@ -335,76 +335,119 @@ def main() -> None:
     select_columns([1.0], args.temperature, args.top_p)
     out_dir = args.out_dir or Path("cache") / ("attnlink_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f"))
     out_dir.mkdir(parents=True, exist_ok=False)
+    return args, out_dir
 
-    url = require_server(args.model, QK, max_model_len=4096)
-    client = MiaClient(base_url=url, analyzer_name="attnlink", config_file=str(CONFIG),
-                       hook_dir=str(out_dir / "hooks"), tokenizer_for=args.model)
+
+def report(args, out_dir, ids, spec, result, execution) -> None:
+    ap, gold = evaluate_ranking(spec["candidates"], result["ranking"], POSITIVE_COLS)
+    selected = set(result["selected"])
+    ranking, cumulative = [], 0.0
+    for rank, i in enumerate(result["ranking"], 1):
+        cumulative += result["probabilities"][i]
+        ranking.append({"rank": rank, "column": column_ref(spec["candidates"][i]),
+                        "candidate": spec["candidates"][i], "score": result["scores"][i],
+                        "probability": result["probabilities"][i],
+                        "cumulative_probability": cumulative,
+                        "gold": gold[i], "selected": i in selected})
+    hits = sum(gold[i] for i in selected)
+    precision, recall = hits / len(selected), hits / sum(gold)
+    selection = {"temperature": args.temperature, "top_p": args.top_p,
+                 "selected_columns": [row["column"] for row in ranking if row["selected"]],
+                 "selected_count": len(selected), "gold_count": sum(gold), "true_positives": hits,
+                 "probability_mass": ranking[len(selected) - 1]["cumulative_probability"],
+                 "precision": precision, "recall": recall,
+                 "f1": 2 * precision * recall / (precision + recall) if hits else 0.0}
+    question = INPUT_SEQ.split("\nQuestion:\n", 1)[1].split("\n\nInstructions:", 1)[0].strip()
+    record = {"question": question, "source": SOURCE, "model": args.model,
+              "layer": 22, "head": 12, "pooling": "span_mean", "dtype": "bfloat16",
+              "execution": execution, "prompt_tokens": len(ids), "average_precision": ap,
+              "input_sha256": hashlib.sha256(INPUT_SEQ.encode()).hexdigest(),
+              "versions": {name: importlib.metadata.version(name) for name in
+                           ("vllm", "mia", "torch", "transformers")},
+              "selection": selection, "ranking": ranking}
+    (out_dir / "result.json").write_text(json.dumps(record, indent=2) + "\n")
+    print(f"\nQuestion: {question}\nModel: {MODEL} | layer 22 / head 12")
+    print(f"Prompt tokens: {len(ids)} | Candidates: {len(ranking)} | Gold: {sum(gold)}")
+    print(f"Temperature: {args.temperature:g} | Top-p: {args.top_p:g}")
+    print(f"{'Rank':>4}  {'Column':<28}  {'Prob.':>8}  {'Cum.':>8}  Gold  Selected")
+    for row in ranking:
+        print(f"{row['rank']:>4}  {row['column']:<28}  {row['probability']:>8.4%}  "
+              f"{row['cumulative_probability']:>8.4%}    {'*' if row['gold'] else '-'}      "
+              f"{'*' if row['selected'] else '-'}")
+    print("\nSelected columns: " + ", ".join(selection["selected_columns"]))
+    print(f"Selected: {len(selected)}/{len(ranking)} | Gold covered: {hits}/{sum(gold)} | "
+          f"Selected mass: {selection['probability_mass']:.4%}")
+    print(f"Precision: {precision:.2%} | Recall: {recall:.2%} | "
+          f"F1: {selection['f1']:.2%} | AP: {ap:.6f}")
+    print(f"Full result: {out_dir / 'result.json'}")
+
+
+def main() -> None:
+    args, out_dir = parse_args()
+    llm = MiaLLM(model=args.model, worker_name="capture_qk", analyzer_name="attnlink",
+                 config_file=str(CONFIG), hook_dir=str(out_dir / "hooks"), max_model_len=4096,
+                 gpu_memory_utilization=args.gpu_memory_utilization)
     try:
-        ids, spec = prepare_prompt(client.tokenizer, INPUT_SEQ)
+        ids, spec = prepare_prompt(llm.tokenizer, INPUT_SEQ)
         if len(ids) + 1 > 4096:
             raise ValueError("Sample exceeds the demo's 4096-token context limit.")
-        # Exact token ids, via /v1/completions: no chat template is applied, so the tokens
-        # the model sees are the ones the spans above were computed against.
-        response = client.generate_tokens(
-            ids, model=args.model, max_tokens=1, temperature=0.0, seed=0,
-            save_to_disk=False, extra_body={"return_token_ids": True},
-        )
-        # The server echoes what it actually prompted on, so the original exact-equality
-        # guard survives the move to serve.
-        if list(getattr(response.choices[0], "prompt_token_ids", []) or []) != list(ids):
-            raise RuntimeError(
-                "the server prompted on different token IDs than the span alignment used; "
-                "the spans would be meaningless. Is a chat template being applied?")
-        if getattr(response, "probes", None) is None:
-            raise RuntimeError(
-                "QK probes are missing. Start the server with MIA_WORKER=qk and the mia "
-                "plugin installed; see the command this demo prints when it cannot reach one.")
+        outputs = llm.generate([TokensPrompt(prompt_token_ids=ids)],
+                               SamplingParams(temperature=0.0, max_tokens=1, seed=0))
+        if list(outputs[0].prompt_token_ids) != list(ids):
+            raise RuntimeError("Inference token IDs differ from span-alignment token IDs.")
+        probes = getattr(outputs[0], "probes", None)
+        if probes is None:
+            raise RuntimeError("QK probes are missing; check the stock MIA installation.")
         spec.update(temperature=args.temperature, top_p=args.top_p)
-        result = client.analyze(analyzer_spec=spec)
-        ap, gold = evaluate_ranking(spec["candidates"], result["ranking"], POSITIVE_COLS)
-        selected = set(result["selected"])
-        ranking, cumulative = [], 0.0
-        for rank, i in enumerate(result["ranking"], 1):
-            cumulative += result["probabilities"][i]
-            ranking.append({"rank": rank, "column": column_ref(spec["candidates"][i]),
-                            "candidate": spec["candidates"][i], "score": result["scores"][i],
-                            "probability": result["probabilities"][i],
-                            "cumulative_probability": cumulative,
-                            "gold": gold[i], "selected": i in selected})
-        hits = sum(gold[i] for i in selected)
-        precision, recall = hits / len(selected), hits / sum(gold)
-        selection = {"temperature": args.temperature, "top_p": args.top_p,
-                     "selected_columns": [row["column"] for row in ranking if row["selected"]],
-                     "selected_count": len(selected), "gold_count": sum(gold), "true_positives": hits,
-                     "probability_mass": ranking[len(selected) - 1]["cumulative_probability"],
-                     "precision": precision, "recall": recall,
-                     "f1": 2 * precision * recall / (precision + recall) if hits else 0.0}
-        question = INPUT_SEQ.split("\nQuestion:\n", 1)[1].split("\n\nInstructions:", 1)[0].strip()
-        report = {"question": question, "source": SOURCE, "model": args.model,
-                  "layer": 22, "head": 12, "pooling": "span_mean", "dtype": "bfloat16",
-                  "execution": "serve", "prompt_tokens": len(ids), "average_precision": ap,
-                  "input_sha256": hashlib.sha256(INPUT_SEQ.encode()).hexdigest(),
-                  "versions": {name: importlib.metadata.version(name) for name in
-                               ("vllm", "mia", "torch", "transformers")},
-                  "selection": selection, "ranking": ranking}
-        (out_dir / "result.json").write_text(json.dumps(report, indent=2) + "\n")
-        print(f"\nQuestion: {question}\nModel: {MODEL} | layer 22 / head 12")
-        print(f"Prompt tokens: {len(ids)} | Candidates: {len(ranking)} | Gold: {sum(gold)}")
-        print(f"Temperature: {args.temperature:g} | Top-p: {args.top_p:g}")
-        print(f"{'Rank':>4}  {'Column':<28}  {'Prob.':>8}  {'Cum.':>8}  Gold  Selected")
-        for row in ranking:
-            print(f"{row['rank']:>4}  {row['column']:<28}  {row['probability']:>8.4%}  "
-                  f"{row['cumulative_probability']:>8.4%}    {'*' if row['gold'] else '-'}      "
-                  f"{'*' if row['selected'] else '-'}")
-        print("\nSelected columns: " + ", ".join(selection["selected_columns"]))
-        print(f"Selected: {len(selected)}/{len(ranking)} | Gold covered: {hits}/{sum(gold)} | "
-              f"Selected mass: {selection['probability_mass']:.4%}")
-        print(f"Precision: {precision:.2%} | Recall: {recall:.2%} | "
-              f"F1: {selection['f1']:.2%} | AP: {ap:.6f}")
-        print(f"Full result: {out_dir / 'result.json'}")
+        report(args, out_dir, ids, spec, llm.analyze(analyzer_spec=spec, probes=probes),
+               "offline")
     finally:
         print(f"[attnlink] run directory: {out_dir}  (captured artifacts under hooks/)")
 
 
+# --- Server mode ---------------------------------------------------------------------------
+# The same demo against `vllm serve`. Start the server in another terminal:
+#
+#   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=qk \
+#       vllm serve Qwen/Qwen2.5-Coder-7B-Instruct \
+#       --max-model-len 4096 --port 8770
+#
+# then uncomment serve_main() and call it instead of main() at the bottom. The exact ids go
+# through /v1/completions, which applies no chat template; the guard below checks them against
+# the ids the server reports it prompted on.
+#
+# def serve_main() -> None:
+#     from mia import MiaClient
+#     from _serve import QK, require_server
+#
+#     args, out_dir = parse_args()
+#     url = require_server(args.model, QK, max_model_len=4096)
+#     client = MiaClient(base_url=url, analyzer_name="attnlink", config_file=str(CONFIG),
+#                        hook_dir=str(out_dir / "hooks"), tokenizer_for=args.model)
+#     try:
+#         ids, spec = prepare_prompt(client.tokenizer, INPUT_SEQ)
+#         if len(ids) + 1 > 4096:
+#             raise ValueError("Sample exceeds the demo's 4096-token context limit.")
+#         response = client.generate_tokens(
+#             ids, model=args.model, max_tokens=1, temperature=0.0, seed=0,
+#             save_to_disk=False, extra_body={"return_token_ids": True},
+#         )
+#         echoed = getattr(response.choices[0], "prompt_token_ids", []) or []
+#         if list(echoed) != list(ids):
+#             raise RuntimeError(
+#                 "the server prompted on different token IDs than the span alignment used; "
+#                 "the spans would be meaningless. Is a chat template being applied?")
+#         if getattr(response, "probes", None) is None:
+#             raise RuntimeError(
+#                 "QK probes are missing. Start the server with MIA_WORKER=qk and the mia "
+#                 "plugin installed; see the command this demo prints when it cannot reach one.")
+#         spec.update(temperature=args.temperature, top_p=args.top_p)
+#         report(args, out_dir, ids, spec, client.analyze(analyzer_spec=spec), "serve")
+#     finally:
+#         print(f"[attnlink] run directory: {out_dir}  (captured artifacts under hooks/)")
+# --- end of server mode ---
+
+
 if __name__ == "__main__":
     main()
+    # serve_main()  # server mode: see the block above

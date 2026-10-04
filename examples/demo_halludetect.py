@@ -1,12 +1,20 @@
-"""H-Node hallucination detection over `vllm serve` (inference only)."""
+"""H-Node hallucination detection (inference only).
+
+Runs offline with `MiaLLM`. The same demo over `vllm serve` is kept, commented out, at the end.
+"""
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
 import sys
 
-from mia import MiaClient
+mp.set_start_method("spawn", force=True)
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+from vllm import SamplingParams
+
+from mia import MiaLLM
 from _paths import config_path
-from _serve import HS, require_server
 
 MODEL = os.environ.get("MIA_DEMO_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 INFER_CFG = config_path("hnode_hallucination/Qwen2.5-1.5B-Instruct.infer.json")
@@ -50,21 +58,7 @@ def ensure_probe():
             )
 
 
-if __name__ == "__main__":
-    ensure_probe()
-    url = require_server(MODEL, HS, max_model_len=1024)
-    client = MiaClient(base_url=url, analyzer_name="hnode_hallucination",
-                       config_file=INFER_CFG)
-
-    print("Running detection on example prompts...\n")
-    run_id = "halludetect_detect"
-    # One request for the whole set, as raw text: a run holds its last response's requests.
-    client.generate_text(EXAMPLES, model=MODEL, max_tokens=1, temperature=0.0,
-                         save_to_disk=True, run_id=run_id)
-
-    result = client.analyze(
-        analyzer_spec={"probe_path": PROBE_PATH, "threshold": 0.5}, run_id=run_id)
-
+def report(result):
     print(f"Best layer: {result['best_layer']}  |  threshold: {result['threshold']}")
     print("-" * 78)
     for prompt, p, exc, verdict in zip(
@@ -72,3 +66,52 @@ if __name__ == "__main__":
     ):
         line = prompt.replace("\n", "  ")
         print(f"[{verdict:>12s}]  P(hall)={p:.3f}  H-excess={exc:.3f}  |  {line}")
+
+
+def main():
+    ensure_probe()
+    llm = MiaLLM(model=MODEL, worker_name="capture_hs", analyzer_name="hnode_hallucination",
+                 config_file=INFER_CFG, hook_dir="/dev/shm/mia",
+                 gpu_memory_utilization=0.7, max_model_len=1024)
+
+    print("Running detection on example prompts...\n")
+    run_id = "halludetect_detect"
+    llm.generate(EXAMPLES, SamplingParams(max_tokens=1, temperature=0.0),
+                 save_to_disk=True, run_id=run_id)
+
+    report(llm.analyze(
+        analyzer_spec={"probe_path": PROBE_PATH, "threshold": 0.5}, run_id=run_id))
+
+
+# --- Server mode ---------------------------------------------------------------------------
+# The same demo against `vllm serve`. Start the server in another terminal:
+#
+#   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
+#       vllm serve Qwen/Qwen2.5-1.5B-Instruct \
+#       --max-model-len 1024 --port 8770
+#
+# then uncomment serve_main() and call it instead of main() at the bottom.
+#
+# def serve_main():
+#     from mia import MiaClient
+#     from _serve import HS, require_server
+#
+#     ensure_probe()
+#     url = require_server(MODEL, HS, max_model_len=1024)
+#     client = MiaClient(base_url=url, analyzer_name="hnode_hallucination",
+#                        config_file=INFER_CFG)
+#
+#     print("Running detection on example prompts...\n")
+#     run_id = "halludetect_detect"
+#     # One request for the whole set, as raw text: a run holds its last response's requests.
+#     client.generate_text(EXAMPLES, model=MODEL, max_tokens=1, temperature=0.0,
+#                          save_to_disk=True, run_id=run_id)
+#
+#     report(client.analyze(
+#         analyzer_spec={"probe_path": PROBE_PATH, "threshold": 0.5}, run_id=run_id))
+# --- end of server mode ---
+
+
+if __name__ == "__main__":
+    main()
+    # serve_main()  # server mode: see the block above
