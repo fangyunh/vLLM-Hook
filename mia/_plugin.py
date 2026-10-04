@@ -337,11 +337,24 @@ def _flushed_rank_dirs(results, run_id: str, hook_dir: str):
     return sorted(dirs) or None
 
 
+_ARTIFACT_NAMES = frozenset({"qk.pt", "qk.safetensors",
+                             "hidden_states.pt", "hidden_states.safetensors"})
+
+
 def _landed(files: list) -> bool:
-    """Non-empty, and every ``.safetensors`` file has its ``.json`` sidecar."""
+    """A qk/hidden_states artifact is present, and every ``.safetensors`` has its ``.json``."""
     have = set(files)
-    return bool(files) and all(f[:-len(".safetensors")] + ".json" in have
-                               for f in files if f.endswith(".safetensors"))
+    return (any(os.path.basename(f) in _ARTIFACT_NAMES for f in files)
+            and all(f[:-len(".safetensors")] + ".json" in have
+                    for f in files if f.endswith(".safetensors")))
+
+
+def _all_refused(hook_dir: str, run_id, req_ids) -> bool:
+    """Every request's Q/K capture was refused, so its flush wrote no artifact to wait for."""
+    from mia.run_utils import read_refused_qk
+    from mia.workers._common import match_internal_ids
+    gone = read_refused_qk(hook_dir, str(run_id))
+    return bool(gone) and all(match_internal_ids(gone, str(r)) for r in req_ids)
 
 
 def _artifact_barrier_state(run_dir: str, rank_dirs) -> "tuple[list, bool]":
@@ -1879,7 +1892,8 @@ async def _patched_generate(
                         wants_hs=wants_hs, wants_qk=wants_qk, wants_steer=wants_steer,
                         sink=sink, per_request=False,
                         durable_wait=bool(extra.get("durable_wait")) and not _hybrid)
-                    if extra.get("durable_wait") and not _hybrid:
+                    if (extra.get("durable_wait") and not _hybrid
+                            and not _all_refused(hook_dir, run_id, [request_id])):
                         with PROF.timed("disk.await_artifact"):
                             await _await_disk_artifact(
                                 run_id, hook_dir, _flushed_rank_dirs(flushed, run_id, hook_dir))
@@ -2301,11 +2315,12 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
                         "flush_disk", args=(req_ids, run_id, hook_dir))
             for run_id, req_list in disk_by_run.items():
                 _, hook_dir = req_list[0]
-                with PROF.timed("disk.await_artifact"):
-                    landed = _wait_disk_artifact(run_id, hook_dir, _flushed_rank_dirs(
-                        flushed_by_run.get(run_id), run_id, hook_dir))
-                if not landed:
-                    PROF.incr("disk.await_artifact.timeout")
+                if not _all_refused(hook_dir, run_id, [r for r, _h in req_list]):
+                    with PROF.timed("disk.await_artifact"):
+                        landed = _wait_disk_artifact(run_id, hook_dir, _flushed_rank_dirs(
+                            flushed_by_run.get(run_id), run_id, hook_dir))
+                    if not landed:
+                        PROF.incr("disk.await_artifact.timeout")
                 from mia.run_utils import read_refused_qk
                 from mia.workers._common import match_internal_ids
                 gone = read_refused_qk(hook_dir, str(run_id))
