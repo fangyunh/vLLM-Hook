@@ -72,12 +72,8 @@ def _mode_env(env: Mapping[str, str]) -> str:
     m = raw.lower()
     if m not in MODES:
         raise DeliveryConfigError(
-            f"{MODE_ENV}={raw!r} is not a delivery mode. The values are {MODES[1]!r} (the shared "
-            f"drain plus the streaming gather -- per-request artifacts read with "
-            f"aperture_gather.load_delivered), {MODES[2]!r} (the in-drain per-request writer, "
-            f"delivered through the response), {MODES[3]!r} (the shared files only), and "
-            f"{MODES[0]!r} (the default). Refused rather than defaulted -- a typo "
-            f"that fell back to auto would silently measure something nobody asked for.")
+            f"{MODE_ENV}={raw!r} is not one of {', '.join(map(repr, MODES))}; unset it for the "
+            f"default.")
     return m
 
 
@@ -87,35 +83,26 @@ def _read_stamp(env: Mapping[str, str]) -> Optional[Tuple[str, str]]:
         return None
     mode, sep, source = raw.partition(":")
     if not sep or mode not in _RESOLVED_MODES or source not in _SOURCES:
-        raise DeliveryConfigError(
-            f"{STAMP_ENV}={raw!r} is not a delivery resolution. This variable is written by MIA's "
-            f"own selector so a spawned worker agrees with the process that spawned it; it is not "
-            f"a setting. Unset it (and use {MODE_ENV} to choose a mode), or report this -- a "
-            f"malformed stamp read as a default would make a worker disagree with its engine about "
-            f"where a user's data is being delivered.")
+        raise DeliveryConfigError(f"{STAMP_ENV}={raw!r} is set by MIA itself; unset it.")
     return mode, source
 
 
 def _refuse_if_hybrid_impossible(env: Mapping[str, str], source: str) -> None:
-    chose = ("the hybrid was chosen BY DEFAULT for this run"
-             if source == "default" else
-             f"the hybrid was chosen explicitly ({MODE_ENV}=hybrid)")
-    out = (f"Either remove the conflicting setting, or set {MODE_ENV}=drain to take the in-drain "
-           f"per-request writer instead -- which delivers through the response rather than as a "
-           f"file.")
+    if source == "explicit":
+        asked = f"{MODE_ENV}=hybrid"
+    elif _is_on(env, PER_REQUEST_ENV):
+        asked = f"{PER_REQUEST_ENV}=1"
+    else:
+        asked = "hidden-states capture under CUDA graphs"
     mmap = _get(env, MMAP_ENV)
     if mmap is not None and mmap != "0":
         raise DeliveryConfigError(
-            f"{MMAP_ENV}={mmap!r} selects the legacy mmap sink, which PRE-SIZES each layer file and "
-            f"truncates it at close -- so a gather reading those files WHILE they are written would "
-            f"hand back every row past the write cursor as ZEROS and deliver them as data. "
-            f"{chose}, and the gather is what reads them. {out}")
+            f"{MMAP_ENV}={mmap!r} cannot be used with {asked}; unset {MMAP_ENV}.")
     wm = _get(env, WRITE_MODE_ENV)
     if wm is not None and wm.lower() == "legacy":
         raise DeliveryConfigError(
-            f"{WRITE_MODE_ENV}=legacy keeps the sidecar as LayerEntry objects, but the hybrid "
-            f"gather derives its per-request row index from the per-step arrays the other write "
-            f"modes keep. {chose}. Use auto (the default), direct or buffered. {out}")
+            f"{WRITE_MODE_ENV}=legacy cannot be used with {asked}; use auto (the default), direct "
+            f"or buffered.")
 
 
 _HYBRID_SET = (
@@ -166,30 +153,22 @@ def _off(reason: str, source: str = "default") -> Selection:
                      note=f"no per-request delivery ({reason}); nothing changed")
 
 
+def _conflict(a: str, b: str) -> DeliveryConfigError:
+    return DeliveryConfigError(f"{a} and {b} cannot be set together; unset one of them.")
+
+
 def _refuse_contradictions(env: Mapping[str, str], mode_env: str) -> None:
     per_request = _is_on(env, PER_REQUEST_ENV)
     gather_on = _is_on(env, GATHER_ENV)
     deliver_on = _is_on(env, DELIVER_ENV)
     if mode_env == "drain" and deliver_on:
-        raise DeliveryConfigError(
-            f"{MODE_ENV}=drain selects the in-drain per-request writer, but {DELIVER_ENV}=1 "
-            f"starts the hybrid gather, which needs the SHARED-file drain -- a per-request "
-            f"drain writes no shared layer file for it to read, and the drain refuses the pair "
-            f"at construction. Pick one: unset {DELIVER_ENV}, or set {MODE_ENV}=hybrid.")
+        raise _conflict(f"{MODE_ENV}=drain", f"{DELIVER_ENV}=1")
     if mode_env == "off" and (per_request or deliver_on):
         flag = PER_REQUEST_ENV if per_request else DELIVER_ENV
-        raise DeliveryConfigError(
-            f"{MODE_ENV}=off selects the shared files only, but {flag}=1 asks for per-request "
-            f"delivery. Pick one: unset {flag}, or drop {MODE_ENV}=off.")
+        raise _conflict(f"{MODE_ENV}=off", f"{flag}=1")
     if mode_env == "auto" and per_request and (gather_on or deliver_on):
         flag = GATHER_ENV if gather_on else DELIVER_ENV
-        raise DeliveryConfigError(
-            f"{PER_REQUEST_ENV}=1 and {flag}=1 are both set, and they are halves of two different "
-            f"delivery paths: the gather reads the SHARED per-layer raw files, which a per-request "
-            f"drain never writes (the drain refuses this pair at construction, so the engine would "
-            f"die at boot). Asking for {PER_REQUEST_ENV}=1 alone already selects the hybrid, which "
-            f"arms {flag} itself. Set {MODE_ENV}=hybrid and drop {PER_REQUEST_ENV}, or set "
-            f"{MODE_ENV}=drain and drop {flag}.")
+        raise _conflict(f"{PER_REQUEST_ENV}=1", f"{flag}=1")
 
 
 def validate(env: Mapping[str, str]) -> None:
@@ -224,14 +203,12 @@ def resolve(env: Mapping[str, str], *, worker_kind: Optional[str] = None,
     if mode_env == "hybrid":
         if not graph:
             raise DeliveryConfigError(
-                f"{MODE_ENV}=hybrid on an eager engine: the hybrid reads the HS capture aperture, "
-                f"which exists only under graph mode. Drop enforce_eager=True / "
-                f"{GRAPH_ENV}=0, or drop {MODE_ENV}=hybrid.")
+                f"{MODE_ENV}=hybrid needs CUDA graph mode and this engine runs eager; unset "
+                f"{MODE_ENV}, or drop enforce_eager=True (vllm serve: --enforce-eager).")
         if kind != HS_WORKER:
             raise DeliveryConfigError(
-                f"{MODE_ENV}=hybrid for the {kind!r} worker: the hybrid reads the HS capture "
-                f"aperture, which exists only for the hidden-states worker. Drop "
-                f"{MODE_ENV}=hybrid.")
+                f"{MODE_ENV}=hybrid applies to hidden-states capture only, not the {kind!r} "
+                f"worker; unset {MODE_ENV}.")
         return _hybrid(env, "explicit", f"{MODE_ENV}=hybrid")
     if mode_env == "drain":
         return _drain("explicit", f"{MODE_ENV}=drain")

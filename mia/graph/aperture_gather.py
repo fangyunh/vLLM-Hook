@@ -246,6 +246,12 @@ def _np_name(dtype_name: str) -> str:
     return "uint16" if dtype_name == "bfloat16" else dtype_name
 
 
+def _no_punch_message(run_dir: str, why: str) -> str:
+    return (f"{run_dir} cannot free space while data is delivered ({why}), so captured data would "
+            f"be kept twice; put the capture dir (MIA_APERTURE_DIR) on a local disk, or set "
+            f"{GATHER_TRIM_ENV}=0 to accept that.")
+
+
 class _ReqState:
     __slots__ = ("layers", "mine", "written", "written_all", "touched")
 
@@ -489,12 +495,7 @@ class GatherPass:
             return True
         ok, why = punch_supported(self.run_dir)
         if not ok:
-            raise GatherError(
-                f"{GATHER_TRIM_ENV} is ON but {self.run_dir} cannot be hole-punched: {why}. The "
-                f"trim is what keeps the hybrid from holding a SECOND FULL COPY of every captured "
-                f"byte, so an operator who left it on is owed a failure here rather than a run that "
-                f"silently frees nothing and fills the device. Set {GATHER_TRIM_ENV}=0 to run "
-                f"without it, on a filesystem that keeps both copies.")
+            raise GatherError(_no_punch_message(self.run_dir, why))
         self._trim_align = trim_align(self.run_dir)
         self._trimlog = TrimLog(self.run_dir, self.worker, self.n_workers)
         return True
@@ -1423,12 +1424,7 @@ class ApertureGatherProcess:
         if self.trim:
             ok, why = punch_supported(self.run_dir)
             if not ok:
-                raise GatherError(
-                    f"{GATHER_TRIM_ENV} is ON (the default) but {self.run_dir} cannot be "
-                    f"hole-punched: {why}. Without the trim the run holds a second full copy of "
-                    f"every captured byte, so this is refused at construction rather than "
-                    f"discovered when the device fills. Set {GATHER_TRIM_ENV}=0 to accept the "
-                    f"doubled occupancy deliberately.")
+                raise GatherError(_no_punch_message(self.run_dir, why))
             trim_note = (f"trim ON by default ({GATHER_TRIM_ENV}=0 turns it off): the shared "
                          f"hs_layer_*.raw will be fallocate(PUNCH_HOLE)d behind the SLOWEST "
                          f"worker's cursor in {self.trim_chunk} B chunks, {self.trim_lag} B lag, "

@@ -1662,9 +1662,8 @@ def _refuse_on_graph(engine, extra, pending=(), info=None, count=True):
         return None
     if extra.get("qk_capture") == "score":
         raise MiaConfigurationError(
-            "qk_capture='score' (attention-score capture) has no CUDA-graph path and this engine "
-            "runs graph capture. Start the engine for score capture with enforce_eager=True "
-            "(vllm serve: --enforce-eager), or MIA_QK_SCORE=1 without MIA_ALLOW_CUDAGRAPH=1.")
+            "qk_capture='score' needs an eager engine and this one runs CUDA graphs; start it "
+            "with enforce_eager=True (vllm serve: --enforce-eager).")
     target = _steer_target(engine, extra.get("steer"))
     if target is None:
         return None
