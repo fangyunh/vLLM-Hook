@@ -20,9 +20,7 @@ HOOKS_ON = os.environ.get("MIA_DEMO_HOOKS_ON", "both")
 if __name__ == "__main__":
     print(f"[longdec-hs] model={MODEL} config={CONFIG} "
           f"max_tokens={MAX_TOKENS} hooks_on={HOOKS_ON}")
-    # Eager: hooks_on=both over a long decode is far past the RPC crossover, so the router
-    # takes the disk route, which analyze() can only read in eager mode.
-    url = require_server(MODEL, HS, graph=False)
+    url = require_server(MODEL, HS)
     client = MiaClient(base_url=url, analyzer_name="hidden_states", config_file=CONFIG)
 
     print("=" * 50)

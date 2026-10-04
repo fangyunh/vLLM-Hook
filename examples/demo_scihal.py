@@ -90,10 +90,7 @@ if __name__ == "__main__":
     model = "meta-llama/Llama-3.1-8B-Instruct"
     n_test = 9
 
-    # Eager: this analyzes a RUN (several requests under one run_id), which needs the
-    # disk route. Under FULL CUDA graphs the capture is staged in the aperture layout
-    # instead, and analyze() has no reader for it -- see docs/configs.md.
-    url = require_server(model, HS, graph=False, max_model_len=8192)
+    url = require_server(model, HS, max_model_len=8192)
     client = MiaClient(
         base_url=url,
         analyzer_name="science_hallucination",

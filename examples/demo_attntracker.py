@@ -42,10 +42,7 @@ def messages_and_range(tokenizer, model_name: str, instruction: str, data: str):
 
 
 if __name__ == "__main__":
-    # Eager: Q/K last_token on this model is already past the RPC crossover
-    # (MIA_ROUTER_T_RPC, ~100 KB for QK), so the router takes the disk route -- which
-    # under FULL graphs stages the aperture layout that analyze()/probes cannot read.
-    url = require_server(MODEL, QK, graph=False)
+    url = require_server(MODEL, QK)
     client = MiaClient(base_url=url, analyzer_name="attn_tracker", config_file=CONFIG)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -71,9 +68,6 @@ if __name__ == "__main__":
             tokenizer, MODEL, case["instruction"], case["data"])
 
         t0 = time.time()
-        # No save_to_disk: this analyzes the ONE response above, so the router is free to
-        # return the rows on the response (RPC). Forcing the disk transport under FULL CUDA
-        # graphs stages the aperture layout instead, which analyze() cannot read.
         response = client.generate(messages=messages, model=MODEL, max_tokens=50,
                                    temperature=0.1)
         t1 = time.time()

@@ -6,7 +6,7 @@ import sys
 
 from mia import MiaClient
 from _paths import config_path
-from _serve import HS, chat, require_server
+from _serve import HS, require_server
 
 MODEL = os.environ.get("MIA_DEMO_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 INFER_CFG = config_path("hnode_hallucination/Qwen2.5-1.5B-Instruct.infer.json")
@@ -52,19 +52,15 @@ def ensure_probe():
 
 if __name__ == "__main__":
     ensure_probe()
-    # Eager: this analyzes a RUN (several requests under one run_id), which needs the
-    # disk route. Under FULL CUDA graphs the capture is staged in the aperture layout
-    # instead, and analyze() has no reader for it -- see docs/configs.md.
-    url = require_server(MODEL, HS, graph=False, max_model_len=1024)
+    url = require_server(MODEL, HS, max_model_len=1024)
     client = MiaClient(base_url=url, analyzer_name="hnode_hallucination",
                        config_file=INFER_CFG)
 
     print("Running detection on example prompts...\n")
     run_id = "halludetect_detect"
-    for prompt in EXAMPLES:
-        # One run_id for the whole set: the analyzer reduces over every artifact in it.
-        client.generate(messages=chat(prompt), model=MODEL, max_tokens=1,
-                        temperature=0.0, save_to_disk=True, run_id=run_id)
+    # One request for the whole set, as raw text: a run holds its last response's requests.
+    client.generate_text(EXAMPLES, model=MODEL, max_tokens=1, temperature=0.0,
+                         save_to_disk=True, run_id=run_id)
 
     result = client.analyze(
         analyzer_spec={"probe_path": PROBE_PATH, "threshold": 0.5}, run_id=run_id)

@@ -1,7 +1,7 @@
-"""FULL CUDA-graph hidden-state capture demo, with evidence for the optimization levers.
-Runs in-process (`MiaLLM`) on purpose: this is the local FULL-CUDA-graph showcase, and
-the determinism check below needs two generations against one engine. For the server
-path see the demos that use `MiaClient`.
+"""CUDA-graph hidden-state capture demo, with evidence for the optimization levers.
+Runs in-process (`MiaLLM`) on purpose: this is the local CUDA-graph showcase (MIA's
+default), and the determinism check below needs two generations against one engine. For
+the server path see the demos that use `MiaClient`.
 """
 import os
 import multiprocessing as mp
@@ -11,15 +11,7 @@ import torch
 mp.set_start_method("spawn", force=True)
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ.setdefault("MIA_ALLOW_CUDAGRAPH", "1")
 os.environ.setdefault("MIA_PROFILE", "1")
-# Check 1 retrieves without going through disk (`save_to_disk=False`), which under FULL
-# CUDA graphs means per-request aperture delivery: the drain demuxes each request's rows and
-# hands them back on the response. Without this the graph path writes to the shared aperture
-# files instead, `get_captured_states` has nothing in memory to return, and `output.probes`
-# is simply never set. Eager does not need it -- the RPC path returns states directly.
-if os.environ.get("MIA_ALLOW_CUDAGRAPH") == "1":
-    os.environ.setdefault("MIA_APERTURE_PER_REQUEST", "1")
 
 from vllm import SamplingParams
 from mia import MiaLLM
@@ -111,19 +103,15 @@ def _all_equal(tensors_a: dict, tensors_b: dict):
 def _probes(outputs, which: str) -> dict:
     """The captured states carried back on a response, or a diagnosis of why they are not.
 
-    `output.probes` is set only when the engine had a route home that does not go through
-    disk. Reading it unguarded turns a configuration problem into an AttributeError three
-    frames away from the cause.
+    Reading `output.probes` unguarded turns a configuration problem into an AttributeError
+    three frames away from the cause.
     """
     probes = getattr(outputs[0], "probes", None)
     if probes is None:
         raise SystemExit(
             f"[demo_capture_aperture] {which}: the engine returned no captured states.\n"
-            f"  Under FULL CUDA graphs, retrieval without save_to_disk needs per-request\n"
-            f"  aperture delivery: MIA_APERTURE_PER_REQUEST=1 (this demo sets it) and\n"
-            f"  MIA_PROFILE_MODE unset (it routes capture straight to the sink instead).\n"
-            f"  MIA_APERTURE_PER_REQUEST={os.environ.get('MIA_APERTURE_PER_REQUEST')!r} "
-            f"MIA_PROFILE_MODE={os.environ.get('MIA_PROFILE_MODE')!r}")
+            f"  MIA_PROFILE_MODE routes capture straight to the sink; leave it unset.\n"
+            f"  MIA_PROFILE_MODE={os.environ.get('MIA_PROFILE_MODE')!r}")
     return probes
 
 
@@ -135,13 +123,7 @@ def main() -> None:
         "MIA_CONFIG_FILE",
         config_path(f"hidden_states/{model.split('/')[-1]}.json"))
 
-    graph_mode = os.environ.get("MIA_ALLOW_CUDAGRAPH") == "1"
     print("=" * 70)
-    print(f"[demo_capture_aperture] mode={'FULL CUDA-graph capture' if graph_mode else 'EAGER (fallback)'} "
-          f"(MIA_ALLOW_CUDAGRAPH={'1' if graph_mode else '0'})")
-    if not graph_mode:
-        print("[demo_capture_aperture] NOTE: none of the graph-aperture claims below apply in eager mode; "
-              "set MIA_ALLOW_CUDAGRAPH=1 to actually exercise the capture aperture.")
     print(f"[demo_capture_aperture] model={model}  config={config_file}")
     print("[demo_capture_aperture] shipped optimization levers:")
     print(describe())
@@ -158,12 +140,17 @@ def main() -> None:
         max_model_len=2048,
         trust_remote_code=True,
         dtype=torch.float16,
-        enforce_eager=not graph_mode,
-        compilation_config={"cudagraph_mode": "FULL"} if graph_mode else None,
         enable_prefix_caching=False,
         enable_hook=True,
         tensor_parallel_size=1,
     )
+
+    # The mode the engine runs: CUDA graphs unless enforce_eager=True.
+    vc = llm.llm_engine.vllm_config
+    graph_mode = not vc.model_config.enforce_eager
+    print(f"[demo_capture_aperture] mode={'FULL CUDA-graph capture' if graph_mode else 'EAGER'} "
+          f"(enforce_eager={vc.model_config.enforce_eager}, "
+          f"cudagraph_mode={vc.compilation_config.cudagraph_mode.name})")
 
     prompts = [
         "The capital of France is",
@@ -197,36 +184,23 @@ def main() -> None:
         print(f"[check 1/2] mismatches (first 5): {det_mismatches[:5]}")
 
     wp_on = os.environ.get("MIA_WRITER_PROCESS", "1") != "0"
-    if graph_mode:
-        # Offline save_to_disk is a no-op under FULL CUDA graphs: _patched_llm_generate
-        # guards the flush with `if disk_by_run and not _graph_mode()`, so nothing is
-        # written for the run and analyze(run_id=...) would raise FileNotFoundError. The
-        # graph path's own bytes go to MIA_APERTURE_DIR and are read with
-        # mia.graph.aperture_reader, not with analyze().
-        print(f"\n[check 2/2] writer_process={'on' if wp_on else 'off'} (shipped default): "
-              f"SKIPPED under FULL CUDA graphs")
-        print("[check 2/2] offline save_to_disk does not write under graphs (the flush "
-              "barrier is skipped), so there is no disk artifact to compare against. Re-run "
-              "with MIA_ALLOW_CUDAGRAPH=0 for this one.")
-        wp_ok, wp_mismatches = None, []
-    else:
-        llm.llm_engine.reset_prefix_cache()
-        run_id = "capture_aperture_demo_writer_process"
-        t0 = time.perf_counter()
-        out3 = llm.generate(prompts, sampling, save_to_disk=True, run_id=run_id)
-        elapsed3 = time.perf_counter() - t0
-        n_tokens3 = sum(len(o.outputs[0].token_ids) for o in out3)
-        stats3 = llm.analyze(analyzer_spec={"reduce": "none"}, run_id=run_id)
-        text3 = [o.outputs[0].text for o in out3]
+    llm.llm_engine.reset_prefix_cache()
+    run_id = "capture_aperture_demo_writer_process"
+    t0 = time.perf_counter()
+    out3 = llm.generate(prompts, sampling, save_to_disk=True, run_id=run_id)
+    elapsed3 = time.perf_counter() - t0
+    n_tokens3 = sum(len(o.outputs[0].token_ids) for o in out3)
+    stats3 = llm.analyze(analyzer_spec={"reduce": "none"}, run_id=run_id)
+    text3 = [o.outputs[0].text for o in out3]
 
-        wp_ok, wp_mismatches = _all_equal(stats1["hidden_states"], stats3["hidden_states"])
-        print(f"\n[check 2/2] writer_process={'on' if wp_on else 'off'} (shipped default): "
-              f"disk-retrieved capture vs the in-memory capture from check 1")
-        _print_evidence(elapsed3, n_tokens3, "disk-path")
-        print(f"[check 2/2] generated text identical to check 1: {text1 == text3}")
-        print(f"[check 2/2] disk-retrieved hidden states byte-identical to in-memory "
-              f"capture: {wp_ok}")
-    if wp_ok is False:
+    wp_ok, wp_mismatches = _all_equal(stats1["hidden_states"], stats3["hidden_states"])
+    print(f"\n[check 2/2] writer_process={'on' if wp_on else 'off'} (shipped default): "
+          f"disk-retrieved capture vs the in-memory capture from check 1")
+    _print_evidence(elapsed3, n_tokens3, "disk-path")
+    print(f"[check 2/2] generated text identical to check 1: {text1 == text3}")
+    print(f"[check 2/2] disk-retrieved hidden states byte-identical to in-memory "
+          f"capture: {wp_ok}")
+    if not wp_ok:
         print(f"[check 2/2] mismatches (first 5): {wp_mismatches[:5]}")
     print("[check 2/2] NOT checked here (would need a second engine): the writer_process=off "
           "timing comparison and its disk-SLO-knee claim -- see LEVER_NOTES['writer_process'].")

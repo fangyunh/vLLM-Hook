@@ -13,7 +13,6 @@ from _paths import config_path
 from _serve import STEER, base_url, print_evidence, require_server
 
 MODEL = os.environ.get("MIA_DEMO_MODEL", "microsoft/Phi-3-mini-4k-instruct")
-GRAPH = os.environ.get("MIA_ALLOW_CUDAGRAPH", "1") != "0"
 
 LANGUAGE_CONFIGS = {
     "Chinese": "activation_steer/Phi-3-mini-4k-instruct-chinese.json",
@@ -33,7 +32,7 @@ PROMPTS = [
 if __name__ == "__main__":
     # Phi-3-mini-4k has a 4096-token context; these demos ask for 2048 output tokens, which
     # does not fit under the 2048 default (the server 400s on every request).
-    require_server(MODEL, STEER, graph=GRAPH, max_model_len=4096)
+    require_server(MODEL, STEER, max_model_len=4096)
     client = openai.OpenAI(base_url=base_url(), api_key="EMPTY")
 
     steer_by_language = {}

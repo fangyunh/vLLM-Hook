@@ -30,6 +30,7 @@ def serve_command(model: str, worker: str, *, graph: bool = True,
                   extra_args: Sequence[str] = ()) -> str:
     """The `vllm serve` invocation a demo needs, ready to paste.
 
+    MIA runs the server under CUDA graphs by default; `graph=False` adds `--enforce-eager`.
     `tp` > 1 adds `--tensor-parallel-size`. Capture shards across the ranks -- hidden states
     by layer, Q/K by head -- and each rank writes its own `tp_rank_<r>/`. Note that
     MIA_APERTURE_GPU_BYTES is a PER-RANK budget, so TP x N claims N times that much GPU.
@@ -43,21 +44,8 @@ def serve_command(model: str, worker: str, *, graph: bool = True,
     if int(tp) > 1:
         args.append(f"--tensor-parallel-size {int(tp)}")
     args.extend(extra_args)
-    if graph:
-        # MIA's point is capture that survives CUDA graphs, so this is the default. The mode
-        # must be named explicitly: MIA accepts NONE or FULL, and vLLM would otherwise pick a
-        # mode MIA refuses.
-        env.append("MIA_ALLOW_CUDAGRAPH=1")
-        # Per-request delivery is what makes a graph-mode capture reachable from the client.
-        # Without it the drain writes every request's rows into the shared aperture files
-        # under MIA_APERTURE_DIR, and neither route home works: `.probes` is never set on the
-        # response, and `analyze(run_id=...)` looks under `hook_dir` and finds nothing. With
-        # it, MIA either returns the rows on the response or redirects the drain into
-        # `hook_dir/<run_id>/`, and `MiaClient.analyze()` finds them either way.
-        env.append("MIA_APERTURE_PER_REQUEST=1")
-        args.append("""--compilation-config '{"cudagraph_mode": "FULL"}'""")
-    else:
-        # Opt-out. Eager capture is bit-exact, which graph-mode capture is not.
+    if not graph:
+        # Opt-out of MIA's CUDA-graph default; eager capture is bit-exact.
         args.append("--enforce-eager")
     return f"{' '.join(env)} \\\n    vllm serve {model} \\\n    {' '.join(args)}"
 
@@ -83,7 +71,7 @@ def require_server(model: str, worker: str, *, graph: bool = True,
         raise SystemExit(1)
 
     print(f"[mia] server at {url}, model {model}, MIA_WORKER={worker}"
-          f"{' (FULL CUDA graphs)' if graph else ''}")
+          f"{'' if graph else ' (eager)'}")
     return url
 
 

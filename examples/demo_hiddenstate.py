@@ -12,7 +12,6 @@ from _serve import (HS, chat, completion_text, completion_tokens, print_evidence
 MODEL = os.environ.get("MIA_DEMO_MODEL", "Qwen/Qwen2.5-3B-Instruct")
 CONFIG = os.environ.get(
     "MIA_CONFIG_FILE", config_path(f"hidden_states/{MODEL.split('/')[-1]}.json"))
-GRAPH = os.environ.get("MIA_ALLOW_CUDAGRAPH", "1") != "0"
 
 PROMPTS = [
     "The capital of France is",
@@ -20,15 +19,12 @@ PROMPTS = [
 ]
 
 if __name__ == "__main__":
-    url = require_server(MODEL, HS, graph=GRAPH)
+    url = require_server(MODEL, HS)
     client = MiaClient(base_url=url, analyzer_name="hidden_states", config_file=CONFIG)
 
     print("=" * 50)
     for prompt in PROMPTS:
         t0 = time.time()
-        # No save_to_disk: this analyzes the ONE response above, so the router is free to
-        # return the rows on the response (RPC). Forcing the disk transport under FULL CUDA
-        # graphs stages the aperture layout instead, which analyze() cannot read.
         response = client.generate(messages=chat(prompt), model=MODEL, max_tokens=10,
                                    temperature=0.0)
         elapsed = time.time() - t0

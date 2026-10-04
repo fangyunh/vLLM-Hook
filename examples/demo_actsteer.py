@@ -16,7 +16,6 @@ from _serve import STEER, base_url, print_evidence, require_server
 MODEL = os.environ.get("MIA_DEMO_MODEL", "microsoft/Phi-3-mini-4k-instruct")
 CONFIG = os.environ.get(
     "MIA_CONFIG_FILE", config_path(f'activation_steer/{MODEL.split("/")[-1]}.json'))
-GRAPH = os.environ.get("MIA_ALLOW_CUDAGRAPH", "1") != "0"
 
 PROMPTS = [
     "Write a dialogue between two people, one is dressed up in a ball gown and the other "
@@ -31,7 +30,7 @@ PROMPTS = [
 if __name__ == "__main__":
     # Phi-3-mini-4k has a 4096-token context; these demos ask for 2048 output tokens, which
     # does not fit under the 2048 default (the server 400s on every request).
-    require_server(MODEL, STEER, graph=GRAPH, max_model_len=4096)
+    require_server(MODEL, STEER, max_model_len=4096)
     client = openai.OpenAI(base_url=base_url(), api_key="EMPTY")
 
     with open(CONFIG) as f:
