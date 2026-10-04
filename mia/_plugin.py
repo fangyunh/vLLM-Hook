@@ -337,12 +337,19 @@ def _flushed_rank_dirs(results, run_id: str, hook_dir: str):
     return sorted(dirs) or None
 
 
+def _landed(files: list) -> bool:
+    """Non-empty, and every ``.safetensors`` file has its ``.json`` sidecar."""
+    have = set(files)
+    return bool(files) and all(f[:-len(".safetensors")] + ".json" in have
+                               for f in files if f.endswith(".safetensors"))
+
+
 def _artifact_barrier_state(run_dir: str, rank_dirs) -> "tuple[list, bool]":
     if not rank_dirs:
         files = _stable_artifact_files(run_dir)
-        return files, bool(files)
+        return files, _landed(files)
     per_rank = [_stable_artifact_files(d) for d in rank_dirs]
-    return [f for fs in per_rank for f in fs], all(per_rank)
+    return [f for fs in per_rank for f in fs], all(_landed(fs) for fs in per_rank)
 
 
 def _log_barrier_timeout(run_id: str, rank_dirs) -> None:
@@ -351,7 +358,7 @@ def _log_barrier_timeout(run_id: str, rank_dirs) -> None:
               f"run_id {run_id!r}: no artifact landed. A loader will raise FileNotFoundError "
               f"for this run_id -- the write did not finish, the run_id is not wrong.", flush=True)
         return
-    missing = [os.path.basename(d) for d in rank_dirs if not _stable_artifact_files(d)]
+    missing = [os.path.basename(d) for d in rank_dirs if not _landed(_stable_artifact_files(d))]
     if missing:
         print(f"[mia/disk] durability barrier TIMEOUT after {_artifact_wait_s():.0f}s for "
               f"run_id {run_id!r}: {len(rank_dirs) - len(missing)}/{len(rank_dirs)} rank "
