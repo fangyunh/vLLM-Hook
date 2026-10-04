@@ -55,14 +55,11 @@ Capture saturates at rate 32; steering holds to 64 (+5.2 %).
 
 ## 🧩 Supported Configurations
 
-MIA targets the **server path** (`vllm serve` + `MiaClient`) under CUDA graphs. Each use case
-(attention tracker, activation steering, hidden-state extraction, …) runs across a Cartesian
-product of storage (`rpc` / `disk`) and disk format (`pt` / `safetensors`). See
-[`docs/configs.md`](docs/configs.md) for code snippets showing how to select each config.
-
-`MiaLLM` builds an engine in your own process — the quickest way to exercise graph-mode capture
-on one machine, and what [`examples/demo_capture_aperture.py`](examples/demo_capture_aperture.py)
-uses.
+MIA runs in your own process (`MiaLLM`) and on the server path (`vllm serve` + `MiaClient`),
+under CUDA graphs. Each use case (attention tracker, activation steering, hidden-state extraction,
+…) runs across a Cartesian product of storage (`rpc` / `disk`) and disk format (`pt` /
+`safetensors`). See [`docs/configs.md`](docs/configs.md) for code snippets showing how to select
+each config.
 
 MIA requires vLLM's **V2 model runner** and runs every worker under CUDA graphs by default:
 
@@ -118,22 +115,17 @@ pytest tests -q -m "not gpu"
 
 ## 👉 Usage
 
-MIA installs into the **server**, so a demo talks to a `vllm serve` you start yourself. One
-server serves one worker kind at a time, selected with `MIA_WORKER`.
-
-```bash
-VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
-    vllm serve Qwen/Qwen2.5-3B-Instruct --max-model-len 2048 --port 8770
-```
-
-Then, from the repo root:
+Every demo runs offline: it builds a `MiaLLM` engine in your process, captures or steers, and
+reads the data back. From the repo root:
 
 ```bash
 python examples/demo_hiddenstate.py
 ```
 
-Every demo prints the exact `vllm serve` command it needs if nothing is listening, so you never
-have to guess. [`examples/README.md`](examples/README.md) is the walkthrough — getting started,
+Each demo also keeps its `vllm serve` version as a commented block, with the server command to
+start; `examples/demo_actsteer_serve.py` is the server example
+([server mode](examples/README.md#9-server-mode)). [`examples/README.md`](examples/README.md) is
+the walkthrough — getting started,
 [where captured data lands](examples/README.md#where-the-captured-data-goes), how to confirm a
 capture actually happened, and tensor parallelism.
 For the full list of use cases see [`docs/use_cases/`](docs/use_cases/README.md).

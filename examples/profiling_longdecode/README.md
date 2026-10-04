@@ -3,8 +3,9 @@
 Variants of `examples/demo_attntracker.py` and `examples/demo_hiddenstate.py` that make the
 capture cost large enough to measure:
 
-- **Capture in both phases.** `extra_xargs={"hooks_on": "both"}` (the workers default to
-  `"prefill"`), so the hook fires on every decode step and its cost accumulates over the decode.
+- **Capture in both phases.** `SamplingParams(extra_args={"hooks_on": "both"})` (the workers
+  default to `"prefill"`; `extra_xargs` in the server block), so the hook fires on every decode step
+  and its cost accumulates over the decode.
 - **Long decode.** `max_tokens` defaults to 128, but the stock prompt reaches EOS after about 9
   tokens; use an open-ended prompt (or `ignore_eos`) for a long decode.
 
@@ -30,7 +31,8 @@ capture cost large enough to measure:
 
 ## Running
 
-Run them like any other example, from the repo root:
+Run them like any other example (offline; each keeps its `vllm serve` version as a commented
+block), from the repo root:
 
 ```bash
 MIA_CONFIG_FILE=model_configs/attention_tracker/granite-3.1-8b-instruct_alltok.json \

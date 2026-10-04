@@ -25,7 +25,9 @@ Install MIA as described in the repository README. From the repository root:
 CUDA_VISIBLE_DEVICES=0 python examples/demo_attnlink.py
 ```
 
-The model is downloaded on first use. To use local weights and a named output directory:
+The demo runs offline (`MiaLLM`); its `vllm serve` version is kept as a commented block at the
+end of the file. The model is downloaded on first use. To use local weights and a named output
+directory:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples/demo_attnlink.py \
