@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 from urllib.parse import unquote
@@ -10,7 +11,7 @@ from .aperture_gather import (DELIVERY_HARD_CAP_S, DeliveryTimeoutError, GatherE
                               NoDeliveryError, delivery_base, delivery_root, delivery_timeout_s,
                               discover_delivery_ranks, poll_delivered)
 from .delivered_probes import (AmbiguousDelivery, check_id, encode_delivery, external_id,
-                               hs_probes, key_pattern, match_keys)
+                               hs_probes, key_pattern, match_keys, response_id)
 
 logger = logging.getLogger(__name__)
 
@@ -263,15 +264,66 @@ def _write_items(ext: str, n: int, samples, metas: List[dict], names, config,
                                nonce=nonce, start=start)
 
 
+# The longest a completion's prompt waits for an earlier prompt's run write.
+ORDER_WAIT_S = DELIVERY_HARD_CAP_S
+_TURNS: Dict[tuple, dict] = {}
+
+
+def prompt_index(request_id: str) -> Optional[int]:
+    """The prompt index of a completion's engine request (``cmpl-<id>-<i>``), else None."""
+    unit = response_id(str(request_id))
+    tail = str(request_id)[len(unit) + 1:]
+    return int(tail) if unit != str(request_id) and tail.isdigit() else None
+
+
+def _turns(hook_dir: str, run_id: str, request_id: str) -> dict:
+    now = time.monotonic()
+    for k in [k for k, v in _TURNS.items() if now - v["t"] > 2 * ORDER_WAIT_S + 60]:
+        del _TURNS[k]
+    key = (str(hook_dir), str(run_id), response_id(str(request_id)))
+    return _TURNS.setdefault(key, {"t": now, "ended": {}})
+
+
+def _ended(turns: dict, i: int) -> asyncio.Event:
+    return turns["ended"].setdefault(i, asyncio.Event())
+
+
+async def await_turn(hook_dir: str, run_id: str, request_id: str) -> None:
+    """Return once every earlier prompt of this request's completion ended its run write."""
+    i = prompt_index(request_id)
+    if not i:
+        return
+    turns = _turns(hook_dir, run_id, request_id)
+    try:
+        await asyncio.wait_for(asyncio.gather(*(_ended(turns, j).wait() for j in range(i))),
+                               ORDER_WAIT_S)
+    except asyncio.TimeoutError:
+        unit = response_id(str(request_id))
+        late = [f"{unit}-{j}" for j in range(i) if not _ended(turns, j).is_set()]
+        print(f"[mia/delivery] save_to_disk: {late} never wrote run {run_id!r} after "
+              f"{ORDER_WAIT_S:g} s; writing {request_id!r} out of prompt order", flush=True)
+
+
+def end_turn(hook_dir: str, run_id: str, request_id: str) -> None:
+    """This request's run write is over (written, skipped or failed)."""
+    i = prompt_index(request_id)
+    if i is not None:
+        _ended(_turns(hook_dir, run_id, request_id), i).set()
+
+
 async def _write_task(engine, ext, n, layers, metas, hook_dir, run_id, unit=None,
                       stamp=None, nonce=None, keys=None, start=None) -> None:
-    info = await engine_info(engine)
-    _keys, samples = await await_delivery(ext, n, layers, pool=_WRITE_POOL,
-                                          run_ids=run_filter(info), keys=keys)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(_WRITE_POOL, _write_items, ext, n, samples, metas,
-                               info["names"], info["config"], hook_dir, run_id, unit, stamp,
-                               nonce, start)
+    try:
+        info = await engine_info(engine)
+        _keys, samples = await await_delivery(ext, n, layers, pool=_WRITE_POOL,
+                                              run_ids=run_filter(info), keys=keys)
+        await await_turn(hook_dir, run_id, ext)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(_WRITE_POOL, _write_items, ext, n, samples, metas,
+                                   info["names"], info["config"], hook_dir, run_id, unit, stamp,
+                                   nonce, start)
+    finally:
+        end_turn(hook_dir, run_id, ext)
 
 
 def _done(task) -> None:
@@ -286,7 +338,7 @@ def _done(task) -> None:
 
 def spawn_writer(engine, *, ext: str, n: int, layers, metas: List[dict], hook_dir: str,
                  run_id: str, unit=None, stamp=None, nonce=None, keys=None, start=None):
-    """Write one finished request's delivery as an eager run artifact, after the response."""
+    """Write one finished request's delivery as an eager run artifact, in prompt order."""
     task = asyncio.get_running_loop().create_task(
         _write_task(engine, ext, n, layers, metas, hook_dir, run_id, unit, stamp, nonce, keys,
                     start),

@@ -256,23 +256,27 @@ async def _qk_serve_disk(engine, output, extra, keys, request_id, start=None) ->
     import asyncio
 
     from mia.graph.delivered_probes import response_id
-    from mia.graph.delivery_route import _WRITE_POOL, engine_info
+    from mia.graph.delivery_route import _WRITE_POOL, await_turn, end_turn, engine_info
     stamp, nonce = time.time_ns(), uuid.uuid4().hex
     run_id = str(extra.get("run_id") or request_id)
     hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
     loop = asyncio.get_running_loop()
-    for key in keys:
-        with PROF.timed("aperture.await_disk_confirm"):
-            ok = await _await_aperture_disk_confirm(engine, key)
-        if ok is not True:
-            await loop.run_in_executor(_WRITE_POOL, _drop_qk_staging, hook_dir, run_id, keys)
-            raise MiaDeliveryError(f"Q/K capture of request {key!r} did not land under "
-                                   f"{hook_dir} (MIA_APERTURE_DELIVER_TIMEOUT_S)")
-    info = await engine_info(engine)
-    with PROF.timed("aperture.qk_run_write"):
-        await loop.run_in_executor(_WRITE_POOL, _write_qk_run, output, keys, info, hook_dir,
-                                   run_id, _qk_mode(extra), _qk_hooks(extra),
-                                   response_id(str(request_id)), stamp, nonce, start)
+    try:
+        for key in keys:
+            with PROF.timed("aperture.await_disk_confirm"):
+                ok = await _await_aperture_disk_confirm(engine, key)
+            if ok is not True:
+                await loop.run_in_executor(_WRITE_POOL, _drop_qk_staging, hook_dir, run_id, keys)
+                raise MiaDeliveryError(f"Q/K capture of request {key!r} did not land under "
+                                       f"{hook_dir} (MIA_APERTURE_DELIVER_TIMEOUT_S)")
+        info = await engine_info(engine)
+        await await_turn(hook_dir, run_id, str(request_id))
+        with PROF.timed("aperture.qk_run_write"):
+            await loop.run_in_executor(_WRITE_POOL, _write_qk_run, output, keys, info, hook_dir,
+                                       run_id, _qk_mode(extra), _qk_hooks(extra),
+                                       response_id(str(request_id)), stamp, nonce, start)
+    finally:
+        end_turn(hook_dir, run_id, str(request_id))
 
 
 def _reconstruct_compact_qk(probes: dict) -> None:
