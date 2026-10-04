@@ -35,7 +35,7 @@ prints the exact `vllm serve` line it needs, then exits.
 
 | You call | Your data | Ready |
 |---|---|---|
-| `MiaLLM.generate(...)` | `out[i].probes`; `llm.analyze(probes=out[0].probes, ...)` | on first access to `probes`, which waits for that output (a timeout names the request) |
+| `MiaLLM.generate(...)` | `out[i].probes` per prompt; with several prompts `out[0].probes` holds the whole batch, one entry per prompt, for `llm.analyze(probes=out[0].probes, ...)` | on first access to `probes`, which waits for that output (a timeout names the request) |
 | `MiaClient.generate(...)` | `response.probes`; `client.analyze(...)` | shortly after the response; `response.probes` waits for it |
 | either, with `save_to_disk=True, run_id=R` | `<hook_dir>/R/`; `analyze(run_id=R)`, or `mia.run_utils.load_and_merge_hs_cache` / `load_and_merge_qk_cache(hook_dir, R)` | offline: when `generate` returns; served: shortly after the response (`client.analyze()` waits for it) |
 | hidden-state files (CUDA graphs) | `mia.graph.aperture_gather.load_delivered(<capture dir>)` → `{request_id: {layer: Tensor}}` | lists only requests already delivered |
@@ -63,8 +63,8 @@ A run that captured nothing looks like a fast run, so check rather than assume:
 - **The analyzer returned something.** `stats["hidden_states"]` empty is a failed capture, not
   an empty model.
 - **The counters moved.** Start the server with `MIA_PROFILE=1` and read its log at shutdown:
-  `captured.bytes.hs` (or `.qk`) above zero is the only signal that proves rows were captured
-  and handed to the drain. Do not use a counter that merely proves the request finished.
+  `captured.bytes.hs` (or `.qk`) above zero proves rows were captured. Do not use a counter that
+  merely proves the request finished.
 
 ### Tensor parallelism
 

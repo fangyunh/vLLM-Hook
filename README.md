@@ -68,10 +68,10 @@ MIA requires vLLM's **V2 model runner** and runs every worker under CUDA graphs 
 
 - default `cudagraph_mode` is `FULL_AND_PIECEWISE`: FULL graphs for decode, piecewise graphs for
   mixed steps;
-- `FULL_DECODE_ONLY` is accepted, and is used when the compilation mode is not the default;
+- `FULL_DECODE_ONLY` is accepted, and is used when the compilation mode is not the default or
+  `TORCH_COMPILE_DISABLE=1` is set;
 - `FULL` is accepted with a warning: it can compute wrong attention on FlashAttention 3 (vLLM 0.29);
-- `enforce_eager=True` (`vllm serve --enforce-eager`) opts out; other modes (e.g. `PIECEWISE`) are
-  refused.
+- `enforce_eager=True` (`vllm serve --enforce-eager`) opts out; `PIECEWISE` alone is refused.
 
 Tensor parallelism (TP > 1) is supported for `capture_hs`, `capture_qk` and `steer`: each capturing
 rank writes its own `tp_rank_<r>/` directory and MIA's loaders merge them. Pipeline parallelism is

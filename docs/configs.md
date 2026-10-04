@@ -229,73 +229,6 @@ See [`examples/demo_actsteer_serve.py`](../examples/demo_actsteer_serve.py) for 
 
 ---
 
-## You set nothing: what MIA decides about the capture data path
-
-MIA picks the capture data path per request and per file, from the configuration it already has.
-The defaults below are what a user gets without setting anything; each one names the measurement
-behind it and the env var that overrides it. Nothing here changes what is captured or the bytes
-that are written -- only which road they take.
-
-**1. Where a request's artifact comes back: host memory (RPC) or disk.** The per-request storage
-router (`MIA_STORAGE_ROUTER`, default **on**, serve only) predicts the artifact's size from the
-prompt length, the captured layers/heads and the capture mode, then compares two on-loop costs:
-
-| side | model (ms) | where the coefficients come from |
-|---|---|---|
-| RPC (`get_captured_states`, `save_to_disk=false`) | `5.0 + slope x KB`, slope **0.03** HS / **0.157** QK | measured on granite-3.1-8b (FULL CUDA graph) |
-| disk (`save_to_disk=true`) | `20.0 + slope x KB`, slope **0.0022** HS / **0.0078** QK | the per-KB term is measured: the per-request staging's own writes, 0.0174 ms at 8 KiB and 0.0197 ms at 16 KiB, i.e. `0.0151 ms/write + 0.000288 ms/KB` over a row-wide write. **The 20.0 ms handoff is NOT measured** -- see below |
-
-The threshold is **solved** from those two, per worker kind, rather than written down:
-**HS 539.6 KB, QK 100.5 KB** (`run_utils.rpc_disk_crossover_kb`). QK crosses five times earlier
-than HS because its RPC ship is five times dearer per KB. In practice QK at almost any size goes
-to **disk**; hidden states come back on `response.probes` under CUDA graphs, and in eager only a
-`last_token` capture (256 KB at Llama-3.1-8B, all 32 layers) does. `client.analyze()` reads either.
-
-> **The one number that is not measured, stated plainly.** `MIA_ROUTER_DISK_HANDOFF_MS` (20.0) is
-> the engine-loop cost of handing a request to the disk route. No bench in this repo has timed it,
-> and it dominates the crossover. It is kept, not replaced by a guess. A GPU measurement would
-> have to time the engine loop between a disk-routed request being admitted and the loop
-> continuing, at a fixed artifact size, against the same request routed to RPC. If it turns out to
-> be anywhere near the write cost above, the crossover collapses toward zero and essentially
-> everything routes to disk.
-
-**An explicit `save_to_disk` from the caller always wins.** The router fires only when the request
-carries no `save_to_disk` at all: an explicit value is a requirement (`true` = "I need the artifact
-FILE"), not a hint, and MIA never overrides it.
-
-| env var | default | effect |
-|---|---|---|
-| `MIA_STORAGE_ROUTER` | `on` | `0` disables the router; the caller's `save_to_disk` (or `MIA_SINK`) then decides alone |
-| `MIA_ROUTER_T_RPC` / `MIA_ROUTER_T_ANALYZE` | derived (HS 552517 B, QK 102949 B) | override the crossover outright, in bytes, for Q/K under CUDA graphs. `T_ANALYZE` takes the same derived number because it always did; its true basis is different (how big an artifact a reducible analyzer should hold in host RAM while it reduces), and nothing here measures that |
-| `MIA_ROUTER_RPC_INTERCEPT_MS` | `5.0` | the RPC model's fixed term |
-| `MIA_ROUTER_RPC_SLOPE_MS_PER_KB_HS` / `_QK` | `0.03` / `0.157` | the RPC model's per-KB term |
-| `MIA_ROUTER_DISK_HANDOFF_MS` | `20.0` | the disk model's fixed term (**not measured**, see above) |
-| `MIA_ROUTER_DISK_SLOPE_MS_PER_KB_HS` / `_QK` | `0.0022` / `0.0078` | the disk model's per-KB term (measured) |
-| `MIA_ROUTER_DEBUG` | off | `1` prints the first 20 routing decisions with their predicted sizes |
-
-Every coefficient is read on each call, so any of them can be retuned without a restart, and
-retuning one MOVES the threshold -- the threshold is solved from them, never stored beside them.
-
-**2. How a file is written: O_DIRECT or buffered.** `MIA_APERTURE_WRITE_MODE=auto` (the default)
-opens a raw file `O_DIRECT` only where it is legal (the row width is a multiple of the detected
-block size) **and** where it pays (the predicted write is at least **64 KiB** -- the
-low end of the band where the measurement can no longer tell the two apart; below it, at one
-writer thread, buffered wins decisively). MIA predicts that size at install from the capture
-configuration alone, as an UPPER BOUND: an `all_tokens` capture writes up to a whole step of tokens
-per file and takes O_DIRECT; a `last_token` one writes at most a row per in-flight request, so it
-takes the buffered path only at low concurrency (below 8 concurrent requests at 8B, 4 at 70B).
-Every rank logs its mode, the predicted size and the reason, and a prediction that real traffic
-contradicts is reported once. Override the size threshold with
-`MIA_APERTURE_DIRECT_MIN_BYTES`.
-
-**3. How a disk-routed request is staged.** The per-request staging writes zero-copy through the
-same writer, one fd per file kept open for the request, always buffered (its 8-16 KiB writes go
-inline on the drain thread with no writer pool, where O_DIRECT measures 1.65-1.74x slower per
-write). No setting selects this; `MIA_APERTURE_WRITE_MODE=legacy`
-reaches the old `tobytes` + open/append/close writer for an A/B.
-
----
-
 ## Sizing the capture aperture, and the GPU memory it costs
 
 The aperture is a **fixed** GPU allocation — fixed because a buffer that grows with traffic
@@ -307,7 +240,7 @@ fail later.
 |---|---|---|
 | `MIA_APERTURE_GPU_BYTES` | **4 GiB** | the aperture's byte budget. **Per rank** at TP > 1, not per engine |
 | `MIA_APERTURE_MAX_BATCHED_TOKENS` | off | derive (`auto`) or pin `max_num_batched_tokens` so a heavy capture's per-step transient cannot OOM at high batch. MIN-ONLY: it never raises the budget, so it is byte-identical whenever the derived cap is the larger one |
-| `MIA_APERTURE_BACKPRESSURE_TIMEOUT_S` | `10` (s) | how long a step waits for the drain to free rows before `ApertureBackpressureError`. Capture blocks; it never silently drops rows. Raise it if a slow sink makes a heavy run trip the barrier |
+| `MIA_APERTURE_BACKPRESSURE_TIMEOUT_S` | `10` (s) | how long a step waits for free capture space before `ApertureBackpressureError`. Capture blocks; it never silently drops rows. Raise it if a slow disk makes a heavy run hit it |
 
 ### The one rule: `gpu_memory_utilization` must leave room for the aperture
 
@@ -355,52 +288,15 @@ Llama-3.1-70B at TP4 rather than 10 GiB.
 
 ---
 
-## Graph-mode capture aperture: how the raw files are written
-
-In graph mode the drain consumer thread of each capturing rank writes the per-layer raw files and
-the sidecar itself; the writer process idles. Two env vars choose how:
-
-| env var | default | values |
-|---|---|---|
-| `MIA_APERTURE_WRITE_MODE` | `auto` | `auto` (O_DIRECT for each file whose rows are a multiple of the detected direct-I/O block size **and whose predicted write reaches the crossover**, zero-copy buffered for the rest) · `direct` (O_DIRECT for every file, else refused at install; ignores the size) · `buffered` (zero-copy buffered everywhere) · `legacy` (the old `tobytes` + `open`/`write`/`close`-per-step path, for A/B validation only) |
-| `MIA_APERTURE_WRITE_THREADS` | `2` | writer threads per off-loop drain, 1..64 |
-| `MIA_APERTURE_DIRECT_MIN_BYTES` | `65536` | the O_DIRECT crossover, in bytes per write -- the low end of the measured undecidable band; `0` decides on alignment alone |
-
-All four modes write the same bytes: the raw files and the sidecar are byte-identical, and the
-readers are unchanged. The synchronous drain (`MIA_APERTURE_SYNC_DRAIN=1`) writes buffered only.
-Q/K capture writes no shared raw files, so the per-file decision does not apply to it -- its
-per-request DISK staging takes the same writer in buffered mode (`legacy` for an A/B; an explicit
-`direct` is refused there).
-`MIA_APERTURE_MMAP=1` is accepted only with `legacy`. Each capturing rank logs one
-`... aperture write path (tp_rank r): ...` line at install, naming the mode per tensor kind, the
-predicted write size and why it went that way, the thread count and the block size.
-
----
-
-## Graph-mode HS capture under tensor parallelism: which rank captures which layer
-
-The residual stream is replicated on every TP rank, so any rank's copy of a layer IS the layer and
-HS shards by LAYER: rank `r` captures the 0-based decoder layers `i` with `i % tp_size == r` into
-its own `tp_rank_<r>/`, and each rank's aperture, drain thread and writer cover only those layers.
-
-| env var | default | values |
-|---|---|---|
-| `MIA_HS_TP_SHARD` | `1` | `1` = shard the HS layers round-robin across the ranks (at TP > 1); `0` = the pre-shard layout, `tp_rank 0` captures every layer and the others bake sinks (**A/B only**). Anything else is refused at engine construction. Ignored at TP = 1 |
-| `MIA_HS_CAPTURE_ALL_RANKS` | off (unset / `0`) | `1` = every rank captures EVERY layer into its own dir (replicas of one residual). Diagnostic; wins over `MIA_HS_TP_SHARD`. Anything else is refused at engine construction too -- `true`/`yes`/`on` are NOT read as `1` |
-| `MIA_HS_TP_SYMMETRIC` | `1` | `0` bakes `capture_hs` only on the layers a rank owns. Expected to hang at TP > 1; kept to reproduce that |
-
-`MIA_APERTURE_GPU_BYTES` is a PER-RANK budget: one max-token step of HS now costs
-`max_num_batched_tokens × ceil(L / tp) × hidden × 2` on a rank (2.5 GiB for Llama-3.1-70B at TP4,
-not 10 GiB). Read it back as usual: `probes`, `analyze()` and `load_delivered(MIA_APERTURE_DIR)`
-merge the ranks. TP = 1 is unchanged, byte for byte.
-
 ## Reading your data back
 
 Where each call puts its data, how to read it and when it is ready:
 [examples/README.md](../examples/README.md#where-the-captured-data-goes). In short:
 `out[i].probes` / `llm.analyze()` offline, `response.probes` / `client.analyze()` served,
 `<hook_dir>/<run_id>/` with `save_to_disk`, and `load_delivered(<capture dir>)` for the
-hidden-state files.
+hidden-state files. A served capture sent without `save_to_disk` may land in
+`<hook_dir>/<run_id>/` instead of on the response; `client.analyze()` reads it either way. An
+explicit `save_to_disk` is never overridden.
 
 ## Limits
 
@@ -409,3 +305,11 @@ hidden-state files.
 - Q/K capture turns prefix caching off unless you set it.
 - Score capture, and Q/K with explicit prefix caching or DP > 1, run eager.
 - Graph steering: at most `MIA_STEER_VMAX` (16) distinct vectors per engine; more are refused.
+
+## Tuning
+
+Optional performance levers and their env vars (the defaults need no change):
+
+```python
+from mia.optimizations import describe; print(describe())
+```

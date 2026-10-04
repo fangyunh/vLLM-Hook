@@ -109,8 +109,7 @@ from mia.analyzers.attnlink_analyzer import select_columns
 selection = select_columns(result["scores"], temperature=1.0, top_p=0.9)
 ```
 
-This small example handles **one prompt, one layer/head, one GPU**, with eager
-execution, prefix caching disabled and chunked prefill disabled. Generation uses
+This small example handles **one prompt, one layer/head, one GPU**. Generation uses
 `max_tokens=1` to complete the vLLM request; only prefill QK is analyzed. It does
 not modify workers, serving infrastructure or model weights. Missing captures,
 incomplete prompt keys and invalid spans raise errors rather than returning a
