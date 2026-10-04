@@ -170,16 +170,17 @@ def _hybrid_marker(output, extra: dict, explicit_save, gen_counts: dict, nonce=N
             "hs_mode": extra.get("hs_mode", DEFAULT_HS_MODE),
             "hooks_on": extra.get("hooks_on", DEFAULT_HOOKS_ON),
             "n_prompt": len(getattr(output, "prompt_token_ids", None) or []),
-            "n_gen": n_gen, "n_cached": n_cached,
+            "n_gen": n_gen, "n_cached": int(getattr(output, "num_cached_tokens", 0) or 0),
+            "n_cached_samples": n_cached,
             "save_to_disk": explicit_save, "run_id": extra.get("run_id"),
             "hook_dir": extra.get("hook_dir"), "nonce": nonce, "key": key}
 
 
 def _sample_metas(mark: dict) -> list:
-    nc = mark.get("n_cached", 0)
+    per = mark.get("n_cached_samples")
     return [{"hs_mode": mark["hs_mode"], "hooks_on": mark["hooks_on"],
              "n_prompt": mark["n_prompt"], "n_gen": g,
-             "n_cached": nc[j] if isinstance(nc, list) else nc}
+             "n_cached": per[j] if isinstance(per, list) else mark.get("n_cached", 0)}
             for j, g in enumerate(mark["n_gen"])]
 
 

@@ -485,9 +485,10 @@ class MiaClient:
 
 
 def _item_meta(it: dict, j: int) -> dict:
-    nc = it.get("n_cached", 0)
+    per = it.get("n_cached_samples")
     return {"hs_mode": it["hs_mode"], "hooks_on": it["hooks_on"], "n_prompt": it["n_prompt"],
-            "n_gen": it["n_gen"][j], "n_cached": nc[j] if isinstance(nc, list) else nc}
+            "n_gen": it["n_gen"][j],
+            "n_cached": per[j] if isinstance(per, list) else it.get("n_cached", 0)}
 
 
 class _ItemFetch:
