@@ -3,7 +3,7 @@
 Variants of `examples/demo_attntracker.py` and `examples/demo_hiddenstate.py` that make the
 capture cost large enough to measure:
 
-- **Capture in both phases.** `extra_args={"hooks_on": "both"}` (the workers default to
+- **Capture in both phases.** `extra_xargs={"hooks_on": "both"}` (the workers default to
   `"prefill"`), so the hook fires on every decode step and its cost accumulates over the decode.
 - **Long decode.** `max_tokens` defaults to 128, so each run is multi-second and steady.
 

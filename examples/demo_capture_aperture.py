@@ -148,7 +148,7 @@ def main() -> None:
     # The mode the engine runs: CUDA graphs unless enforce_eager=True.
     vc = llm.llm_engine.vllm_config
     graph_mode = not vc.model_config.enforce_eager
-    print(f"[demo_capture_aperture] mode={'FULL CUDA-graph capture' if graph_mode else 'EAGER'} "
+    print(f"[demo_capture_aperture] mode={'CUDA-graph capture' if graph_mode else 'EAGER'} "
           f"(enforce_eager={vc.model_config.enforce_eager}, "
           f"cudagraph_mode={vc.compilation_config.cudagraph_mode.name})")
 
