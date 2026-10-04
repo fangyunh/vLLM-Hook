@@ -613,6 +613,9 @@ class MultiLayerApertureDrain:
     def _trim_summary(self) -> str:
         if getattr(self, "_gather_proc", None) is None:
             return ""
+        if getattr(self._gather_proc, "no_punch", None):
+            return (" | gather trim OFF (the capture dir cannot free space): shared layer files "
+                    "kept WHOLE")
         if not getattr(self._gather_proc, "trim", False):
             return f" | gather trim OFF ({GATHER_TRIM_ENV}=0): shared layer files kept WHOLE"
         return (f" | gather trim ON (default; {GATHER_TRIM_ENV}=0 keeps them): the shared "

@@ -88,14 +88,28 @@ def pass_sizes(n_rows: int, meta: dict) -> List[int]:
         return [n_rows]
     if hooks == "decode":
         return [1] * n_rows
-    p = int(meta["n_prompt"]) - int(meta.get("n_cached") or 0)
-    if not 0 < p <= n_rows:
-        p = n_rows - max(int(meta["n_gen"]) - 1, 0)
+    # Prompt pass = the prompt tokens this sample computed; every later pass is one decode row.
+    # At most every row but one per decode step (more rows are passes run after the stop).
+    bound = n_rows - max(int(meta["n_gen"]) - 1, 0)
+    cached = meta.get("n_cached")
+    p = bound if cached is None else int(meta["n_prompt"]) - int(cached)
+    if not 0 < p <= bound:
+        if cached is not None:
+            _warn_split(n_rows, meta, bound)
+        p = bound
     if not 0 < p <= n_rows:
         raise MiaDeliveryError(
             f"cannot split {n_rows} delivered rows into passes (n_prompt={meta.get('n_prompt')}, "
             f"n_gen={meta.get('n_gen')}, n_cached={meta.get('n_cached')})")
     return [p] + [1] * (n_rows - p)
+
+
+def _warn_split(n_rows: int, meta: dict, bound: int) -> None:
+    PROF.incr("delivered.split_mismatch")
+    print(f"[mia] WARNING: delivered rows do not match the prompt (n_rows={n_rows}, "
+          f"n_prompt={meta.get('n_prompt')}, n_gen={meta.get('n_gen')}, "
+          f"n_cached={meta.get('n_cached')}); the prompt pass is taken as {bound} rows",
+          flush=True)
 
 
 _MAP_NORESERVE = getattr(mmap, "MAP_NORESERVE", 0x4000 if sys.platform.startswith("linux")

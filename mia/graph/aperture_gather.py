@@ -17,8 +17,9 @@ from .aperture_run_index import (RUN_ID_KEY, ChainCursor, RunIndexError, read_ru
 from .aperture_trim import (TRIM_ENV as GATHER_TRIM_ENV, TrimError, TrimLog, align_down,
                             floor_row_for_bytes, is_reclaimed, published_cursors, punch_hole,
                             punch_supported, trim_align, trim_chunk_bytes, trim_enabled,
-                            trim_lag_bytes, trimmed_floor_rows)
+                            trim_explicit, trim_lag_bytes, trimmed_floor_rows)
 from .cpu_budget import allocated_cpus
+from mia.errors import MiaRefusal
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,10 @@ DELIVERY_TIMEOUT_ENV = "MIA_DELIVERY_TIMEOUT_S"
 DEFAULT_DELIVERY_TIMEOUT_S = 60.0
 DELIVERY_HARD_CAP_S = 1800.0
 _WAIT_POLL_S = 0.1
+
+
+class TrimRefusedError(GatherError, MiaRefusal):
+    """The trim was asked for explicitly on a capture dir that cannot punch holes."""
 
 
 class NoDeliveryError(GatherError):
@@ -250,6 +255,12 @@ def _no_punch_message(run_dir: str, why: str) -> str:
     return (f"{run_dir} cannot free space while data is delivered ({why}), so captured data would "
             f"be kept twice; put the capture dir (MIA_APERTURE_DIR) on a local disk, or set "
             f"{GATHER_TRIM_ENV}=0 to accept that.")
+
+
+def _no_punch_warning(run_dir: str, why: str) -> str:
+    return (f"WARNING: {run_dir} cannot free space while data is delivered ({why}), so captured "
+            f"data is kept twice there; put the capture dir (MIA_APERTURE_DIR) on a local disk to "
+            f"avoid it.")
 
 
 class _ReqState:
@@ -1394,6 +1405,9 @@ class ApertureGatherProcess:
         self.batch_bytes = int(batch_bytes) if batch_bytes is not None else gather_batch_bytes()
         self.poll_s = float(poll_s) if poll_s is not None else gather_poll_s()
         self.trim = trim_enabled() if trim is None else bool(trim)
+        # Only an asked-for trim refuses a dir that cannot punch; the default turns off.
+        self.trim_asked = trim is not None or trim_explicit()
+        self.no_punch: Optional[str] = None
         self.trim_chunk = trim_chunk_bytes()
         self.trim_lag = trim_lag_bytes()
         self.parent_daemonic = False
@@ -1423,8 +1437,12 @@ class ApertureGatherProcess:
         trim_note = f"trim OFF ({GATHER_TRIM_ENV}=0): the shared layer files are kept WHOLE"
         if self.trim:
             ok, why = punch_supported(self.run_dir)
+            if not ok and self.trim_asked:
+                raise TrimRefusedError(_no_punch_message(self.run_dir, why))
             if not ok:
-                raise GatherError(_no_punch_message(self.run_dir, why))
+                self.trim, self.no_punch = False, why
+                trim_note = _no_punch_warning(self.run_dir, why)
+        if self.trim:
             trim_note = (f"trim ON by default ({GATHER_TRIM_ENV}=0 turns it off): the shared "
                          f"hs_layer_*.raw will be fallocate(PUNCH_HOLE)d behind the SLOWEST "
                          f"worker's cursor in {self.trim_chunk} B chunks, {self.trim_lag} B lag, "
@@ -1473,7 +1491,7 @@ class ApertureGatherProcess:
                   f"with aperture_gather.load_delivered(<the run's delivery root>), which refuses a "
                   f"gap or a duplicate instead of returning one rank's share", flush=True)
         print(f"[aperture-gather] {trim_note}", flush=True)
-        logger.info("aperture gather trim: %s", trim_note)
+        (logger.warning if self.no_punch else logger.info)("aperture gather trim: %s", trim_note)
 
     def alive(self) -> bool:
         return bool(self._procs) and any(p.is_alive() for p in self._procs)
@@ -1518,7 +1536,8 @@ class ApertureGatherProcess:
 
 __all__ = ["ApertureGatherProcess", "BATCH_BYTES_ENV", "DELIVER_ENV", "DELIVERY_FORMAT",
            "DEFAULT_WORKERS", "DIR_ENV", "GATHER_TRIM_ENV", "GatherError", "GatherPass",
-           "DELIVERY_TIMEOUT_ENV", "DeliveryTimeoutError", "NoDeliveryError", "delivery_root",
+           "DELIVERY_TIMEOUT_ENV", "DeliveryTimeoutError", "NoDeliveryError", "TrimRefusedError",
+           "delivery_root",
            "delivery_backlog", "delivery_timeout_s",
            "wait_delivered",
            "GatherWorkers", "MANIFEST_GLOB", "resolve_gather_workers",

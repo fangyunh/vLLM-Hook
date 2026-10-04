@@ -777,9 +777,11 @@ def patch_worker_load_model() -> None:
         except MiaRefusal:
             raise
         except Exception as e:  # noqa: BLE001
-            print(f"[graph/install] graph install FAILED ({e}); continuing "
-                  f"without graph capture.")
+            # A partial install (routing wrapped, no drain) would serve and capture nothing.
             PROF.incr("graph.install.errors")
+            raise MiaConfigurationError(
+                f"MIA could not set up capture on this engine ({e}); start it with "
+                f"enforce_eager=True (vllm serve: --enforce-eager).") from e
 
         return result
 

@@ -991,6 +991,8 @@ class QKCaptureWorker:
         if not found_any:
             if consumer is not None:
                 consumer.drain_writer_done(self)
+            if refused_here:
+                clear_rank_artifact(run_dir, "qk")
             return run_dir if refused_here else False
 
         os.makedirs(run_dir, exist_ok=True)

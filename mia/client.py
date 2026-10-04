@@ -255,7 +255,8 @@ class MiaClient:
             raise RuntimeError("No generate() call has been made yet.")
 
         raw_probes = getattr(self._last_response, "probes", None)
-        if raw_probes is None and (run_ids or [run_id or self._last_run_id])[0] in self._run_keys:
+        if raw_probes is None and any(r in self._run_keys
+                                      for r in (run_ids or [run_id or self._last_run_id])):
             return self._analyze_delivered_run(analyzer_spec, run_id or self._last_run_id,
                                                run_ids)
         if raw_probes is None:
@@ -356,13 +357,16 @@ class MiaClient:
         """Disk analyze of hybrid save_to_disk runs, once each run holds its requests."""
         import inspect
         from mia.graph import run_artifact
+        from mia.graph.aperture_gather import delivery_timeout_s
         from mia.graph.delivered_probes import hs_probes, merge_disk
 
         nonces = {r: self._run_nonces.get(r) or None for r in (run_ids or [run_id])}
+        # As long as the server's writer may wait for a delivery.
+        idle = max(run_artifact.artifact_wait_s(), delivery_timeout_s())
         for rid_ in (run_ids or [run_id]):
             try:
                 run_artifact.wait_run(self._hook_dir, rid_, self._run_keys.get(rid_, []),
-                                      nonces=nonces[rid_])
+                                      timeout_s=idle, nonces=nonces[rid_])
             except run_artifact.RunArtifactError:
                 remote = not os.path.isdir(run_artifact.run_dir(self._hook_dir, rid_))
                 takes = "probes" in inspect.signature(self.analyzer.analyze).parameters
@@ -391,7 +395,7 @@ class MiaClient:
                     break
             for r in runs:
                 run_artifact.wait_run(self._hook_dir, r, self._run_keys.get(r, []),
-                                      nonces=nonces[r])
+                                      timeout_s=idle, nonces=nonces[r])
         an = copy.copy(self.analyzer)
         an.hook_dir = snap
         before = dict(vars(an))
@@ -481,8 +485,9 @@ class MiaClient:
 
 
 def _item_meta(it: dict, j: int) -> dict:
+    nc = it.get("n_cached", 0)
     return {"hs_mode": it["hs_mode"], "hooks_on": it["hooks_on"], "n_prompt": it["n_prompt"],
-            "n_gen": it["n_gen"][j], "n_cached": it.get("n_cached", 0)}
+            "n_gen": it["n_gen"][j], "n_cached": nc[j] if isinstance(nc, list) else nc}
 
 
 class _ItemFetch:
