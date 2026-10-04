@@ -12,6 +12,7 @@ from mia._profiler import PROF
 from mia.runner import StepView, install_request_arg_stash, require_v2_runner, step_view
 from mia.workers._common import (
     capture_bytes,
+    clear_rank_artifact,
     clear_states_for_req,
     compact_page_backed_cache,
     get_query_metadata,
@@ -993,6 +994,8 @@ class QKCaptureWorker:
             return run_dir if refused_here else False
 
         os.makedirs(run_dir, exist_ok=True)
+        # A reused run_id: no barrier or reader may take the previous artifact for this one.
+        clear_rank_artifact(run_dir, "qk")
         _attach_tp_shard(cpu_cache, self)
 
         has_scores = any("scores" in e for e in cpu_cache["qk_cache"].values())

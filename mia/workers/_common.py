@@ -158,6 +158,15 @@ def compact_page_backed_cache(cpu_cache: dict) -> None:
                     mod_entry[key] = [t.clone() if torch.is_tensor(t) else t for t in val]
 
 
+def clear_rank_artifact(run_dir: str, basename: str) -> None:
+    """Remove a previous ``basename`` artifact from ``run_dir`` before a new one is written."""
+    for ext in (".safetensors", ".json", ".pt"):
+        try:
+            os.remove(os.path.join(run_dir, basename + ext))
+        except FileNotFoundError:
+            pass
+
+
 def save_pt_atomic(cpu_cache: dict, out_path: str) -> None:
     """Write ``cpu_cache`` to ``out_path`` via tmp+fsync+rename for atomicity."""
     with PROF.timed("worker.disk_write.pt"):

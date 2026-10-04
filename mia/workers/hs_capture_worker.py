@@ -12,6 +12,7 @@ from mia._profiler import PROF
 from mia.runner import StepView, install_request_arg_stash, require_v2_runner, step_view
 from mia.workers._common import (
     capture_bytes,
+    clear_rank_artifact,
     clear_states_for_req,
     compact_page_backed_cache,
     get_query_metadata,
@@ -603,6 +604,8 @@ class HSCaptureWorker:
         tp_rank = _worker_tp_rank(self)
         run_dir = os.path.join(hook_dir, run_id, rank_dir_name(tp_rank))
         os.makedirs(run_dir, exist_ok=True)
+        # A reused run_id: no barrier or reader may take the previous artifact for this one.
+        clear_rank_artifact(run_dir, "hidden_states")
 
         quant_on = any("hidden_states_qmeta" in e for e in cpu_cache["hs_cache"].values())
         wp = getattr(self, "_writer_process", None)
