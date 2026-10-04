@@ -1665,6 +1665,18 @@ def _engine_graph(engine) -> bool:
     return _graph_mode()
 
 
+def _engine_worker_kind(engine) -> str:
+    """The worker kind ``engine`` was built with: its cache stamp, else its MIA class, else
+    ``_worker_kind``."""
+    vc = getattr(engine, "vllm_config", None)
+    ac = getattr(vc, "additional_config", None)
+    stamp = ac.get(_COMPILE_CACHE_STAMP_KEY) if isinstance(ac, dict) else None
+    if isinstance(stamp, dict) and stamp.get("worker") in _WORKER_EXT_BY_KIND:
+        return stamp["worker"]
+    ext = getattr(getattr(vc, "parallel_config", None), "worker_extension_cls", None) or ""
+    return _kind_from_extension(ext) or _worker_kind(ext)
+
+
 def _engine_attr_dict(engine, name: str) -> dict:
     d = getattr(engine, name, None)
     if d is None:
@@ -2067,10 +2079,8 @@ def _offline_delivery_info(llm) -> dict:
     if info is not None:
         return info
     eng = getattr(llm, "llm_engine", None)
-    pc = getattr(getattr(eng, "vllm_config", None), "parallel_config", None)
     info = {}
-    if eng is not None and _kind_from_extension(
-            getattr(pc, "worker_extension_cls", None) or "") == "hidden_states":
+    if eng is not None and _engine_worker_kind(eng) == "hidden_states":
         from mia.graph.delivery_route import merge_info
         info = merge_info(llm.collective_rpc("mia_delivery_info"))
     llm._mia_delivery_info = info
@@ -2350,10 +2360,8 @@ def _offline_qk_info(llm) -> dict:
     if info is not None:
         return info
     eng = getattr(llm, "llm_engine", None)
-    pc = getattr(getattr(eng, "vllm_config", None), "parallel_config", None)
     info = {}
-    if eng is not None and _kind_from_extension(
-            getattr(pc, "worker_extension_cls", None) or "") == "qk":
+    if eng is not None and _engine_worker_kind(eng) == "qk":
         res = [r for r in (llm.collective_rpc("mia_delivery_info") or []) if isinstance(r, dict)]
         info = {"per_request": bool(res) and all(r.get("per_request") for r in res)}
     llm._mia_qk_info = info
