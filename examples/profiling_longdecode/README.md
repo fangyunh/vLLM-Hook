@@ -5,7 +5,8 @@ capture cost large enough to measure:
 
 - **Capture in both phases.** `extra_xargs={"hooks_on": "both"}` (the workers default to
   `"prefill"`), so the hook fires on every decode step and its cost accumulates over the decode.
-- **Long decode.** `max_tokens` defaults to 128, so each run is multi-second and steady.
+- **Long decode.** `max_tokens` defaults to 128, but the stock prompt reaches EOS after about 9
+  tokens; use an open-ended prompt (or `ignore_eos`) for a long decode.
 
 ## Scripts and configs
 

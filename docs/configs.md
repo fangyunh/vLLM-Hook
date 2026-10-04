@@ -303,7 +303,8 @@ explicit `save_to_disk` is never overridden.
 - Graph-mode capture can move per-token logprobs slightly; `enforce_eager=True`
   (`--enforce-eager`) is bit-exact.
 - Q/K capture turns prefix caching off unless you set it.
-- Score capture, and Q/K with explicit prefix caching or DP > 1, run eager.
+- Offline score capture, and Q/K with explicit prefix caching or DP > 1, run eager; a served score
+  request on a graph engine is refused (start the server with `--enforce-eager`).
 - Graph steering: at most `MIA_STEER_VMAX` (16) distinct vectors per engine; more are refused.
 
 ## Tuning

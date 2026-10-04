@@ -52,9 +52,14 @@ prints the exact `vllm serve` line it needs, then exits.
   - It gives up after 60 s without progress (30 min cap); a hung engine holds GPU memory until exit.
   - A `MiaLLM` dropped off the main thread finishes in the background, so exit can wait as long.
   - One collected off the main thread during shutdown skips this; Python prints "Exception ignored".
+  - Read `probes` before `llm.llm_engine.engine_core.shutdown()`: a shutdown loses outputs not yet
+    delivered.
 - A served capture sent without `save_to_disk` may land in `<hook_dir>/<run_id>/` instead of on the
   response; `client.analyze()` reads it either way.
-- `load_delivered` keys start with the request's id (`response.id`, `output.request_id`).
+- A served completion with several prompts and `save_to_disk` rewrites run `R` once per prompt; for
+  large runs give each prompt its own `run_id`.
+- `load_delivered` keys start with the request's id (`response.id`, `output.request_id`); with
+  `n > 1`, sample `j`'s key starts with `<j>_`.
 - Holding any one layer of an output's `probes` keeps that whole output's data in memory.
 
 ### Did it actually capture anything?
