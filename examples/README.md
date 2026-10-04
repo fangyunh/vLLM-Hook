@@ -1,8 +1,9 @@
 # Building your own demo
 
 A demo is one Python file: build a `MiaLLM` engine, generate, read back what was captured. Every
-demo here runs that way, offline, under MIA's defaults. Each also keeps its `vllm serve` version as
-a commented block ([Server mode](#9-server-mode)); `demo_actsteer_serve.py` is the server example.
+demo here runs that way, offline, under MIA's defaults, except `demo_actsteer_serve.py`, the server
+example. Each other demo (bar `demo_capture_aperture.py`) keeps its `vllm serve` version as a
+commented block ([Server mode](#9-server-mode)).
 
 ## Getting started
 

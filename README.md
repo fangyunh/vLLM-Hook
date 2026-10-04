@@ -122,8 +122,8 @@ reads the data back. From the repo root:
 python examples/demo_hiddenstate.py
 ```
 
-Each demo also keeps its `vllm serve` version as a commented block, with the server command to
-start; `examples/demo_actsteer_serve.py` is the server example
+Each other demo (bar `demo_capture_aperture.py`) also keeps its `vllm serve` version as a
+commented block, with the server command to start; `examples/demo_actsteer_serve.py` is the server example
 ([server mode](examples/README.md#9-server-mode)). [`examples/README.md`](examples/README.md) is
 the walkthrough — getting started,
 [where captured data lands](examples/README.md#where-the-captured-data-goes), how to confirm a
