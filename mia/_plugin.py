@@ -890,10 +890,12 @@ def stamp_compile_cache_key(engine_args, worker_kind: str) -> None:
 
 
 class UnsupportedGraphModeError(RuntimeError):
-    """MIA supports eager (NONE), FULL_DECODE_ONLY and FULL CUDA graphs."""
+    """A cudagraph_mode outside NONE and ``_GRAPH_MODES`` (e.g. PIECEWISE alone)."""
 
 
-DEFAULT_CUDAGRAPH_MODE = "FULL_DECODE_ONLY"
+DEFAULT_CUDAGRAPH_MODE = "FULL_AND_PIECEWISE"
+
+_GRAPH_MODES = ("FULL_AND_PIECEWISE", "FULL_DECODE_ONLY", "FULL")
 
 _FULL_MODE_WARNING = (
     "[mia] WARNING: cudagraph_mode=FULL replays mixed prefill/decode batches in FULL CUDA graphs, "
@@ -903,10 +905,10 @@ _FULL_MODE_WARNING = (
 
 def validate_graph_mode(mode_name: str) -> None:
     """Accept only the modes MIA's capture path is validated for."""
-    if str(mode_name).upper() not in {"NONE", "FULL_DECODE_ONLY", "FULL"}:
+    if str(mode_name).upper() not in {"NONE", *_GRAPH_MODES}:
         raise UnsupportedGraphModeError(
-            f"MIA supports cudagraph_mode {DEFAULT_CUDAGRAPH_MODE} (its default), FULL and NONE "
-            f"(eager); got {mode_name}. Leave cudagraph_mode unset for {DEFAULT_CUDAGRAPH_MODE}, "
+            f"MIA supports cudagraph_mode {', '.join(_GRAPH_MODES)} and NONE (eager); got "
+            f"{mode_name}. Leave cudagraph_mode unset for MIA's default {DEFAULT_CUDAGRAPH_MODE}, "
             f"or pass enforce_eager=True for the eager path."
         )
 
@@ -1017,18 +1019,40 @@ def _cc_mode_name(cc):
     return m if isinstance(m, str) else getattr(m, "name", str(m))
 
 
-def _with_default_cudagraph(cc):
+def _compile_mode_name(cc):
+    m = cc.get("mode") if isinstance(cc, dict) else getattr(cc, "mode", None)
+    if m is None:
+        return None
+    from vllm.config.compilation import CompilationMode
+    try:
+        if isinstance(m, str) and not m.isdigit():
+            return CompilationMode[m.upper()].name
+        return CompilationMode(int(m)).name
+    except (KeyError, ValueError, TypeError):
+        return str(m)
+
+
+def _default_cudagraph_mode(cc):
+    name = _compile_mode_name(cc)
+    if name is not None and name != "VLLM_COMPILE":
+        return "FULL_DECODE_ONLY", f"compilation mode {name}"
+    if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
+        return "FULL_DECODE_ONLY", "TORCH_COMPILE_DISABLE=1"
+    return DEFAULT_CUDAGRAPH_MODE, None
+
+
+def _with_default_cudagraph(cc, default=DEFAULT_CUDAGRAPH_MODE):
     if cc is None:
         from vllm.config import CompilationConfig, CUDAGraphMode
-        return CompilationConfig(cudagraph_mode=CUDAGraphMode[DEFAULT_CUDAGRAPH_MODE])
+        return CompilationConfig(cudagraph_mode=CUDAGraphMode[default])
     if isinstance(cc, dict):
         return (cc if cc.get("cudagraph_mode") is not None
-                else {**cc, "cudagraph_mode": DEFAULT_CUDAGRAPH_MODE})
+                else {**cc, "cudagraph_mode": default})
     if getattr(cc, "cudagraph_mode", "missing") is None:
         import copy
         from vllm.config import CUDAGraphMode
         new = copy.deepcopy(cc)
-        new.cudagraph_mode = CUDAGraphMode[DEFAULT_CUDAGRAPH_MODE]
+        new.cudagraph_mode = CUDAGraphMode[default]
         return new
     return cc
 
@@ -1047,11 +1071,12 @@ def _disable_dynamo_for_eager_hooks() -> None:
 _MIA_PKG_DIR = str(Path(__file__).resolve().parent)
 
 
-def _capture_mode_line(mode: CaptureMode, engine_args, cg_explicit: bool = False) -> str:
+def _capture_mode_line(mode: CaptureMode, engine_args, cg_explicit: bool = False,
+                       cg_why=None) -> str:
     if mode.graph and not mode.engine_eager:
         cg = str(_cc_mode_name(getattr(engine_args, "compilation_config", None))).upper()
         who = "chosen explicitly" if cg_explicit else "chosen by default"
-        what = (f"{cg} CUDA graph ({who})" if cg in ("FULL", DEFAULT_CUDAGRAPH_MODE)
+        what = (f"{cg} CUDA graph ({who})" if cg in _GRAPH_MODES
                 else f"CUDA graph (cudagraph_mode={cg})")
     elif mode.graph:
         what = "graph capture op on an eager engine"
@@ -1065,6 +1090,8 @@ def _capture_mode_line(mode: CaptureMode, engine_args, cg_explicit: bool = False
         why = mode.reason
     if mode.graph and not mode.engine_eager:
         why = "graph mode " + why
+    if cg_why:
+        why += f"; FULL_DECODE_ONLY because {cg_why} has no piecewise CUDA graphs"
     if mode.prefix_caching_off:
         why += "; prefix caching off for QK capture (default)"
     return f"[mia] capture mode: {what} -- {why} mia={_MIA_PKG_DIR}"
@@ -1097,13 +1124,16 @@ def _patched_create_engine_config(self, *args, **kwargs):
     set_graph_mode(graph_mode)
     if mode.engine_eager:
         self.enforce_eager = True
-    cg_explicit = False
+    cg_explicit, cg_why = False, None
     if graph_mode:
         stamp_compile_cache_key(self, _wkind)
         if not mode.engine_eager:
             cc = getattr(self, "compilation_config", None)
             cg_explicit = _cc_mode_name(cc) is not None
-            self.compilation_config = _with_default_cudagraph(cc)
+            default, cg_why = _default_cudagraph_mode(cc)
+            if cg_explicit:
+                cg_why = None
+            self.compilation_config = _with_default_cudagraph(cc, default)
         if mode.prefix_caching_off:
             self.enable_prefix_caching = False
     else:
@@ -1112,7 +1142,10 @@ def _patched_create_engine_config(self, *args, **kwargs):
     if dp_size > 1:
         from mia.graph.delivery_selector import DP_SIZE_ENV
         _mia_setenv(DP_SIZE_ENV, str(dp_size))
-    print(_capture_mode_line(mode, self, cg_explicit), flush=True)
+    print(_capture_mode_line(mode, self, cg_explicit, cg_why), flush=True)
+    # vLLM may resolve the mode in place on this object; keep what MIA handed it.
+    cg_asked = (str(_cc_mode_name(self.compilation_config)).upper()
+                if graph_mode and not mode.engine_eager else None)
     if (graph_mode and not mode.engine_eager
             and str(_cc_mode_name(self.compilation_config)).upper() == "FULL"):
         print(_FULL_MODE_WARNING, flush=True)
@@ -1153,7 +1186,11 @@ def _patched_create_engine_config(self, *args, **kwargs):
     assert _original_create_engine_config is not None
     config = _original_create_engine_config(self, *args, **kwargs)
 
-    validate_graph_mode(_cudagraph_mode_name(config.compilation_config.cudagraph_mode))
+    resolved = _cudagraph_mode_name(config.compilation_config.cudagraph_mode)
+    validate_graph_mode(resolved)
+    if cg_asked is not None and cg_asked != str(resolved).upper():
+        print(f"[mia] cudagraph_mode resolved by vLLM: {str(resolved).upper()} (asked {cg_asked})",
+              flush=True)
     validate_v2_runner_selected(config)
     refuse_pipeline_parallel(
         getattr(getattr(config, "parallel_config", None), "pipeline_parallel_size", 1),

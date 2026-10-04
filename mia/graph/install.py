@@ -480,6 +480,10 @@ def _upload_width(model_runner, step: StepView, cap: int) -> int:
     try:
         sizes = getattr(model_runner, "cudagraph_batch_sizes", None)
         maxbs = max(sizes) if sizes else cap
+        cc = getattr(model_runner, "compilation_config", None)
+        cg = getattr(cc, "cudagraph_mode", None)
+        if cg is not None and getattr(cg, "name", "NONE") != "NONE":
+            maxbs = max(int(maxbs), int(getattr(cc, "max_cudagraph_capture_size", None) or cap))
     except Exception:  # noqa: BLE001
         maxbs = cap
     return max(1, min(int(cap), max(real_n, int(maxbs))))
