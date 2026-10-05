@@ -26,7 +26,7 @@ mode MIA chose: `[mia] capture mode: FULL_AND_PIECEWISE CUDA graph (chosen by de
 | either, with `save_to_disk=True, run_id=R` | `<hook_dir>/R/`; `analyze(run_id=R)`, or `mia.run_utils.load_and_merge_hs_cache` / `load_and_merge_qk_cache(hook_dir, R)` | offline: when `generate` returns; served: shortly after the response (`client.analyze()` waits for it) |
 | hidden-state files (CUDA graphs) | `mia.graph.aperture_gather.load_delivered(<capture dir>)` → `{request_id: {layer: Tensor}}` | lists only requests already delivered |
 
-- **`hook_dir`** defaults to `/dev/shm/mia` for `MiaClient`, `~/.cache/_v1_qk_peeks` for `MiaLLM`.
+- **`hook_dir`** defaults to `/dev/shm/mia` for `MiaClient`, `~/.cache/mia` for `MiaLLM`.
   `/dev/shm/mia` and `/tmp/mia_profile` are shared by every user of a node: pass your own
   `hook_dir` (and `MIA_PROFILE_DIR`) there.
 - **Capture dir** is `$MIA_APERTURE_DIR`, default `./hs_aperture_dump` (or `./qk_aperture_dump`)
@@ -228,8 +228,9 @@ returns what was captured, unchanged.
 - Run from the repo root: configs resolve from anywhere, but a config's `vector_path` and the
   demos' `./cache/` are relative to the working directory (the server's, over `vllm serve`).
 - Graph mode is the default, offline and served; `enforce_eager=True` / `--enforce-eager` opts out.
-- Call `llm.llm_engine.reset_prefix_cache()` between prompts if you capture or steer the same
-  prefix twice.
+- Call `llm.llm_engine.reset_prefix_cache()` between prompts if you capture the same prefix twice.
+  Steering needs no reset: a steered request shares cached prefixes only with requests steered
+  the same way.
 - Profiler counters need `MIA_PROFILE=1`; without it they are no-ops.
 - Performance levers: `from mia.optimizations import describe; print(describe())`.
 

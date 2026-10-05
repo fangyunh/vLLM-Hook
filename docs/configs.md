@@ -66,7 +66,7 @@ your worker uses are read.
 | `hidden_states.layers` | list of ints; `[]` = every layer | **1-based** hidden-state indices: layer `i` is the output of decoder block `i - 1` (`[32]` is Llama-3.1-8B's last block) |
 | `hidden_states.mode` | `last_token` (default) · `all_tokens` | which token positions to capture |
 | `params.important_heads` | list of `[layer, head]` | the Q/K capture targets, both **0-based** |
-| `hookq.hookq_mode` | `all_tokens` (offline default) · `last_token` | which query positions to capture |
+| `hookq.hookq_mode` | `all_tokens` (default) · `last_token` | which query positions to capture |
 | `hookq.capture` | `qk` (default) · `score` | `score` captures the listed heads' attention scores instead of Q/K (eager only; TP = 1) |
 | `hookq.score_head` | int, default 0 | the head `score` capture uses when a layer lists none |
 | `steering.method` | `adjust_rs` (default) · `add_vector` | `add_vector` adds `coefficient × dir`; `adjust_rs` moves the projection on `dir` to `avg_proj` |

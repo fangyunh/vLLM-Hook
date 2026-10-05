@@ -56,8 +56,6 @@ def main():
             print(out[0].outputs[0].text)
             print(f"[evidence:{label}] {elapsed * 1000:.1f} ms for "
                   f"{len(out[0].outputs[0].token_ids)} tokens")
-            # The steer changes the prompt's KV too; do not let the next run reuse it.
-            llm.llm_engine.reset_prefix_cache()
 
 
 # --- Server mode ---------------------------------------------------------------------------
