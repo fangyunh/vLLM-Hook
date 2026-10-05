@@ -2062,9 +2062,14 @@ def _steer_cache_salt(extra) -> str | None:
     if not isinstance(cfg, dict) or not cfg.get("vector_path"):
         return None
     try:
-        key = [*_effective_key(cfg), cfg.get("optimal_layer", -1), *resolve_steer_modes(cfg)]
+        st = os.stat(cfg["vector_path"])
+        ident = [st.st_size, st.st_mtime_ns]      # a file rewritten under the same path is new
+    except (OSError, TypeError, ValueError):
+        ident = None
+    try:
+        key = [*_effective_key(cfg), cfg.get("optimal_layer", -1), *resolve_steer_modes(cfg), ident]
     except (TypeError, ValueError):
-        key = cfg                                 # a config the worker cannot parse: salt it whole
+        key = [cfg, ident]                        # a config the worker cannot parse: salt it whole
     digest = hashlib.sha256(_json.dumps(key, sort_keys=True, default=repr).encode()).hexdigest()
     return f"mia-steer-{digest[:32]}"
 
