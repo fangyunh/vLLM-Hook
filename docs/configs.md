@@ -132,6 +132,9 @@ out_steered = llm.generate(text, SamplingParams(temperature=0.0, max_tokens=200,
 out_plain   = llm.generate(text, SamplingParams(temperature=0.0, max_tokens=200), use_hook=False)
 ```
 
+A steered request gets a prefix-cache salt from its steering, so it shares cached prefixes only
+with requests steered the same way.
+
 Format is an env var on the driver process, set **before** `MiaLLM(...)` is constructed (the
 worker subprocess inherits it at spawn):
 
