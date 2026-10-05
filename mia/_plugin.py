@@ -284,7 +284,7 @@ def _sample_metas(mark: dict) -> list:
 
 def _spawn_hybrid_writer(engine, request_id, mark: dict, extra: dict, internal=None,
                          start=None) -> None:
-    # lazy: tests patch delivery_route.spawn_writer
+    # lazy: spawn_writer looked up at call time so it can be patched
     from mia.graph.delivery_route import spawn_writer
     spawn_writer(engine, ext=str(request_id), n=mark["n"], layers=mark["layers"],
                  metas=_sample_metas(mark),
@@ -828,7 +828,7 @@ def _hs_layers_per_rank(config, n_layers: int) -> int:
 
 
 def _derive_safe_max_batched_tokens(config, worker_kinds):
-    # lazy: resolved at call time (tests patch vllm.platforms.current_platform)
+    # lazy: current_platform looked up at call time so it can be patched
     from vllm.platforms import current_platform
     dims = _model_dims(config)
     n_layers = dims["layers"]
@@ -2147,7 +2147,7 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
     info = _offline_delivery_info(llm)
     if not info.get("roots"):
         return set()
-    # lazy: tests patch these readers; graph install code stays out of import mia._plugin
+    # lazy: graph install code stays out of import mia._plugin; readers patchable at call time
     from mia.graph.aperture_gather import GatherError, load_delivered, wait_delivered
     from mia.graph.delivered_probes import hs_probes
     from mia.graph.install_hs import DEFAULT_HOOKS_ON, DEFAULT_HS_MODE
@@ -2206,7 +2206,7 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
 
 def _attach_delivered(obj, info: dict, key: str, meta: dict, layers, run_ids,
                       state=None) -> None:
-    # lazy: tests patch delivered_probes.padded_offline_probes
+    # lazy: padded_offline_probes looked up at call time so it can be patched
     from mia.graph.delivered_probes import (attach_lazy, first_pass_probes, offline_probes,
                                             padded_offline_probes, padded_reader)
 
@@ -2287,7 +2287,7 @@ def _engine_dead(engine) -> bool:
 
 
 def _backlog(state: dict):
-    # lazy: tests patch aperture_gather.delivery_backlog
+    # lazy: delivery_backlog looked up at call time so it can be patched
     from mia.graph.aperture_gather import delivery_backlog
     keys = state["keys"]
     items = list(keys.items())                   # lazy reads pop keys from other threads

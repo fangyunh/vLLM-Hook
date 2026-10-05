@@ -329,7 +329,7 @@ class MiaClient:
 
     def _read_delivered(self, rid: str, kind: str, it: dict):
         """``(samples, keys, names, config)`` of one response item, from the server's route."""
-        # lazy: optional httpx/openai; mia.graph out of import mia; tests patch DELIVERY_HARD_CAP_S
+        # lazy: optional httpx/openai; mia.graph out of import mia; patchable DELIVERY_HARD_CAP_S
         import httpx
         import openai
         from mia.graph.aperture_gather import DELIVERY_HARD_CAP_S
@@ -357,7 +357,7 @@ class MiaClient:
 
     def _analyze_delivered_run(self, analyzer_spec, run_id, run_ids):
         """Disk analyze of hybrid save_to_disk runs, once each run holds its requests."""
-        # lazy: keep mia.graph out of import mia; tests patch delivered_probes.hs_probes
+        # lazy: keep mia.graph out of import mia; hs_probes patchable at call time
         from mia.graph import run_artifact
         from mia.graph.aperture_gather import delivery_timeout_s
         from mia.graph.delivered_probes import hs_probes, merge_disk

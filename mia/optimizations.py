@@ -8,60 +8,38 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 PUBLIC_LEVERS: Dict[str, Tuple[str, str, str]] = {
     "batched_egress": (
         "MIA_BATCHED_EGRESS", "on",
-        "Reduce-then-free egress: ONE index_select per layer instead of one clone per "
-        "(layer, request). -2.9..-3.9% decode ms/step in 3/3 regimes. Byte-identical.",
+        "Copy captured rows out with one gather per layer, not one copy per request. Default on.",
     ),
     "steer_fused": (
         "MIA_STEER_FUSED", "on",
-        "Fuse the buffer-mode steer op into one Triton kernel. Idle decode tax 0.56 -> 0.10 "
-        "ms/step (~5.4x). Falls back to the aten reference on any error. NOT byte-identical: "
-        "the fused projection reduction moves steered next-token logprobs by up to ~2.3e-02 vs "
-        "the aten path (~3% of the steering effect). '=0' reproduces the eager forward-hook "
-        "steer bit-exactly; use it when steering must be bit-reproducible.",
+        "Run the steering op as one fused kernel; 0 gives bit-reproducible steering. Default on.",
     ),
     "compact_kall": (
         "MIA_QK_COMPACT_KALL", "auto",
-        "QK only. Ship k_full + prefix_ends (O(seq)) instead of the padded O(seq^2) k_all; "
-        "the driver rebuilds it. ~130x worker retrieval on trajectories. Byte-identical. "
-        "'auto' = compact only when a request accumulated >=2 growing-prefix rows.",
+        "Q/K only: send each request's keys once instead of padded per-row copies. Default auto.",
     ),
     "writer_process": (
         "MIA_WRITER_PROCESS", "on",
-        "Disk path only. Serialize + write in a child process, off the engine GIL. Moved the "
-        "disk SLO knee (QK 12->16, HS 12->20). Byte-identical.",
+        "Disk path only: serialize and write artifacts in a child process. Default on.",
     ),
     "storage_router": (
         "MIA_STORAGE_ROUTER", "on",
-        "Serve only -- strictly inert offline (LLM.generate never calls it). Predicts a "
-        "request's artifact size and picks RPC vs disk, reproducing the optimum HS-last->RPC / "
-        "QK+HS-all->disk. Fires ONLY when the caller set no save_to_disk: an explicit value is a "
-        "requirement (True = 'I need the artifact FILE') and is never overridden.",
+        "Server only: a request with no save_to_disk goes to RPC or disk by its size. Default on.",
     ),
     "artifact_dtype": (
         "MIA_ARTIFACT_DTYPE", "native",
-        "Quantize saved artifacts: int2|int4|int8|fp8_e4m3|fp8_e5m2|bf16|fp16|fp32. "
-        "ORTHOGONAL capability, OFF by default because it is LOSSY -- the only lever here "
-        "that does not preserve values. 'native'/false = no quantization.",
+        "Quantize saved artifacts (int2, int4, int8, fp8_e4m3, fp8_e5m2, bf16, fp16, fp32); "
+        "lossy. Default native (no quantization).",
     ),
     "aperture_mmap": (
         "MIA_APERTURE_MMAP", "off",
-        "Capture-aperture durable sink. 'off' (default) writes each layer's raw file "
-        "with plain open(ab)+write(), which RELEASES the GIL; 'on' memcpys into a pre-sized "
-        "MAP_SHARED mapping, which holds it for the whole copy on the drain consumer thread. Same "
-        "bytes either way -- byte-identical, a scheduling choice only. Off recovered ~98% of the "
-        "phase=both serve gap: SLO knee 4->8, saturation 16->32, replicated K=3 across three nodes. "
-        "Turn it on only for a genuinely networked-GPFS run dir, where the per-step open(ab) cost "
-        "the mmap path was built to remove outweighs the GIL it holds. LEGACY WRITE PATH ONLY: "
-        "accepted only with MIA_APERTURE_WRITE_MODE=legacy and refused otherwise, because the "
-        "default write path keeps every raw file open for the run (no per-step open at all).",
+        "Write capture files through a memory map; only with MIA_APERTURE_WRITE_MODE=legacy. "
+        "Default off.",
     ),
     "aperture_max_batched_tokens": (
         "MIA_APERTURE_MAX_BATCHED_TOKENS", "off",
-        "Graph mode only. Auto-derive (or pin) max_num_batched_tokens so heavy full-graph capture's "
-        "per-step transient cannot CUDA-OOM at high batch. MIN-ONLY -- it only ever LOWERS the "
-        "budget, so it is byte-identical when the derived cap >= what vLLM would use. 'auto' derives "
-        "from model dims + GPU + aperture; an int pins the cap (still min'd); off/unset leaves the budget "
-        "untouched. Opt-in (default off).",
+        "Graph mode: lower max_num_batched_tokens (auto, or an int) so a capture step fits in "
+        "GPU memory; never raises it. Default off.",
     ),
 }
 

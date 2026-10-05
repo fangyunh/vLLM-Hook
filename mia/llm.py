@@ -401,7 +401,7 @@ class MiaLLM:
                                          run_id=effective_run_id, run_ids=run_ids)
 
     def close(self):
-        """Release resources owned by this wrapper."""
+        """No-op; kept for API compatibility."""
 
     def __del__(self):
         try:
