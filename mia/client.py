@@ -438,28 +438,41 @@ class MiaClient:
 
         self.layer_to_heads: Dict[int, list] = {}
         self._output_layers = None
+        # A steering or highlighter config asks for no capture.
+        self._captures = not ("steering" in cfg or "highlighter" in cfg)
 
         if "params" in cfg and "important_heads" in cfg["params"]:
             for layer_idx, head_idx in cfg["params"]["important_heads"]:
                 self.layer_to_heads.setdefault(layer_idx, []).append(head_idx)
 
-        self._hookq_mode = cfg.get("hookq", {}).get("hookq_mode", "last_token")
+        # Same defaults as MiaLLM.load_config.
+        hookq = cfg.get("hookq", {})
+        self._wants_qk = bool(self.layer_to_heads) or "hookq" in cfg
+        self._hookq_mode = hookq.get("hookq_mode", "all_tokens")
+        self._qk_capture = hookq.get("capture", "qk")
+        self._score_head = int(hookq.get("score_head", 0))
+        self._hs_mode = "last_token"
 
         if "hidden_states" in cfg:
             layers = cfg["hidden_states"].get("layers", [])
             self._output_layers = layers if layers else True
+            self._hs_mode = cfg["hidden_states"].get("mode", "last_token")
 
     def _build_extra_body(self) -> Dict:
-        if self._output_layers is not None:
-            layers = self._output_layers
-            xargs = {"output_hidden_states": json.dumps(layers) if isinstance(layers, list) else layers}
-        elif self.layer_to_heads:
+        if not self._captures:
+            xargs = {}
+        elif self._output_layers is not None or not self._wants_qk:
+            layers = self._output_layers if self._output_layers is not None else True
+            xargs = {"output_hidden_states": json.dumps(layers) if isinstance(layers, list) else layers,
+                     "hs_mode": self._hs_mode}
+        else:
             xargs = {
-                "output_qk": json.dumps({str(k): v for k, v in self.layer_to_heads.items()}),
+                "output_qk": (json.dumps({str(k): v for k, v in self.layer_to_heads.items()})
+                              if self.layer_to_heads else True),
                 "hookq_mode": self._hookq_mode,
             }
-        else:
-            xargs = {"output_hidden_states": True}
+            if self._qk_capture == "score":
+                xargs.update(qk_capture="score", score_head=self._score_head)
         return {"vllm_xargs": xargs}
 
     def _deserialize_probes(self, raw: dict) -> dict:
