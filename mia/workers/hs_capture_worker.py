@@ -2,7 +2,6 @@
 import contextlib
 import os
 import pickle
-from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -129,21 +128,6 @@ class HSCaptureWorker:
             return
 
         self.hs_mode = "last_token"
-
-        self._shm = None
-        if os.environ.get("MIA_USE_SHM", "0") == "1":
-            try:
-                shm_name = os.environ["MIA_SHM_NAME"]
-                self._shm = SharedMemory(create=False, name=shm_name)
-                self._shm_hidden_size = int(os.environ["MIA_SHM_HIDDEN_SIZE"])
-                self._shm_num_layers = int(os.environ["MIA_SHM_NUM_LAYERS"])
-                self._shm_max_batch = int(os.environ["MIA_SHM_MAX_BATCH"])
-                self._shm_ready_flag = os.environ["MIA_SHM_READY_FLAG"]
-                layer_order_str = os.environ.get("MIA_SHM_LAYER_ORDER", "")
-                self._shm_layer_order = [int(x) for x in layer_order_str.split(";") if x]
-            except Exception as e:
-                print(f"SHM attach failed: {e} — falling back to disk path")
-                self._shm = None
 
         # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.tp_shard import refuse_pipeline_parallel, resolve_tp_coords

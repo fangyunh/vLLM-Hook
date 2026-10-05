@@ -7,7 +7,6 @@ import torch
 from safetensors import safe_open
 
 from mia.run_utils import load_and_merge_hs_cache, unpack_hidden_states
-from mia.shm_utils import load_from_shm
 
 
 class ScienceHallucinationAnalyzer:
@@ -53,11 +52,8 @@ class ScienceHallucinationAnalyzer:
 
     def analyze(self, analyzer_spec: Optional[Dict] = None, run_id: Optional[str] = None, probes: Optional[Dict] = None) -> Dict:
         """``{"predictions": [...]}`` from classifier ``clf_path``; ``model_id`` gives the norm."""
-        peak_gpu_mb = None
         if probes is not None:
             hs_cache = probes["hs_cache"]
-        elif os.environ.get("MIA_USE_SHM", "0") == "1":
-            hs_cache, peak_gpu_mb = load_from_shm(self.hook_dir, run_id)
         else:
             if run_id is None:
                 raise ValueError("ScienceHallucinationAnalyzer.analyze: pass either probes= or run_id=.")
@@ -92,7 +88,5 @@ class ScienceHallucinationAnalyzer:
         label_names = spec.get("label_names")
         if label_names is not None:
             out["prediction_labels"] = [label_names[int(p)] for p in preds]
-        if peak_gpu_mb is not None:
-            out["peak_gpu_mb"] = peak_gpu_mb
         return out
 

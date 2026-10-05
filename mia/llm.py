@@ -12,7 +12,6 @@ from mia.optimizations import apply_optimizations
 from mia.registry import PluginRegistry
 from mia.run_utils import dispatch_disk_analyze, qk_score_size_select
 from mia._profiler import PROF
-from mia.shm_utils import setup_shm, teardown_shm
 from mia.workers.steer_worker import resolve_steer_modes
 from mia.artifact_quant import dequantize_cache_inplace
 
@@ -116,10 +115,6 @@ class MiaLLM:
         self._steering_config: Optional[Dict] = None
         if config_file:
             self.load_config(config_file)
-
-        self._hook_shm = None
-        if os.environ.get("MIA_USE_SHM", "0") == "1":
-            self._hook_shm = setup_shm(config_file, worker_name)
 
         worker = None
         if worker_name:
@@ -396,8 +391,6 @@ class MiaLLM:
 
     def close(self):
         """Release resources owned by this wrapper."""
-        teardown_shm(getattr(self, "_hook_shm", None))
-        self._hook_shm = None
 
     def __del__(self):
         try:

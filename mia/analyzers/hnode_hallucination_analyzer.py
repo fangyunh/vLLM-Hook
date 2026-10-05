@@ -1,13 +1,11 @@
 """Hallucination-detection analyzer (H-Node probe)."""
 from __future__ import annotations
 
-import os
 from typing import Dict, List, Optional
 
 import torch
 
 from mia.run_utils import load_and_merge_hs_cache, unpack_hidden_states
-from mia.shm_utils import load_from_shm
 from mia.utils.hnode.score import HNodeProbe
 
 
@@ -42,11 +40,8 @@ class HNodeHallucinationAnalyzer:
 
         probe = self._ensure_probe(probe_path)
 
-        peak_gpu_mb = None
         if probes is not None:
             hs_cache = probes["hs_cache"]
-        elif os.environ.get("MIA_USE_SHM", "0") == "1":
-            hs_cache, peak_gpu_mb = load_from_shm(self.hook_dir, run_id)
         else:
             if run_id is None:
                 raise ValueError(
@@ -87,7 +82,5 @@ class HNodeHallucinationAnalyzer:
             "threshold": threshold,
             "n_h_nodes": probe.artifact.n_h_nodes,
         }
-        if peak_gpu_mb is not None:
-            out["peak_gpu_mb"] = peak_gpu_mb
         return out
 
