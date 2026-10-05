@@ -46,9 +46,9 @@ pytest tests/use_cases -m gpu
 
 - They boot one engine at a time (each test shuts its engine down) on small models: opt-125m,
   gpt2, Qwen2-1.5B, Phi-3-mini and Mistral-7B (gated: `hf auth login`), downloaded on first use.
-- Keep them in their own pytest run, apart from the gate: on a GPU in exclusive-process mode
-  (common on clusters) a second process cannot open the device while another holds it, and the
-  engine fails with `CUDA-capable device(s) is/are busy or unavailable`.
+- `pytest tests -q` runs the gate and these together. On a GPU in exclusive-process mode (common
+  on clusters) no other process may hold the device, or the engine fails with
+  `CUDA-capable device(s) is/are busy or unavailable`.
 - They use `gpu_memory_utilization` 0.2–0.5 of the card, and write `hs_aperture_dump/` /
   `qk_aperture_dump/` in the working directory.
 - Models without a shipped config get a random test config in pytest's temporary directory.
