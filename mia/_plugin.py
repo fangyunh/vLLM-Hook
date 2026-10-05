@@ -223,8 +223,7 @@ _SAMPLE_CACHED_ATTR = "_mia_n_cached"
 
 
 def _patch_sample_cached() -> None:
-    """Record each sample's prefix-cache count on its output; vLLM keeps one per parent request
-    (the last sample to finish), and siblings hit each other's prompt blocks."""
+    """Record each n>1 sample's own prefix-cache count on its output (vLLM keeps one per parent)."""
     orig = op.RequestState._new_completion_output
     if getattr(orig, "_mia", False):
         return
@@ -1681,8 +1680,7 @@ def _engine_graph(engine) -> bool:
 
 
 def _engine_worker_kind(engine) -> str:
-    """The worker kind ``engine`` was built with: its cache stamp, else its MIA class, else
-    ``_worker_kind``."""
+    """Worker kind ``engine`` was built with: cache stamp, else MIA class, else ``_worker_kind``."""
     vc = getattr(engine, "vllm_config", None)
     ac = getattr(vc, "additional_config", None)
     stamp = ac.get(_COMPILE_CACHE_STAMP_KEY) if isinstance(ac, dict) else None

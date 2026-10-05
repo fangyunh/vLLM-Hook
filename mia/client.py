@@ -25,6 +25,8 @@ _UNSET = object()
 
 
 class MiaClient:
+    """OpenAI-compatible client for a MIA ``vllm serve``: capture/steer requests and analysis."""
+
     def __init__(
         self,
         base_url: str,
@@ -34,6 +36,16 @@ class MiaClient:
         hook_dir: str = None,
         tokenizer_for: Optional[str] = None,
     ):
+        """Connect to a server.
+
+        Args:
+            base_url: the server's OpenAI base URL, e.g. ``http://localhost:8000/v1``.
+            analyzer_name: a registered analyzer for ``analyze()``.
+            config_file: JSON with the capture settings each request sends.
+            api_key: the server's API key.
+            hook_dir: where the server writes ``save_to_disk`` runs (default ``/dev/shm/mia``).
+            tokenizer_for: model id whose tokenizer ``.tokenizer`` loads.
+        """
         # lazy: import cycle (mia/__init__ imports mia.client); optional dependency (openai)
         from mia import register_plugins
         register_plugins()
@@ -63,9 +75,7 @@ class MiaClient:
         self._run_nonces: Dict[str, Dict[str, str]] = {}
 
 
-    #: The only `vllm_xargs` keys the plugin JSON-decodes back into Python objects
-    #: (`_plugin.py`). A dict or list under any other key would arrive as a string and be
-    #: read as one, so this client refuses to send one rather than let it pass silently.
+    #: The only vllm_xargs keys the plugin JSON-decodes; a dict/list under any other is refused.
     _JSON_DECODED_XARGS = ("output_qk", "output_hidden_states", "steer")
 
     def _build_xargs(
@@ -105,12 +115,7 @@ class MiaClient:
 
     @staticmethod
     def _body(xargs: Dict, extra_body: Optional[Dict]) -> Optional[Dict]:
-        """Merge MIA's `vllm_xargs` with a caller's own extra_body, without either losing.
-
-        A caller needs this for vLLM's own request extensions -- `return_token_ids` is the
-        one that matters here, since it is how a client learns the exact token ids a
-        request prompted on and generated.
-        """
+        """Merge MIA's `vllm_xargs` into the caller's extra_body (e.g. `return_token_ids`)."""
         body = dict(extra_body or {})
         caller_xargs = body.pop("vllm_xargs", None) or {}
         merged = {**caller_xargs, **xargs}
@@ -145,16 +150,18 @@ class MiaClient:
         extra_body: Optional[Dict] = None,
         **openai_kwargs,
     ):
-        """Send a chat completion with probe capture.
+        """Send a chat completion with capture; the server applies the chat template.
 
-        The server applies the model's chat template, so the token layout is the server's.
-        When an analyzer needs exact token spans, use :meth:`generate_tokens` instead.
-
-        ``extra_xargs`` carries per-request knobs the config file does not cover -- the
-        serve-path equivalent of ``SamplingParams.extra_args`` offline, e.g.
-        ``{"hooks_on": "both"}``. ``steer`` sends a steering config for this request alone.
-        ``capture=False`` is the equivalent of offline ``use_hook=False``: a plain request
-        that arms nothing.
+        Args:
+            messages, model: as for ``chat.completions.create``.
+            save_to_disk: write captured data to ``<hook_dir>/<run_id>/`` instead of ``probes``.
+            run_id: the run's name (default: a new uuid).
+            extra_xargs: per-request settings the config file lacks, e.g. ``{"hooks_on": "both"}``.
+            steer: a steering config for this request alone.
+            capture: False sends a plain request that arms nothing (offline ``use_hook=False``).
+            extra_body: the caller's own extra_body, merged with MIA's.
+        Returns:
+            The OpenAI response; its capture is ``response.probes``.
         """
         run_id = run_id or str(uuid.uuid4())
         body = self._body(
@@ -180,12 +187,10 @@ class MiaClient:
         extra_body: Optional[Dict] = None,
         **openai_kwargs,
     ):
-        """Capture against **exact token ids**, via the completions endpoint.
+        """Capture against exact token ids via the completions endpoint (no chat template).
 
-        No chat template is applied, so the tokens the model sees are the tokens passed in
-        -- which is what an analyzer scoring token spans requires. Accepts one sequence
-        (``[int, ...]``) or a batch (``[[int, ...], ...]``); a batch shares one ``run_id``,
-        the way a list passed to the offline ``generate`` does.
+        Takes one sequence (``[int, ...]``) or a batch (``[[int, ...], ...]``) sharing one
+        ``run_id``; other arguments as for :meth:`generate`.
         """
         return self._completions(prompt_token_ids, model, save_to_disk, run_id,
                                  extra_xargs, steer, capture, extra_body, **openai_kwargs)
@@ -202,10 +207,9 @@ class MiaClient:
         extra_body: Optional[Dict] = None,
         **openai_kwargs,
     ):
-        """Capture against raw text, via the completions endpoint -- no chat template.
+        """Capture against raw, already-templated text via the completions endpoint.
 
-        Use this for a prompt you have already templated yourself. Accepts one string or a
-        list of strings, and a list shares one ``run_id``.
+        Takes one string or a list sharing one ``run_id``; other arguments as for :meth:`generate`.
         """
         return self._completions(prompt, model, save_to_disk, run_id, extra_xargs, steer,
                                  capture, extra_body, **openai_kwargs)
@@ -226,10 +230,7 @@ class MiaClient:
 
     @property
     def tokenizer(self):
-        """The served model's tokenizer, for computing the spans an analyzer scores.
-
-        Loaded locally and lazily; the offline entry point exposes the engine's own.
-        """
+        """The served model's tokenizer (loaded locally on first use), for an analyzer's spans."""
         if self._tokenizer is None:
             if not self._tokenizer_for:
                 raise RuntimeError(
@@ -246,11 +247,7 @@ class MiaClient:
         run_ids: Optional[List[str]] = None,
         probes: Optional[Dict] = None,
     ) -> Optional[Dict]:
-        """Run the configured analyzer on the last generate() result.
-
-        ``probes`` analyzes a payload you already hold instead of the last response -- the
-        serve-path equivalent of passing ``probes=`` to the offline ``analyze``.
-        """
+        """Run the analyzer on the last response, on ``probes`` you hold, or on disk runs."""
         if probes is not None:
             with PROF.timed("analyzer.kernel"):
                 return self.analyzer.analyze(analyzer_spec, probes=probes)
@@ -331,7 +328,7 @@ class MiaClient:
 
     def _read_delivered(self, rid: str, kind: str, it: dict):
         """``(samples, keys, names, config)`` of one response item, from the server's route."""
-        # lazy: optional deps (httpx, openai); keep mia.graph out of import mia; tests patch it
+        # lazy: optional httpx/openai; mia.graph out of import mia; tests patch DELIVERY_HARD_CAP_S
         import httpx
         import openai
         from mia.graph.aperture_gather import DELIVERY_HARD_CAP_S

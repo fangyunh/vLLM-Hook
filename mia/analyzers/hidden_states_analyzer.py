@@ -9,10 +9,13 @@ from mia.shm_utils import load_from_shm
 
 
 class HiddenStatesAnalyzer:
+    """Captured hidden states per layer, optionally reduced per prompt."""
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
+        """``hook_dir`` holds the disk runs; ``layer_to_heads`` is unused."""
         self.hook_dir = hook_dir
 
     def analyze(self, analyzer_spec: Optional[Dict] = None, run_id: Optional[str] = None, probes: Optional[Dict] = None) -> Dict:
+        """``{"hidden_states": {layer: [...]}}``; spec ``reduce`` is none, mean or norm."""
         peak_gpu_mb = None
         if probes is not None:
             hs_cache = probes["hs_cache"]

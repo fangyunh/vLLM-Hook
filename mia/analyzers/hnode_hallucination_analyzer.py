@@ -12,7 +12,9 @@ from mia.utils.hnode.score import HNodeProbe
 
 
 class HNodeHallucinationAnalyzer:
+    """Hallucination verdicts from an H-Node probe applied to captured hidden states."""
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
+        """``hook_dir`` holds the disk runs; ``layer_to_heads`` is unused."""
         self.hook_dir = hook_dir
         self._probe = None
         self._probe_path: Optional[str] = None
@@ -29,6 +31,7 @@ class HNodeHallucinationAnalyzer:
         run_id: Optional[str] = None,
         probes: Optional[Dict] = None,
     ) -> Dict:
+        """Score each prompt with the probe at spec ``probe_path`` (default ``threshold`` 0.5)."""
         spec = analyzer_spec or {}
         probe_path = spec.get("probe_path")
         if not probe_path:

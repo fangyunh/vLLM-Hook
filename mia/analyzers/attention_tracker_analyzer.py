@@ -9,9 +9,11 @@ from mia.run_utils import load_and_merge_qk_cache, unpack_qk
 
 
 class AttntrackerAnalyzer:
+    """Attention Tracker: prompt-injection score from the chosen heads' focus on the instruction."""
     ACCEPTS = "score"
 
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
+        """``hook_dir`` holds disk runs; ``layer_to_heads`` maps a layer to the heads to score."""
         self.hook_dir = hook_dir
         self.layer_to_heads = layer_to_heads
 
@@ -21,6 +23,7 @@ class AttntrackerAnalyzer:
         run_id: Optional[str] = None,
         probes: Optional[Dict] = None,
     ) -> Optional[Dict]:
+        """``{"score": [...]}``, one per prompt; spec keys ``input_range`` and ``attn_func``."""
         with PROF.timed("analyzer.kernel"):
             attention_weights = self.compute_attention_from_qk(run_id, probes=probes)
             score = self.attn2score(attention_weights, analyzer_spec['input_range'], analyzer_spec['attn_func'])
@@ -31,6 +34,7 @@ class AttntrackerAnalyzer:
 
 
     def compute_attention_from_qk(self, run_id: str = None, probes: Optional[Dict] = None) -> Dict[str, Dict]:
+        """Per prompt, the configured heads' last-token attention per layer (from scores or Q/K)."""
         if probes is not None:
             config = probes["config"]
             qk_cache = probes["qk_cache"]

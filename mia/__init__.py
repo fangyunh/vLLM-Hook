@@ -14,6 +14,7 @@ from mia.analyzers.attnlink_analyzer import AttnLinkAnalyzer
 
 
 def register_plugins():
+    """Register MIA's workers and analyzers in ``PluginRegistry`` (vLLM plugin entry point)."""
     PluginRegistry.register_worker("capture_qk",       QKCaptureWorker)
     PluginRegistry.register_worker("steer",      SteerWorker)
     PluginRegistry.register_worker("capture_hs", HSCaptureWorker)

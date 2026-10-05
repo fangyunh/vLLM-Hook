@@ -8,9 +8,11 @@ from mia._profiler import PROF
 from mia.run_utils import load_and_merge_qk_cache
 
 class CorerAnalyzer:
+    """Rerank documents by query-to-document attention, calibrated by a no-document pass (CoRe)."""
     ACCEPTS = "qk"
 
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
+        """``hook_dir`` holds disk runs; ``layer_to_heads`` maps a layer to the heads to use."""
         self.hook_dir = hook_dir
         self.layer_to_heads = layer_to_heads
 
@@ -80,6 +82,7 @@ class CorerAnalyzer:
         query_end_tok_idx,
         past_prefill: Optional[Dict] = None
     ) -> List[torch.Tensor]:
+        """Per request, each document's token scores in run ``run_id``, plus the run's prefill Q."""
         cache = load_and_merge_qk_cache(self.hook_dir, run_id)
         config = cache["config"]
         if any("scores" in e for e in cache["qk_cache"].values()):
@@ -178,6 +181,7 @@ class CorerAnalyzer:
         return torch.cat([prefill['q'][i][start - lo:cut - lo], own], dim=0)
 
     def get_attn_all(self, key_states, query_states):
+        """Causal softmax attention of every query head over the keys (KV heads repeated, GQA)."""
         num_heads, q_len, head_dim = query_states.size()
         num_key_value_heads = key_states.size(0)
         num_key_value_groups = num_heads // num_key_value_heads
@@ -205,6 +209,7 @@ class CorerAnalyzer:
         return attn_weights
 
     def get_attn_head(self, all_layer, key_states, query_states):
+        """Causal softmax attention of the configured heads only, over the keys."""
         num_layers, num_heads, q_len, head_dim = query_states.size()
         num_key_value_heads = key_states.size(1)
         num_key_value_groups = num_heads // num_key_value_heads

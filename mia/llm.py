@@ -61,6 +61,8 @@ def _dequantized(p0):
 
 
 class MiaLLM:
+    """An in-process ``vllm.LLM`` that runs one MIA worker (capture or steering) and an analyzer."""
+
     def __init__(
         self,
         model: str,
@@ -73,6 +75,20 @@ class MiaLLM:
         enforce_eager: bool = False,
         **vllm_kwargs
     ):
+        """Build the engine.
+
+        Args:
+            model: model name or path, as for ``vllm.LLM``.
+            worker_name: "capture_hs", "capture_qk" or "steer"; None runs no MIA worker.
+            analyzer_name: a registered analyzer for ``analyze()``; None for none.
+            config_file: JSON with the worker's settings (heads, Q/K mode, steering, HS layers).
+            download_dir: model download dir; also the root of the default ``hook_dir``.
+            enable_hook: default for ``generate(use_hook=...)``.
+            hook_dir: dir for ``save_to_disk`` runs; default ``_v1_qk_peeks`` under download_dir,
+                else under ~/.cache.
+            enforce_eager: run eagerly instead of with CUDA graphs.
+            **vllm_kwargs: passed to ``vllm.LLM``.
+        """
         self.model_name = model
         self.worker_name = worker_name
         self.analyzer_name = analyzer_name
@@ -146,6 +162,7 @@ class MiaLLM:
 
 
     def load_config(self, config_file: str):
+        """Load worker settings (important heads, Q/K mode, steering, HS layers) from JSON."""
         with open(config_file, 'r') as f:
             config_data = json.load(f)
 
@@ -261,6 +278,18 @@ class MiaLLM:
         run_id: Optional[str] = None,
         **kwargs
     ):
+        """Generate as ``vllm.LLM.generate`` does, with the worker armed on every prompt.
+
+        Args:
+            prompts: one prompt or a list.
+            sampling_params: a ``SamplingParams`` or one per prompt (default: from ``**kwargs``).
+            use_hook: arm the worker for this call (default: ``enable_hook``).
+            save_to_disk: write captured data to ``<hook_dir>/<run_id>/`` instead of ``probes``.
+            run_id: the run's name (default: a new uuid).
+        Returns:
+            The ``RequestOutput`` list; ``out[i].probes`` holds prompt i's capture, and with
+            several prompts ``out[0].probes`` holds the whole batch.
+        """
         hook = use_hook if use_hook is not None else self.enable_hook
 
         if not isinstance(prompts, list):
@@ -348,7 +377,7 @@ class MiaLLM:
         run_id: Optional[str] = None,
         run_ids: Optional[List[str]] = None,
     ) -> Optional[Dict]:
-        """Run the configured analyzer."""
+        """Run the analyzer on ``probes``, else on disk run ``run_id`` (default: the last run)."""
         if self.analyzer is None:
             print("No analyzer configured")
             return None

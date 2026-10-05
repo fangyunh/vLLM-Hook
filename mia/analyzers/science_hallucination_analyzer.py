@@ -11,7 +11,9 @@ from mia.shm_utils import load_from_shm
 
 
 class ScienceHallucinationAnalyzer:
+    """Classify captured hidden states, after the final RMSNorm, with a trained classifier."""
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
+        """``hook_dir`` holds the disk runs; ``layer_to_heads`` is unused."""
         self.hook_dir = hook_dir
         self._clf = None
         self.default_clf_path: Optional[str] = None
@@ -50,6 +52,7 @@ class ScienceHallucinationAnalyzer:
         return (x * weight.to(torch.float32)).to(orig_dtype)
 
     def analyze(self, analyzer_spec: Optional[Dict] = None, run_id: Optional[str] = None, probes: Optional[Dict] = None) -> Dict:
+        """``{"predictions": [...]}`` from classifier ``clf_path``; ``model_id`` gives the norm."""
         peak_gpu_mb = None
         if probes is not None:
             hs_cache = probes["hs_cache"]

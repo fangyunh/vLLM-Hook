@@ -32,9 +32,11 @@ def select_columns(scores, temperature=1.0, top_p=0.8):
 
 
 class AttnLinkAnalyzer:
+    """Rank and select schema columns by one head's last-token attention (AttnLink-U)."""
     ACCEPTS = "qk"
 
     def __init__(self, hook_dir: str, layer_to_heads: Dict[int, list]):
+        """``layer_to_heads`` must name exactly one layer and one head."""
         self.hook_dir = hook_dir
         if len(layer_to_heads) != 1 or len(next(iter(layer_to_heads.values()))) != 1:
             raise ValueError("AttnLink requires exactly one configured layer/head pair.")
