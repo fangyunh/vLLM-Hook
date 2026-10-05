@@ -7,16 +7,15 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import sys
-
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+import urllib.error
+import urllib.request
 
 from vllm import SamplingParams
 
 from mia import MiaLLM
 from _paths import config_path
 
-MODEL = os.environ.get("MIA_DEMO_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"   # the probe is trained on this model's layer 14
 INFER_CFG = config_path("hnode_hallucination/Qwen2.5-1.5B-Instruct.infer.json")
 
 PROBE_BASE_URL = (
@@ -38,9 +37,6 @@ EXAMPLES = [
 
 def ensure_probe():
     """Download probe.npz + probe.json into ART_DIR if not already cached."""
-    import urllib.error
-    import urllib.request
-
     os.makedirs(ART_DIR, exist_ok=True)
     for name in ("probe.npz", "probe.json"):
         dest = os.path.join(ART_DIR, name)
@@ -59,6 +55,7 @@ def ensure_probe():
 
 
 def report(result):
+    """Print the verdict, probability and H-Node excess per prompt."""
     print(f"Best layer: {result['best_layer']}  |  threshold: {result['threshold']}")
     print("-" * 78)
     for prompt, p, exc, verdict in zip(
@@ -88,7 +85,7 @@ def main():
 #
 #   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
 #       vllm serve Qwen/Qwen2.5-1.5B-Instruct \
-#       --max-model-len 1024 --port 8770
+#       --max-model-len 1024 --port 8770 --gpu-memory-utilization 0.8
 #
 # then uncomment serve_main() and call it instead of main() at the bottom.
 #
@@ -113,5 +110,7 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
     # serve_main()  # server mode: see the block above

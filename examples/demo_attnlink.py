@@ -4,14 +4,12 @@ Runs offline with `MiaLLM`, prompting with exact token ids so the tokens the mod
 ones the spans were aligned to. The same demo over `vllm serve` is kept, commented out, at the end.
 """
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
-
-os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 from vllm import SamplingParams, TokensPrompt
 
@@ -21,9 +19,7 @@ from mia.analyzers.attnlink_analyzer import select_columns
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
 CONFIG = ROOT / "model_configs/attnlink/Qwen2.5-Coder-7B-Instruct.json"
-# BIRD development example 128; the example data in this block is CC BY-SA 4.0.
-# Source: https://bird-bench.github.io/ (Li et al., 2023), via Songjw133/AttnLink.
-# Code remains under the repository license. See docs/use_cases/attnlink.md.
+# BIRD dev example 128 (CC BY-SA 4.0, via Songjw133/AttnLink); see docs/use_cases/attnlink.md.
 INPUT_SEQ = """Task Overview:
 You are a data science expert. Your task is column-level schema linking. Given a natural language question and a database schema, identify the gold database tables and columns needed to write the SQL query for the question.
 
@@ -293,6 +289,7 @@ def prepare_prompt(tokenizer, input_seq: str) -> tuple:
 
 
 def column_ref(candidate: str) -> str:
+    """``column@table`` as a casefolded ``table.column``."""
     column, separator, table = candidate.rpartition("@")
     if not separator or not column or not table:
         raise ValueError(f"Invalid column@table identifier: {candidate!r}")
@@ -300,6 +297,7 @@ def column_ref(candidate: str) -> str:
 
 
 def gold_ref(value: str) -> str:
+    """A gold ``table.column`` with SQL quoting stripped, casefolded."""
     table, column = value.split(".", 1)
     return ".".join(part.strip().strip('`"[]').casefold() for part in (table, column))
 
@@ -323,6 +321,7 @@ def evaluate_ranking(candidates: list, ranking: list, positive_cols: list) -> tu
 
 
 def parse_args():
+    """The CLI arguments and a fresh output directory for this run."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=MODEL, help="Model ID or local path to the same model.")
     parser.add_argument("--out-dir", type=Path, default=None, help="New directory for this run.")
@@ -339,6 +338,7 @@ def parse_args():
 
 
 def report(args, out_dir, ids, spec, result, execution) -> None:
+    """Print the ranking and selection metrics, and write them to ``result.json``."""
     ap, gold = evaluate_ranking(spec["candidates"], result["ranking"], POSITIVE_COLS)
     selected = set(result["selected"])
     ranking, cumulative = [], 0.0
@@ -410,7 +410,7 @@ def main() -> None:
 #
 #   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=qk \
 #       vllm serve Qwen/Qwen2.5-Coder-7B-Instruct \
-#       --max-model-len 4096 --port 8770
+#       --max-model-len 4096 --port 8770 --gpu-memory-utilization 0.8
 #
 # then uncomment serve_main() and call it instead of main() at the bottom. The exact ids go
 # through /v1/completions, which applies no chat template; the guard below checks them against
@@ -449,5 +449,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     main()
     # serve_main()  # server mode: see the block above

@@ -1,7 +1,7 @@
-"""Resolve a model config or steering vector to an absolute path.
+"""Resolve a name under ``model_configs/`` or ``steering_vectors/`` to an absolute path.
 
-A demo asks for a name relative to ``model_configs/`` or ``steering_vectors/``, not a
-directory, so it runs the same from the repo root or from anywhere else.
+Configs resolve from anywhere. A config's ``vector_path`` and the demos' ``./cache`` are relative
+to the working directory, so run the demos (and ``vllm serve``) from the repo root.
 """
 from __future__ import annotations
 

@@ -6,9 +6,6 @@ import multiprocessing as mp
 import os
 import time
 
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
 import torch
 from vllm import SamplingParams
 
@@ -70,7 +67,7 @@ def main():
 #
 #   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
 #       vllm serve Qwen/Qwen2.5-3B-Instruct \
-#       --max-model-len 2048 --port 8770
+#       --max-model-len 2048 --port 8770 --gpu-memory-utilization 0.8
 #
 # then uncomment serve_main() and call it instead of main() at the bottom.
 #
@@ -113,5 +110,7 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
     # serve_main()  # server mode: see the block above

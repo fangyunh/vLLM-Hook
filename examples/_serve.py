@@ -1,11 +1,7 @@
-"""Shared plumbing for the demos' server mode.
+"""Server-mode helpers for the demos' commented `vllm serve` blocks and `demo_actsteer_serve.py`.
 
-The demos run offline; each keeps its `vllm serve` version as a commented block, and
-`demo_actsteer_serve.py` is server-only. Over `vllm serve` the worker that captures or steers is
-the server's own, selected at launch with ``MIA_WORKER``, so one server serves one worker kind.
-
-Server code calls :func:`require_server` first. If nothing is listening it prints the exact
-command for that demo and exits, rather than failing later with a connection error.
+One server serves one worker kind, chosen at launch with ``MIA_WORKER``. :func:`require_server`
+prints the exact `vllm serve` command and exits when nothing is listening.
 """
 from __future__ import annotations
 
@@ -19,6 +15,9 @@ from collections.abc import Sequence
 #: Worker kinds `MIA_WORKER` accepts (exact; MIA refuses anything else).
 HS, QK, STEER = "hidden_states", "qk", "steer"
 
+#: vLLM's GPU share on a capture server; the rest holds the capture aperture (4 GiB by default).
+CAPTURE_GPU_MEMORY_UTILIZATION = 0.8
+
 
 def base_url() -> str:
     """The server's OpenAI-compatible endpoint; override with ``MIA_DEMO_BASE_URL``."""
@@ -28,19 +27,15 @@ def base_url() -> str:
 def serve_command(model: str, worker: str, *, graph: bool = True,
                   max_model_len: int = 2048, tp: int = 1,
                   extra_args: Sequence[str] = ()) -> str:
-    """The `vllm serve` invocation a demo needs, ready to paste.
+    """The `vllm serve` command a demo needs, ready to paste.
 
-    MIA runs the server under CUDA graphs by default; `graph=False` adds `--enforce-eager`.
-    `tp` > 1 adds `--tensor-parallel-size`. Capture shards across the ranks -- hidden states
-    by layer, Q/K by head -- and each rank writes its own `tp_rank_<r>/`. Note that
-    MIA_APERTURE_GPU_BYTES is a PER-RANK budget, so TP x N claims N times that much GPU.
-
-    `extra_args` are flags the demo cannot work without, so that the command it prints is
-    one that actually runs it -- `demo_corer.py` needs `--no-enable-prefix-caching`, for
-    instance, because it captures the same prefix twice.
+    `graph=False` adds `--enforce-eager`; `tp` > 1 adds `--tensor-parallel-size`; `extra_args`
+    are flags the demo needs (e.g. `--no-enable-prefix-caching`).
     """
     env = ["VLLM_WORKER_MULTIPROC_METHOD=spawn", f"MIA_WORKER={worker}"]
     args = [f"--max-model-len {max_model_len}", f"--port {_port()}"]
+    if worker in (HS, QK):
+        args.append(f"--gpu-memory-utilization {CAPTURE_GPU_MEMORY_UTILIZATION}")
     if int(tp) > 1:
         args.append(f"--tensor-parallel-size {int(tp)}")
     args.extend(extra_args)
@@ -81,8 +76,8 @@ def print_evidence(elapsed_s: float, n_tokens: int, label: str = "") -> None:
     per_tok = (elapsed_s * 1000 / n_tokens) if n_tokens else float("nan")
     print(f"{tag} {elapsed_s * 1000:.1f} ms for {n_tokens} tokens "
           f"({per_tok:.2f} ms/token, measured at the client)")
-    print(f"{tag} hook and aperture counters are server-side; start the server with "
-          f"MIA_PROFILE=1 and read them from its log.")
+    print(f"{tag} capture counters are server-side: start the server with MIA_PROFILE=1; at exit "
+          f"it writes them to $MIA_PROFILE_DIR (default /tmp/mia_profile).")
 
 
 def chat(prompt: str) -> list:
@@ -91,19 +86,22 @@ def chat(prompt: str) -> list:
 
 
 def completion_text(response) -> str:
+    """The text of a chat completion's first choice."""
     return response.choices[0].message.content or ""
 
 
 def completion_tokens(response) -> int:
+    """How many tokens the server generated for this response (0 when not reported)."""
     usage = getattr(response, "usage", None)
     return int(getattr(usage, "completion_tokens", 0) or 0)
 
 
 def _port() -> str:
+    """The port in ``base_url()``, else the default 8770."""
     url = base_url()
     tail = url.rstrip("/").rsplit(":", 1)[-1]
     return tail.split("/")[0] if tail[:1].isdigit() else "8770"
 
 
-__all__ = ["HS", "QK", "STEER", "base_url", "serve_command", "require_server",
-           "print_evidence", "chat", "completion_text", "completion_tokens"]
+__all__ = ["HS", "QK", "STEER", "CAPTURE_GPU_MEMORY_UTILIZATION", "base_url", "serve_command",
+           "require_server", "print_evidence", "chat", "completion_text", "completion_tokens"]

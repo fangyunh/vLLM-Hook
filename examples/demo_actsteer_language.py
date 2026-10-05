@@ -9,15 +9,12 @@ import multiprocessing as mp
 import os
 import time
 
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
 from vllm import SamplingParams
 
 from mia import MiaLLM
 from _paths import config_path
 
-MODEL = os.environ.get("MIA_DEMO_MODEL", "microsoft/Phi-3-mini-4k-instruct")
+MODEL = "microsoft/Phi-3-mini-4k-instruct"   # the language vectors are Phi-3's
 
 LANGUAGE_CONFIGS = {
     "Chinese": "activation_steer/Phi-3-mini-4k-instruct-chinese.json",
@@ -36,6 +33,7 @@ PROMPTS = [
 
 
 def steer_by_language():
+    """Each language's steering section, from its config file."""
     out = {}
     for language, rel in LANGUAGE_CONFIGS.items():
         with open(config_path(rel)) as f:
@@ -112,5 +110,7 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
     # serve_main()  # server mode: see the block above

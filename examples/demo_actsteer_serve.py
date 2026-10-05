@@ -1,5 +1,6 @@
 """Activation steering over ``vllm serve``: per-request steer configs via vllm_xargs."""
 import json
+
 import openai
 
 from _paths import config_path, vector_path

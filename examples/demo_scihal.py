@@ -6,12 +6,10 @@ detokenized text (detokenize-then-retokenize is not an identity). The same demo 
 `vllm serve` is kept, commented out, at the end.
 """
 import json
+import multiprocessing as mp
 import os
 import sys
-import multiprocessing as mp
-
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+from urllib.request import urlretrieve
 
 from vllm import SamplingParams, TokensPrompt
 
@@ -52,7 +50,6 @@ def load_scihal_split(cache_dir: str, filename: str) -> list:
     """Download SciHal-Challenge dataset if no cache in local."""
     local = os.path.join(cache_dir, filename)
     if not os.path.exists(local):
-        from urllib.request import urlretrieve
         print(f"Downloading SciHal to {local}")
         urlretrieve(SciHal_url + filename, local)
     with open(local) as f:
@@ -92,8 +89,6 @@ def build_prompt_ids(tokenizer, few_shot_middle: str, claim: str, reference: str
     return tokenizer(message, add_special_tokens=True).input_ids
 
 
-
-
 def load_prompts(tokenizer):
     """The test cases and their prompt ids."""
     train = load_scihal_split(CACHE_DIR, "subtask1_train_batch3.json")
@@ -111,23 +106,25 @@ def classifier_spec():
     if not os.path.isfile(clf_path):
         print(
             f"[demo_scihal] SciHal classifier not found: {clf_path}\n"
-            f"  This joblib file is produced by the SciHal-Challenge repo linked "
-            f"above (https://github.com/InfintyLab/SciHal-Challenge) -- train/export "
-            f"a classifier there, then point this demo at it by either:\n"
+            f"  Train one on the SciHal-Challenge data "
+            f"(https://github.com/InfintyLab/SciHal-Challenge; recipe in examples/README.md), "
+            f"then point this demo at it with either:\n"
             f"    export MIA_SCIHAL_CLF=/path/to/your_classifier.joblib\n"
-            f"  or updating \"scihal.clf_path\" in {CONFIG}."
+            f"  or \"scihal.clf_path\" in {CONFIG}."
         )
         sys.exit(1)
     return {"label_names": LABEL_NAMES, "clf_path": clf_path, "model_id": MODEL}
 
 
 def print_labels(test_cases, stats):
+    """Print the classifier's label for each test case."""
     print("=" * 50)
     for case, label in zip(test_cases, stats["prediction_labels"]):
         print(f"classifier label: {label}")
 
 
 def main():
+    spec = classifier_spec()
     llm = MiaLLM(model=MODEL, worker_name="capture_hs", analyzer_name="science_hallucination",
                  config_file=CONFIG, hook_dir=HOOK_DIR,
                  gpu_memory_utilization=0.7, max_model_len=8192)
@@ -144,7 +141,7 @@ def main():
     llm.generate(capture_prompts, SamplingParams(max_tokens=1, temperature=0.0),
                  save_to_disk=True)
 
-    print_labels(test_cases, llm.analyze(analyzer_spec=classifier_spec()))
+    print_labels(test_cases, llm.analyze(analyzer_spec=spec))
 
 
 # --- Server mode ---------------------------------------------------------------------------
@@ -152,7 +149,7 @@ def main():
 #
 #   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
 #       vllm serve meta-llama/Llama-3.1-8B-Instruct \
-#       --max-model-len 8192 --port 8770
+#       --max-model-len 8192 --port 8770 --gpu-memory-utilization 0.8
 #
 # then uncomment serve_main() and call it instead of main() at the bottom. Both passes go
 # through /v1/completions with exact token ids; `return_token_ids` is how the server reports
@@ -162,6 +159,7 @@ def main():
 #     from mia import MiaClient
 #     from _serve import HS, require_server
 #
+#     spec = classifier_spec()
 #     url = require_server(MODEL, HS, max_model_len=8192)
 #     client = MiaClient(base_url=url, analyzer_name="science_hallucination",
 #                        config_file=CONFIG, hook_dir=HOOK_DIR, tokenizer_for=MODEL)
@@ -185,10 +183,12 @@ def main():
 #     client.generate_tokens(capture_prompts, model=MODEL, max_tokens=1, temperature=0.0,
 #                            save_to_disk=True)
 #
-#     print_labels(test_cases, client.analyze(analyzer_spec=classifier_spec()))
+#     print_labels(test_cases, client.analyze(analyzer_spec=spec))
 # --- end of server mode ---
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
     # serve_main()  # server mode: see the block above

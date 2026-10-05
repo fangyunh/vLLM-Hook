@@ -8,14 +8,12 @@ import sys
 import time
 from pathlib import Path
 
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from vllm import SamplingParams
 
-from vllm import SamplingParams                                       # noqa: E402
+from mia import MiaLLM
 
-from mia import MiaLLM                                                # noqa: E402
-from _paths import config_path                                        # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # examples/: _paths and _serve
+from _paths import config_path  # noqa: E402
 
 MODEL = os.environ.get("MIA_DEMO_MODEL", "ibm-granite/granite-3.1-8b-instruct")
 CONFIG = os.environ.get(
@@ -55,7 +53,7 @@ def main():
 #
 #   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
 #       vllm serve ibm-granite/granite-3.1-8b-instruct \
-#       --max-model-len 2048 --port 8770
+#       --max-model-len 2048 --port 8770 --gpu-memory-utilization 0.8
 #
 # then uncomment serve_main() and call it instead of main() at the bottom.
 #
@@ -88,5 +86,7 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
     # serve_main()  # server mode: see the block above

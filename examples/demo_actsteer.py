@@ -9,9 +9,6 @@ import multiprocessing as mp
 import os
 import time
 
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
 from vllm import SamplingParams
 
 from mia import MiaLLM
@@ -33,6 +30,7 @@ PROMPTS = [
 
 
 def steer_config():
+    """The config file's steering section, applied as add_vector with coefficient 10."""
     with open(CONFIG) as f:
         base_steer = json.load(f)["steering"]
     return {**base_steer, "method": "add_vector", "coefficient": 10}
@@ -104,5 +102,7 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
     # serve_main()  # server mode: see the block above

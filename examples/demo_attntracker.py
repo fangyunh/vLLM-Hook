@@ -6,9 +6,6 @@ import multiprocessing as mp
 import os
 import time
 
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
 from vllm import SamplingParams
 
 from mia import MiaLLM
@@ -32,11 +29,7 @@ TEST_CASES = [
 
 
 def messages_and_range(tokenizer, model_name: str, instruction: str, data: str):
-    """The chat messages, plus the token ranges the analyzer scores over.
-
-    The ranges assume the model's chat template is applied to `messages` -- by the demo
-    offline, by the server's chat endpoint over `vllm serve`.
-    """
+    """The chat messages and the instruction/data token ranges, under the model's chat template."""
     messages = [
         {"role": "system", "content": instruction},
         {"role": "user", "content": "Data: " + data},
@@ -60,6 +53,7 @@ def messages_and_range(tokenizer, model_name: str, instruction: str, data: str):
 
 
 def report(scores):
+    """Print both cases' scores and their difference."""
     print("=" * 50)
     print(f"Original attention-tracker score: {scores[0]:.3f}")
     print(f"Prompt injection attention-tracker score: {scores[1]:.3f}")
@@ -107,7 +101,7 @@ def main():
 #
 #   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=qk \
 #       vllm serve ibm-granite/granite-3.1-8b-instruct \
-#       --max-model-len 2048 --port 8770
+#       --max-model-len 2048 --port 8770 --gpu-memory-utilization 0.8
 #
 # then uncomment serve_main() and call it instead of main() at the bottom.
 #
@@ -152,5 +146,7 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
     # serve_main()  # server mode: see the block above

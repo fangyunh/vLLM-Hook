@@ -1,88 +1,42 @@
-"""CUDA-graph hidden-state capture demo, with evidence for the optimization levers.
-Runs in-process (`MiaLLM`) on purpose: this is the local CUDA-graph showcase (MIA's
-default), and the determinism check below needs two generations against one engine. For
-the server path see the other demos' commented server blocks.
+"""CUDA-graph hidden-state capture: two runs byte-identical, and a disk run equal to in-memory.
+
+Runs offline (`MiaLLM`): the determinism check needs two generations on one engine. Run with
+``MIA_PROFILE=1`` to also print the profiler counters.
 """
-import os
 import multiprocessing as mp
+import os
 import time
+
 import torch
-
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_USE_V1"] = "1"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ.setdefault("MIA_PROFILE", "1")
-
 from vllm import SamplingParams
+from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
+
 from mia import MiaLLM
-from _paths import config_path
 from mia._profiler import PROF
-from mia.optimizations import describe, PUBLIC_LEVERS
+from mia.optimizations import PUBLIC_LEVERS, describe
+from _paths import config_path
 
-
+#: Why each other lever is not flipped on this one engine.
 LEVER_NOTES = {
-    "batched_egress": (
-        "Read once at import (graph/install.py:85, `_BATCHED_EGRESS`); in this "
-        "checkout it belongs to the QK capture/egress path, not the hidden-states "
-        "path this demo captures, so there is nothing to flip here."
-    ),
-    "steer_fused": (
-        "Read once at import (graph/ops.py:24, `_STEER_FUSED`); applies only to "
-        "the steer worker (see examples/demo_actsteer.py), which this "
-        "demo does not load."
-    ),
-    "compact_kall": (
-        "QK-only (workers/qk_capture_worker.py:40). With the shipped 'auto' "
-        "default it self-selects PER REQUEST -- compact only once a request's "
-        "growing-prefix rows reach 2 (`_use_compact_kall`) -- there is no "
-        "user-facing toggle to flip mid-engine even in principle. This demo "
-        "captures hidden states, not QK, so it never exercises this path."
-    ),
-    "writer_process": (
-        "Resolved once per worker, at worker init, and cached for the engine's "
-        "lifetime (graph/writer_process.py:238 `WriterProcess.from_env`, called "
-        "once via `init_writer_process`, itself idempotent -- see "
-        "workers/hs_capture_worker.py:149-150). Comparing on vs off needs "
-        "a second engine, which this script does not build. What IS checked above, "
-        "in-process, on the one engine: that the shipped-on writer path reproduces "
-        "the in-memory capture byte-for-byte -- the load-bearing half of the claim."
-    ),
-    "storage_router": (
-        "Serve-only; _plugin.py itself warns it is inert for LLM.generate "
-        "(offline), which is all MiaLLM ever calls. N/A to this demo."
-    ),
-    "artifact_dtype": (
-        "The one PUBLIC_LEVERS entry that is deliberately LOSSY. Left at its "
-        "'native' (off) default throughout so every comparison above is "
-        "apples-to-apples; quantifying its error is a different demo."
-    ),
-    "aperture_mmap": (
-        "A durable-sink scheduling choice for the disk path (mmap vs plain "
-        "append) -- same bytes either way per its own docstring in "
-        "optimizations.py. Not independently re-verified beyond the "
-        "writer_process byte-identity check above, which exercises the disk "
-        "path this lever also touches."
-    ),
-    "aperture_max_batched_tokens": (
-        "Resolved once, in the DRIVER, while LLM(...) is still building the "
-        "engine config -- before any worker exists (_plugin.py, "
-        "`_maybe_autocap_max_batched_tokens`, called from "
-        "`_patched_create_engine_config`). It only ever LOWERS the scheduler's "
-        "token budget, and only matters to guard heavy full-graph capture's "
-        "per-step transient at HIGH batch. This demo's batch is deliberately "
-        "small (a handful of short prompts on a single modest GPU), so there is "
-        "nothing for it to guard against here; left at its off default."
-    ),
+    "batched_egress": "Q/K capture only; this demo captures hidden states.",
+    "steer_fused": "steering only (see demo_actsteer.py).",
+    "compact_kall": "Q/K capture only; it selects itself per request.",
+    "storage_router": "served requests only; inert offline.",
+    "artifact_dtype": "lossy quantization; left off so the checks above compare exact bytes.",
+    "aperture_mmap": "a disk-sink write path; the same bytes either way.",
+    "aperture_max_batched_tokens": "guards heavy captures at high batch; this batch is small.",
 }
 
 
 def _print_evidence(elapsed_s: float, n_tokens: int, label: str) -> None:
+    """Print a run's wall time and its time per decode step."""
     per_step = (elapsed_s * 1000 / n_tokens) if n_tokens else float("nan")
     print(f"[evidence:{label}] generate: {elapsed_s * 1000:.1f} ms total, "
           f"{per_step:.2f} ms/decode-step over {n_tokens} tokens")
 
 
 def _all_equal(tensors_a: dict, tensors_b: dict):
+    """``(all layers byte-identical, mismatch descriptions)`` for two analyzer results."""
     mismatches = []
     for layer_name in sorted(set(tensors_a) | set(tensors_b)):
         list_a = tensors_a.get(layer_name)
@@ -101,11 +55,7 @@ def _all_equal(tensors_a: dict, tensors_b: dict):
 
 
 def _probes(outputs, which: str) -> dict:
-    """The captured states carried back on a response, or a diagnosis of why they are not.
-
-    Reading `output.probes` unguarded turns a configuration problem into an AttributeError
-    three frames away from the cause.
-    """
+    """The captured states on the first output, or exit naming why there are none."""
     probes = getattr(outputs[0], "probes", None)
     if probes is None:
         raise SystemExit(
@@ -116,7 +66,6 @@ def _probes(outputs, which: str) -> dict:
 
 
 def main() -> None:
-    cache_dir = "./cache/"
     hook_dir = "/dev/shm/mia"
     model = os.environ.get("MIA_DEMO_MODEL", "Qwen/Qwen2-1.5B-Instruct")
     config_file = os.environ.get(
@@ -134,7 +83,6 @@ def main() -> None:
         worker_name="capture_hs",
         analyzer_name="hidden_states",
         config_file=config_file,
-        download_dir=cache_dir,
         hook_dir=hook_dir,
         gpu_memory_utilization=0.7,
         max_model_len=2048,
@@ -145,7 +93,7 @@ def main() -> None:
         tensor_parallel_size=1,
     )
 
-    # The mode the engine runs: CUDA graphs unless enforce_eager=True.
+    # CUDA graphs unless enforce_eager=True.
     vc = llm.llm_engine.vllm_config
     graph_mode = not vc.model_config.enforce_eager
     print(f"[demo_capture_aperture] mode={'CUDA-graph capture' if graph_mode else 'EAGER'} "
@@ -202,8 +150,7 @@ def main() -> None:
           f"capture: {wp_ok}")
     if not wp_ok:
         print(f"[check 2/2] mismatches (first 5): {wp_mismatches[:5]}")
-    print("[check 2/2] NOT checked here (would need a second engine): the writer_process=off "
-          "timing comparison and its disk-SLO-knee claim -- see LEVER_NOTES['writer_process'].")
+    print("[check 2/2] writer_process on vs off needs a second engine; not compared here.")
 
     snap = PROF.summary_only()
     print("\n[profiler] driver-process counters/timers "
@@ -213,19 +160,15 @@ def main() -> None:
         miallm_timers = {k: v for k, v in snap["timers"].items() if k.startswith("miallm.")}
         for name, t in sorted(miallm_timers.items()):
             print(f"  {name}: mean={t.get('mean', float('nan')):.3f}ms n={t.get('count', 0)}")
-        print("[profiler] the capture aperture's own counters (qk.aperture.*, hs.aperture.*, graph.forward, "
-              "graph.drain, captured.bytes.*) live in the WORKER subprocess, not here -- they are "
-              "dumped at worker exit to "
-              f"{os.environ.get('MIA_PROFILE_DIR', '/tmp/mia_profile')}/"
-              "profile-worker-*.json (see mia/_profiler.py:_atexit_dump). Inspect "
-              "that file after this script exits for the aperture-side numbers.")
+        print("[profiler] the capture counters (hs.aperture.*, graph.*, captured.bytes.*) are the "
+              "engine process's: at exit it writes them to "
+              f"{os.environ.get('MIA_PROFILE_DIR', '/tmp/mia_profile')}/profile-*.json.")
     else:
-        print("  disabled -- MIA_PROFILE was not '1' at import time.")
+        print("  disabled -- run with MIA_PROFILE=1 to collect them.")
 
-    print("\n[levers] why the remaining PUBLIC_LEVERS entries are not independently "
-          "flipped on this one engine:")
+    print("\n[levers] why the other PUBLIC_LEVERS entries are not flipped on this one engine:")
     for key in PUBLIC_LEVERS:
-        if key in ("writer_process",):
+        if key == "writer_process":
             continue
         print(f"  - {key}: {LEVER_NOTES.get(key, 'not discussed')}")
 
@@ -234,11 +177,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
-    # vllm.destroy_process_group() was removed in 0.29; the engine shutdown above already
-    # tears the group down, and these are the surviving entry points for anything it missed.
-    from vllm.distributed import (destroy_distributed_environment,
-                                  destroy_model_parallel)
+    # Release anything of the distributed state the engine shutdown missed.
     destroy_model_parallel()
     destroy_distributed_environment()
 

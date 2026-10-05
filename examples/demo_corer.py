@@ -5,21 +5,19 @@ offsets turned into token offsets, so the prompt is tokenized here with
 `add_special_tokens=False` and passed as exact ids -- no added BOS, and therefore spans that
 still mean what they measured. The same demo over `vllm serve` is kept, commented out, at the end.
 """
+import multiprocessing as mp
 import os
 import sys
-import multiprocessing as mp
 from typing import List
-
-mp.set_start_method("spawn", force=True)
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 from vllm import SamplingParams, TokensPrompt
 
 from mia import MiaLLM
+from _paths import REPO_ROOT
 
 MODEL = 'mistralai/Mistral-7B-Instruct-v0.3'
-CONFIG_DIR = 'model_configs/core_reranker'
-CONFIG_FILE = f'{CONFIG_DIR}/{MODEL.split("/")[-1]}.json'
+CONFIG_DIR = REPO_ROOT / "model_configs" / "core_reranker"
+CONFIG_FILE = str(CONFIG_DIR / f'{MODEL.split("/")[-1]}.json')
 HOOK_DIR = "/dev/shm/mia"
 
 
@@ -29,6 +27,7 @@ def _ids(tokenizer, text):
 
 
 def apply_chat_template_and_get_ranges(tokenizer, model_name: str, query: str, documents: List[str]):
+    """The templated prompt and its (doc spans, query start, instruction end, query end)."""
     retrieval_instruction = ' Here are some paragraphs:\n\n'
     retrieval_instruction_late = 'Please find information that are relevant to the following query in the paragraphs above.\n\nQuery: '
 
@@ -64,6 +63,7 @@ def apply_chat_template_and_get_ranges(tokenizer, model_name: str, query: str, d
 
 
 def require_config():
+    """Exit naming the available configs when MODEL has no core_reranker config."""
     if not os.path.isfile(CONFIG_FILE):
         available = sorted(os.listdir(CONFIG_DIR)) if os.path.isdir(CONFIG_DIR) else []
         print(
@@ -202,25 +202,6 @@ def case_prompts(tokenizer, case):
     return _ids(tokenizer, text), query_spec, _ids(tokenizer, text_na), na_spec
 
 
-def print_batch_ranking(analyze, query_specs, na_specs):
-    try:
-        stats = analyze(run_ids=["corer-batch-doc", "corer-batch-na"],
-                        analyzer_spec={'query_spec': query_specs, 'na_spec': na_specs})
-        print(f"Sorted document IDs and scores by CoRe-Reranking: {stats['ranking']}: {stats['scores']}")
-    except RuntimeError as exc:
-        if "must match the size of tensor" not in str(exc):
-            raise
-        # Pre-existing, and not a 0.29 issue: CorerAnalyzer's batch path is byte-identical
-        # to the pre-port one, and the single-document path above works on the same engine.
-        # Batching cases whose prompts differ in length (154 vs 238 tokens here) makes
-        # score_documents line up tensors that do not. Reported, not worked around.
-        print(f"[demo_corer] batch reranking is broken for cases of differing prompt "
-              f"length: {exc}")
-        print("[demo_corer] the single-document reranking above is the working path; this "
-              "batch limitation predates the vLLM 0.29 port (the analyzer's batch code is "
-              "unchanged from the original).")
-
-
 def main():
     require_config()
     llm = MiaLLM(model=MODEL, worker_name="capture_qk", analyzer_name="core_reranker",
@@ -239,27 +220,18 @@ def main():
                             analyzer_spec={'query_spec': query_spec, 'na_spec': na_spec})
         print(f"Sorted document IDs and scores by CoRe-Reranking: {stats['ranking']}: {stats['scores']}")
 
-    print("=" * 50)
-    print("Batch processing examples...")
-    prompts = [case_prompts(llm.tokenizer, case) for case in TEST_CASES]
-    llm.generate([TokensPrompt(prompt_token_ids=p[0]) for p in prompts], sp,
-                 save_to_disk=True, run_id="corer-batch-doc")
-    llm.generate([TokensPrompt(prompt_token_ids=p[2]) for p in prompts], sp,
-                 save_to_disk=True, run_id="corer-batch-na")
-    print_batch_ranking(llm.analyze, [p[1] for p in prompts], [p[3] for p in prompts])
-
 
 # --- Server mode ---------------------------------------------------------------------------
 # The same demo against `vllm serve`. Start the server in another terminal:
 #
 #   VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=qk \
 #       vllm serve mistralai/Mistral-7B-Instruct-v0.3 \
-#       --max-model-len 2048 --port 8770 --no-enable-prefix-caching
+#       --max-model-len 2048 --port 8770 --gpu-memory-utilization 0.8 \
+#       --no-enable-prefix-caching
 #
 # then uncomment serve_main() and call it instead of main() at the bottom. The exact ids go
 # through /v1/completions, which applies no chat template. CoRe captures the same prefix twice
-# (query, then 'N/A') and 0.29 has no endpoint to reset the prefix cache, hence
-# --no-enable-prefix-caching.
+# (query, then 'N/A'): a Q/K server already runs without prefix caching, and the flag keeps it so.
 #
 # def serve_main():
 #     from mia import MiaClient
@@ -281,16 +253,11 @@ def main():
 #                                analyzer_spec={'query_spec': query_spec, 'na_spec': na_spec})
 #         print(f"Sorted document IDs and scores by CoRe-Reranking: "
 #               f"{stats['ranking']}: {stats['scores']}")
-#
-#     print("=" * 50)
-#     print("Batch processing examples...")
-#     prompts = [case_prompts(client.tokenizer, case) for case in TEST_CASES]
-#     client.generate_tokens([p[0] for p in prompts], run_id="corer-batch-doc", **kw)
-#     client.generate_tokens([p[2] for p in prompts], run_id="corer-batch-na", **kw)
-#     print_batch_ranking(client.analyze, [p[1] for p in prompts], [p[3] for p in prompts])
 # --- end of server mode ---
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     main()
     # serve_main()  # server mode: see the block above
