@@ -116,10 +116,21 @@ class MiaLLM:
         if config_file:
             self.load_config(config_file)
 
-        worker = None
-        if worker_name:
+        # Unknown names are refused before the engine is built.
+        worker = analyzer_entry = None
+        if worker_name or analyzer_name:
             vllm.plugins.load_general_plugins()
-            worker = PluginRegistry.get_worker(worker_name).path
+        if worker_name:
+            worker_entry = PluginRegistry.get_worker(worker_name)
+            if worker_entry is None:
+                raise ValueError(f"Unknown worker: {worker_name!r}. "
+                                 f"Available: {PluginRegistry.list_workers()}")
+            worker = worker_entry.path
+        if analyzer_name:
+            analyzer_entry = PluginRegistry.get_analyzer(analyzer_name)
+            if analyzer_entry is None:
+                raise ValueError(f"Unknown analyzer: {analyzer_name!r}. "
+                                 f"Available: {PluginRegistry.list_analyzers()}")
 
         llm_kwargs = dict(vllm_kwargs)
         if download_dir is not None:
@@ -150,8 +161,8 @@ class MiaLLM:
 
         self.analyzer = None
         self._analyzer_accepts = "qk"
-        if analyzer_name:
-            analyzer_cls = PluginRegistry.get_analyzer(analyzer_name).analyzer
+        if analyzer_entry is not None:
+            analyzer_cls = analyzer_entry.analyzer
             self._analyzer_accepts = getattr(analyzer_cls, "ACCEPTS", "qk")
             self.analyzer = analyzer_cls(self._hook_dir, self.layer_to_heads)
 
