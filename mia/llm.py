@@ -83,8 +83,8 @@ class MiaLLM:
             config_file: JSON with the worker's settings (heads, Q/K mode, steering, HS layers).
             download_dir: model download dir; also the root of the default ``hook_dir``.
             enable_hook: default for ``generate(use_hook=...)``.
-            hook_dir: dir for ``save_to_disk`` runs; default ``_v1_qk_peeks`` under download_dir,
-                else under ~/.cache.
+            hook_dir: dir for ``save_to_disk`` runs; default ``<download_dir>/mia``, else
+                ``~/.cache/mia``.
             enforce_eager: run eagerly instead of with CUDA graphs.
             **vllm_kwargs: passed to ``vllm.LLM``.
         """
@@ -102,7 +102,7 @@ class MiaLLM:
             HOOK_DIR = hook_dir
         else:
             fallback_root = download_dir or os.path.expanduser('~/.cache')
-            HOOK_DIR = os.path.join(fallback_root, '_v1_qk_peeks')
+            HOOK_DIR = os.path.join(fallback_root, 'mia')
         os.makedirs(HOOK_DIR, exist_ok=True)
         self._hook_dir = HOOK_DIR
 
