@@ -159,8 +159,8 @@ def main():
 #     from mia import MiaClient
 #     from _serve import HS, require_server
 #
-#     spec = classifier_spec()
 #     url = require_server(MODEL, HS, max_model_len=8192)
+#     spec = classifier_spec()
 #     client = MiaClient(base_url=url, analyzer_name="science_hallucination",
 #                        config_file=CONFIG, hook_dir=HOOK_DIR, tokenizer_for=MODEL)
 #     test_cases, prompt_ids_list = load_prompts(client.tokenizer)

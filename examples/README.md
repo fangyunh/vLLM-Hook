@@ -65,7 +65,7 @@ A run that captured nothing looks like a fast run, so check rather than assume:
   an empty model.
 - **The counters moved.** Run with `MIA_PROFILE=1` (on the server, in server mode). At exit each
   process writes `$MIA_PROFILE_DIR/profile-<role>-<pid>-<n>.json` (default dir `/tmp/mia_profile`;
-  the log prints `[mia profiler] wrote <path>`). In the engine process's file,
+  the log prints `[mia profiler] wrote <path>`). In the file the `(EngineCore pid=...)` line names,
   `gauges["captured.bytes.hs"]` (or `.qk`) above zero proves rows were captured. Do not use a
   counter that merely proves the request finished.
 
@@ -320,8 +320,6 @@ stats = client.analyze(analyzer_spec={"reduce": "none"})
   exact ids; `return_token_ids` makes the server report the ids it prompted on.
 - **No prefix-cache reset over serve**: a Q/K server already runs without prefix caching; a
   hidden-state server that captures the same prefix twice needs `--no-enable-prefix-caching`.
-- **Disk reads need a shared filesystem**: with `save_to_disk`, run the client on the server's
-  host or a shared mount.
 - The server exposes captured activations at `/v1/mia/delivered`: protect it with `--api-key KEY`
   (and `MiaClient(..., api_key=KEY)`), or turn it off with `MIA_DELIVERY_ROUTE=0` (hidden states
   are then read from files only).
