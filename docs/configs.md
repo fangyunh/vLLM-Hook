@@ -96,6 +96,8 @@ batch can use different configs.
 deployment path. For serving, use `vllm serve` with `MiaClient` below.
 
 ```python
+import os
+
 from mia import MiaLLM
 from vllm import SamplingParams
 
@@ -104,14 +106,14 @@ llm = MiaLLM(
     worker_name="capture_qk",
     analyzer_name="attn_tracker",
     config_file="model_configs/attention_tracker/granite-3.1-8b-instruct.json",
-    hook_dir="/dev/shm/mia",  # where disk artifacts are written
+    hook_dir=os.path.expanduser("~/mia_runs"),  # your own dir for disk artifacts
 )
 
 # rpc (in-memory) path:
 out   = llm.generate(text, SamplingParams(...), save_to_disk=False)
 stats = llm.analyze(probes=out[0].probes, analyzer_spec={...})
 
-# disk path (artifact under /dev/shm/mia/<run_id>/); reset the prefix cache when re-capturing a prompt:
+# disk path (artifact under ~/mia_runs/<run_id>/); reset the prefix cache when re-capturing a prompt:
 llm.llm_engine.reset_prefix_cache()
 out   = llm.generate(text, SamplingParams(...), save_to_disk=True, run_id="run-1")
 stats = llm.analyze(analyzer_spec={...})  # uses the last run_id
@@ -152,7 +154,7 @@ Ctrl-C stops it. It runs under CUDA graphs by default; add `--enforce-eager` onl
 bit-exact logprobs:
 
 ```bash
-# probes (attention tracker / CoRer / hidden states):
+# probes (attention tracker / CoRe):
 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=qk \
   vllm serve ibm-granite/granite-3.1-8b-instruct --max-model-len 2048 --port 8770 \
   --gpu-memory-utilization 0.8
@@ -288,15 +290,14 @@ fail later.
 | env var | default | effect |
 |---|---|---|
 | `MIA_APERTURE_GPU_BYTES` | **4 GiB** | the aperture's byte budget. **Per rank** at TP > 1, not per engine |
-| `MIA_APERTURE_MAX_BATCHED_TOKENS` | off | derive (`auto`) or pin `max_num_batched_tokens` so a heavy capture's per-step transient cannot OOM at high batch. MIN-ONLY: it never raises the budget, so it is byte-identical whenever the derived cap is the larger one |
+| `MIA_APERTURE_MAX_BATCHED_TOKENS` | off | `auto` lowers `max_num_batched_tokens` (an integer sets the cap) so a heavy capture step fits in GPU memory at high batch; it never raises vLLM's value |
 | `MIA_APERTURE_BACKPRESSURE_TIMEOUT_S` | `10` (s) | how long a step waits for free capture space before `ApertureBackpressureError`. Capture blocks; it never silently drops rows. Raise it if a slow disk makes a heavy run hit it |
 
 ### The one rule: `gpu_memory_utilization` must leave room for the aperture
 
-Yes — explicitly, and it is enforced. `gpu_memory_utilization` is vLLM's flag, not MIA's
-(`--gpu-memory-utilization` on the server, default 0.9); it tells vLLM what fraction of the card
-to claim for weights and KV cache. **The aperture lives entirely in the fraction vLLM does not
-claim**, and engine start fails unless:
+`gpu_memory_utilization` is vLLM's flag, not MIA's (`--gpu-memory-utilization` on the server,
+default 0.9); it tells vLLM what fraction of the card to claim for weights and KV cache. **The
+aperture lives entirely in the fraction vLLM does not claim**, and engine start fails unless:
 
 ```
 MIA_APERTURE_GPU_BYTES  ≤  (1 − gpu_memory_utilization) × total GPU bytes

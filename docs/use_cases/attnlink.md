@@ -156,12 +156,7 @@ With temperature fixed at 1.0, the same scores illustrate the trade-off:
 | **0.80** | **8** | **100%** | **62.50%** |
 | 0.90 | 14 | 100% | 35.71% |
 
-Tested on an NVIDIA H100 80GB using bfloat16, `gpu_memory_utilization=0.5`,
-vLLM `0.21.1.dev0+gad7125a43.d20260627.cu128`, PyTorch `2.11.0+cu128`,
-Transformers `5.12.0`, and the stock QK worker at upstream baseline
-`e3d6885899264c81ac61c403c8b56efaf5a02dab` (package version `0.2.0`).
-
-Re-validated on this tree (vLLM `0.29.0`, PyTorch `2.13.0`, Transformers `5.17.0`,
+Validated on this tree (vLLM `0.29.0`, PyTorch `2.13.0`, Transformers `5.17.0`,
 H100 80GB, bfloat16) under the default CUDA graphs: the same 8 columns at `top_p=0.80`,
 recall 100%, precision 62.50%, AP 1.0. For bit-exact attention, pass `enforce_eager=True`.
 

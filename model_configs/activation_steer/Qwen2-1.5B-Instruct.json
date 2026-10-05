@@ -2,7 +2,7 @@
     "model_info": {
         "name": "qwen2-1.5b-attn",
         "model_id": "Qwen/Qwen2-1.5B-Instruct",
-        "note": "Test config: the vector is a fixed random direction (seed 0), not a behaviour. It changes outputs but steers toward nothing."
+        "note": "The config the activation-steering use-case test uses. Its vector is a random direction: it changes outputs but steers toward no behaviour."
     },
     "steering": {
         "method": "add_vector",

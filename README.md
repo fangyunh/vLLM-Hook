@@ -63,10 +63,10 @@ Capture saturates at rate 32; steering holds to 64 (+5.2 %).
 ## 🧩 Supported Configurations
 
 MIA runs in your own process (`MiaLLM`) and on the server path (`vllm serve` + `MiaClient`),
-under CUDA graphs. Each use case (attention tracker, activation steering, hidden-state extraction,
-…) runs across a Cartesian product of storage (`rpc` / `disk`) and disk format (`pt` /
-`safetensors`). See [`docs/configs.md`](docs/configs.md) for code snippets showing how to select
-each config.
+under CUDA graphs. Each capture use case (attention tracker, hidden-state extraction, …) runs with
+either storage (`rpc` / `disk`) and disk format (`pt` / `safetensors`); CoRe is disk-only, and
+steering writes no artifact. See [`docs/configs.md`](docs/configs.md) for code snippets showing
+how to select each config.
 
 MIA requires vLLM's **V2 model runner** and runs every worker under CUDA graphs by default:
 

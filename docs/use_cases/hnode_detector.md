@@ -66,37 +66,33 @@ To use a probe for a different model, point `analyzer_spec["probe_path"]` at you
 ## Quick start
 
 ```python
-from mia import MiaLLM
+import multiprocessing as mp
+import os
+
 from vllm import SamplingParams
-import torch
 
-llm = MiaLLM(
-    model="Qwen/Qwen2.5-1.5B-Instruct",
-    worker_name="capture_hs",
-    analyzer_name="hnode_hallucination",
-    config_file="model_configs/hnode_hallucination/Qwen2.5-1.5B-Instruct.infer.json",
-    gpu_memory_utilization=0.7,
-    max_model_len=1024,
-    dtype=torch.float16,
-    enable_hook=True,
-)
+from mia import MiaLLM
 
-prompts = [
-    "Q: What is the capital of France?\nA: Paris",
-    "Q: What is the capital of France?\nA: London",
-]
-
-run_id = "my_run"
-llm.generate(prompts, SamplingParams(temperature=0.0, max_tokens=1),
-             save_to_disk=True, run_id=run_id)
-
-result = llm.analyze(
-    analyzer_spec={"probe_path": "cache/hnode_probe/probe.npz", "threshold": 0.5},
-    run_id=run_id,
-)
-
-for prompt, verdict, prob in zip(prompts, result["verdicts"], result["probabilities"]):
-    print(f"[{verdict}] P={prob:.3f}  {prompt}")
+if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    llm = MiaLLM(model="Qwen/Qwen2.5-1.5B-Instruct", worker_name="capture_hs",
+                 analyzer_name="hnode_hallucination",
+                 config_file="model_configs/hnode_hallucination/Qwen2.5-1.5B-Instruct.infer.json",
+                 gpu_memory_utilization=0.7, max_model_len=1024)
+    prompts = [
+        "Q: What is the capital of France?\nA: Paris",
+        "Q: What is the capital of France?\nA: London",
+    ]
+    run_id = "my_run"
+    llm.generate(prompts, SamplingParams(temperature=0.0, max_tokens=1),
+                 save_to_disk=True, run_id=run_id)
+    result = llm.analyze(
+        analyzer_spec={"probe_path": "cache/hnode_probe/probe.npz", "threshold": 0.5},
+        run_id=run_id)
+    for prompt, verdict, prob in zip(prompts, result["verdicts"], result["probabilities"]):
+        print(f"[{verdict}] P={prob:.3f}  {prompt}")
+    llm.llm_engine.engine_core.shutdown()
 ```
 
 Or run the demo directly:
