@@ -1,6 +1,7 @@
 # MIA supported configurations
 
-This document enumerates the supported configs and how to invoke each from user code.
+This document lists the supported configurations, every config-file key and per-request argument,
+and how to invoke each from user code.
 
 ---
 
@@ -8,44 +9,77 @@ This document enumerates the supported configs and how to invoke each from user 
 
 | Axis | Values | How it's selected |
 |---|---|---|
-| **Execution path** | `serve` (`vllm serve` + `MiaClient`) | — |
-| **Storage** | `rpc` (on the output: `.probes`) · `disk` (artifact under `<hook_dir>/<run_id>/`) · `shm` (legacy shared memory, hidden states-only) | per-request `extra_args["save_to_disk"]` (SHM via `MIA_USE_SHM=1`) |
-| **Disk format** | `pt` (`torch.save`) · `st` (safetensors ) | `MIA_USE_SAFETENSORS={0,1}` |
+| **Execution path** | offline (`MiaLLM` in your process) · served (`vllm serve` + `MiaClient`) | which API you call |
+| **Storage** | `rpc` (on the output: `.probes`) · `disk` (artifact under `<hook_dir>/<run_id>/`) | per-request `save_to_disk` |
+| **Disk format** | `pt` (`torch.save`) · `st` (safetensors) | `MIA_USE_SAFETENSORS={0,1}` |
 
-> **Async save note:** the old per-request `sync`/`async` save-mode axis (`MIA_ASYNC_SAVE`) has been removed. It is superseded by the **writer process** (`MIA_WRITER_PROCESS`, default **on**) — a persistent child process that serializes and writes disk artifacts off the engine GIL (see the `writer_process` lever in `optimizations.py`). Unlike the old knob, this isn't a per-request axis you opt into: it's a process-wide default that's already on, so it does not appear as a selectable dimension in the coverage matrices below. It runs on **every TP rank that writes artifacts**: vLLM's daemonic TP workers used to fall back to the in-process save. Each rank logs its mode. The child exits when its worker dies (`MIA_CHILD_PARENT_POLL_S`, default `1.0` s, is how often an idle child checks).
+Every capture use case runs on both paths with either storage. CoRe is disk-only: its analyzer
+compares two runs' artifacts. Steering writes no artifact, so storage and format do not apply.
+
+Disk writes go through a writer process (`MIA_WRITER_PROCESS`, default on).
 
 ---
 
-## Coverage matrix
+## Supported models
 
-### Attention tracker 
+MIA finds decoder layers by module name, so it works with models whose vLLM implementation names
+them one of these ways:
 
-| Cell ID | Path | Storage | Format |
-|---|---|---|---|
-| `attn-serve-rpc-na`     | serve   | rpc  | —  |
-| `attn-serve-disk-pt`    | serve   | disk | pt |
-| `attn-serve-disk-st`    | serve   | disk | st |
+| Module names | Models | Workers |
+|---|---|---|
+| `model.layers.N` | Llama, Qwen, Mistral, Granite, Phi-3 and similar | all |
+| `transformer.h.N` | GPT-2 | all |
+| `model.decoder.layers.N` | OPT | all |
+| `language_model.model.layers.N` | multimodal models wrapping one of the above | `capture_hs`, `steer` |
 
-### Hidden states 
+A model that matches none of these captures nothing; the engine log says so
+(`no decoder layers matched` / `no attention modules matched`).
 
-The same 3 combinations as above.
+---
 
-### CoRer
+## Use cases
 
-CoRer is intrinsically two-pass and only uses the disk path (the analyzer needs both runs' artifacts on disk to compute the difference). No `rpc` cells.
+The same code shape covers every use case — only `worker_name` / `analyzer_name`, or
+`MIA_WORKER` on the server, varies:
 
-| Cell ID | Path | Storage | Format |
-|---|---|---|---|
-| `corer-serve-disk-pt`   | serve   | disk | pt |
-| `corer-serve-disk-st`   | serve   | disk | st |
+| Use case | `worker_name` / `MIA_WORKER` | `analyzer_name` | `analyzer_spec` | Returns |
+|---|---|---|---|---|
+| attention tracker | `capture_qk` / `qk` | `attn_tracker` | `input_range`, `attn_func` | `score` per prompt |
+| CoRe reranker | `capture_qk` / `qk` | `core_reranker` | `query_spec`, `na_spec` (+ `run_ids`) | `scores`, `ranking` per case |
+| hidden states | `capture_hs` / `hidden_states` | `hidden_states` | `reduce`: `none` · `mean` · `norm` | `hidden_states` per layer |
+| H-Node detector | `capture_hs` / `hidden_states` | `hnode_hallucination` | `probe_path`, `threshold` | `probabilities`, `verdicts` |
+| science hallucination | `capture_hs` / `hidden_states` | `science_hallucination` | `clf_path`, `model_id`, `label_names` | `predictions`, `prediction_labels` |
+| AttnLink-U | `capture_qk` / `qk` | `attnlink` | `candidates`, `candidate_spans`, `prompt_length` | `scores`, `ranking`, `selected` |
+| activation steering | `steer` / `steer` | (none — no artifacts) | — | — |
 
-### Activation steering 
+Papers and demos: [`docs/use_cases/`](use_cases/README.md).
 
-Steering modifies the residual stream in-place and produces no artifacts, so storage/format/async axes don't apply. Per-request via `extra_args["steer"]`.
+---
 
-| Cell ID | Path |
-|---|---|
-| `actsteer-serve-na-na`   | serve   |
+## Config reference
+
+A config is one JSON file, passed as `config_file=` to `MiaLLM` or `MiaClient`. Only the sections
+your worker uses are read.
+
+| Key | Values | Meaning |
+|---|---|---|
+| `hidden_states.layers` | list of ints; `[]` = every layer | **1-based** hidden-state indices: layer `i` is the output of decoder block `i - 1` (`[32]` is Llama-3.1-8B's last block) |
+| `hidden_states.mode` | `last_token` (default) · `all_tokens` | which token positions to capture |
+| `params.important_heads` | list of `[layer, head]` | the Q/K capture targets, both **0-based** |
+| `hookq.hookq_mode` | `all_tokens` (offline default) · `last_token` | which query positions to capture |
+| `hookq.capture` | `qk` (default) · `score` | `score` captures the listed heads' attention scores instead of Q/K (eager only; TP = 1) |
+| `hookq.score_head` | int, default 0 | the head `score` capture uses when a layer lists none |
+| `steering.method` | `adjust_rs` (default) · `add_vector` | `add_vector` adds `coefficient × dir`; `adjust_rs` moves the projection on `dir` to `avg_proj` |
+| `steering.coefficient` | float | the `add_vector` scale |
+| `steering.optimal_layer` | int · list of ints · `"all"` | the decoder blocks to steer, **0-based** |
+| `steering.phase` | `both` (default) · `prefill` · `decode` | which passes are steered |
+| `steering.positions` | `all_tokens` (default) · `last_token` | which tokens of a pass are steered |
+| `steering.apply_at_all_positions` | bool | older spelling of `positions` (`true` = `all_tokens`) |
+| `steering.vector_path` | path, relative to the working directory | a `torch.save` dict: `"dir"` (hidden-size vector) and, for `adjust_rs`, `"avg_proj"` (scalar) |
+| `optimizations` | `{lever: value}` | sets a [performance lever](#tuning) unless its env var is already set |
+| `model_info` | any | descriptive only; MIA does not read it |
+
+Analyzer-specific sections (e.g. `scihal.clf_path`) are read by their demo.
 
 ---
 
@@ -55,16 +89,6 @@ All hook activation is **per-request** via `extra_body["vllm_xargs"]` under `vll
 `SamplingParams.extra_args` when driving an engine in-process. Different requests in the same
 batch can use different configs.
 
-The same code shape covers all four use cases — only `worker_name` / `analyzer_name`, or
-`MIA_WORKER` on the server, varies:
-
-| Use case | `worker_name` / `MIA_WORKER` | `analyzer_name` |
-|---|---|---|
-| attention tracker | `capture_qk` / `qk` | `attn_tracker` |
-| CoRer | `capture_qk` / `qk` | `core_reranker` |
-| hidden states | `capture_hs` / `hidden_states` | `hidden_states` |
-| activation steering | `steer` / `steer` | (none — no artifacts) |
-
 ### Driving an engine in-process (`MiaLLM`)
 
 `MiaLLM` builds a vLLM engine in your own process, under CUDA graphs by default
@@ -72,7 +96,6 @@ The same code shape covers all four use cases — only `worker_name` / `analyzer
 deployment path. For serving, use `vllm serve` with `MiaClient` below.
 
 ```python
-import torch
 from mia import MiaLLM
 from vllm import SamplingParams
 
@@ -82,7 +105,6 @@ llm = MiaLLM(
     analyzer_name="attn_tracker",
     config_file="model_configs/attention_tracker/granite-3.1-8b-instruct.json",
     hook_dir="/dev/shm/mia",  # where disk artifacts are written
-    dtype=torch.float16,      # attn_tracker cannot read bfloat16
 )
 
 # rpc (in-memory) path:
@@ -110,27 +132,35 @@ out_steered = llm.generate(text, SamplingParams(temperature=0.0, max_tokens=200,
 out_plain   = llm.generate(text, SamplingParams(temperature=0.0, max_tokens=200), use_hook=False)
 ```
 
-Format/save-mode are env-vars on the driver process, set **before** `MiaLLM(...)` is constructed (the worker subprocess inherits them at spawn):
+Format is an env var on the driver process, set **before** `MiaLLM(...)` is constructed (the
+worker subprocess inherits it at spawn):
 
 ```bash
 MIA_USE_SAFETENSORS=1   # write .safetensors instead of .pt
-MIA_USE_SHM=1           # legacy shared-memory fast path (hidden states + last_token only)
 ```
+
+`MIA_WORKER`, if set, is read offline too: a value that contradicts `worker_name` is refused.
 
 ### Serve (`vllm serve` + `MiaClient` / openai client)
 
-Start the server with `MIA_WORKER` set to the worker that matches your use case. It runs under
-CUDA graphs by default; add `--enforce-eager` only when you need bit-exact logprobs:
+Start the server with `MIA_WORKER` set to the worker that matches your use case, from the repo
+root, in its own shell; it is ready when the log prints `Application startup complete.`, and
+Ctrl-C stops it. It runs under CUDA graphs by default; add `--enforce-eager` only when you need
+bit-exact logprobs:
 
 ```bash
 # probes (attention tracker / CoRer / hidden states):
 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=qk \
-  vllm serve ibm-granite/granite-3.1-8b-instruct --max-model-len 2048 --port 8770
+  vllm serve ibm-granite/granite-3.1-8b-instruct --max-model-len 2048 --port 8770 \
+  --gpu-memory-utilization 0.8
 
 # activation steering:
 VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=steer \
   vllm serve microsoft/Phi-3-mini-4k-instruct --max-model-len 2048 --port 8770
 ```
+
+A capture server needs room for the capture aperture outside `--gpu-memory-utilization`
+([sizing](#sizing-the-capture-aperture-and-the-gpu-memory-it-costs)).
 
 The server exposes captured activations at `/v1/mia/delivered`: protect it with `--api-key KEY`
 (and `MiaClient(..., api_key=KEY)`), or turn it off with `MIA_DELIVERY_ROUTE=0` (hidden states
@@ -141,18 +171,21 @@ For probe use cases, `MiaClient` mirrors the in-process `MiaLLM` API:
 ```python
 from mia import MiaClient
 
-hook = MiaClient(base_url="http://localhost:8770/v1",
-                  analyzer_name="attn_tracker",
-                  config_file="model_configs/attention_tracker/granite-3.1-8b-instruct.json")
+client = MiaClient(base_url="http://localhost:8770/v1",
+                   analyzer_name="attn_tracker",
+                   config_file="model_configs/attention_tracker/granite-3.1-8b-instruct.json")
 
 # rpc path:
-resp  = hook.generate(model=MODEL, messages=msgs, max_tokens=10)
-stats = hook.analyze(analyzer_spec={...})
+resp  = client.generate(model=MODEL, messages=msgs, max_tokens=10)
+stats = client.analyze(analyzer_spec={...})
 
 # disk path:
-hook.generate(model=MODEL, messages=msgs, save_to_disk=True, run_id="run-2", max_tokens=1)
-stats = hook.analyze(analyzer_spec={...})
+client.generate(model=MODEL, messages=msgs, save_to_disk=True, run_id="run-2", max_tokens=1)
+stats = client.analyze(analyzer_spec={...})
 ```
+
+The disk path needs a filesystem the client and server share: the server writes into the
+client's `hook_dir` (default `/dev/shm/mia`). A client on another machine uses the rpc path.
 
 #### Three ways to send a prompt
 
@@ -173,8 +206,8 @@ To check that the server prompted on the ids you meant — and to read back the 
 which is what a second pass needs — ask vLLM for them:
 
 ```python
-resp = hook.generate_tokens(ids, model=MODEL, max_tokens=1, save_to_disk=True,
-                            extra_body={"return_token_ids": True})
+resp = client.generate_tokens(ids, model=MODEL, max_tokens=1, save_to_disk=True,
+                              extra_body={"return_token_ids": True})
 assert list(resp.choices[0].prompt_token_ids) == list(ids)   # nothing re-tokenized
 continuation = list(resp.choices[0].token_ids)               # ids, never detokenized text
 ```
@@ -193,6 +226,18 @@ re-tokenizing is not an identity, and the drift is silent.
 | `capture=False` | arm nothing — a plain request | `use_hook=False` |
 | `extra_body=` | vLLM's own request extensions, merged with MIA's `vllm_xargs` | — |
 
+Knobs for `extra_xargs` (served) or `SamplingParams.extra_args` (offline); the config file sets
+the capture ones, a request overrides them:
+
+| Knob | Values | Meaning |
+|---|---|---|
+| `hooks_on` | `prefill` (default) · `decode` · `both` | which passes capture |
+| `hs_mode` | `last_token` · `all_tokens` | hidden-state positions (`hidden_states.mode`) |
+| `hookq_mode` | `last_token` · `all_tokens` | Q/K positions (`hookq.hookq_mode`) |
+| `qk_capture` | `qk` · `score` | Q/K or one head's attention scores (`hookq.capture`) |
+| `score_head` | int | the fallback head for `score` capture (`hookq.score_head`) |
+| `steer` | a steering dict (JSON string over serve) | this request's steering keys, merged over the config's |
+
 `extra_xargs` values must be **scalars** unless the key is one the plugin JSON-decodes
 (`output_qk`, `output_hidden_states`, `steer`); a dict under any other key would reach the worker
 as a string and do nothing, so the client refuses it instead. On a collision in `extra_body`,
@@ -204,9 +249,10 @@ model's tokenizer for computing spans (pass `tokenizer_for=<model id>` to the co
 #### No prefix-cache reset over serve
 
 The in-process path calls `llm.llm_engine.reset_prefix_cache()` between captures of the same
-prompt. **vLLM 0.29 exposes no endpoint for that**, so if your run captures the same prefix twice
-— CoRer does — start the server with `--no-enable-prefix-caching`. A cached prefix means the
-second pass captures nothing for those tokens, and the run still looks like it worked.
+prompt. **vLLM 0.29 exposes no endpoint for that.** A Q/K server already runs without prefix
+caching (unless you enable it); a hidden-state server whose run captures the same prefix twice
+needs `--no-enable-prefix-caching`. A cached prefix means the second pass captures nothing for
+those tokens, and the run still looks like it worked.
 
 For activation steering there's no artifact to analyze, so a plain openai client suffices. Each request carries its own steer config as a JSON-encoded string under `vllm_xargs["steer"]` (vllm_xargs only allows scalar values; the plugin decodes the string back to a dict before the worker reads it). Different requests can use different configs:
 
@@ -225,7 +271,8 @@ resp = client.chat.completions.create(
 ```
 See [`examples/demo_actsteer_serve.py`](../examples/demo_actsteer_serve.py) for a runnable example with requests using different steer configs.
 
-`MIA_USE_SAFETENSORS` is set when launching `vllm serve` (the server's worker process reads it at hook-fire time).
+Set `MIA_USE_SAFETENSORS` for both the server and the process that calls `analyze()`: the readers
+look for `.safetensors` files only when it is set.
 
 ---
 
@@ -245,9 +292,9 @@ fail later.
 ### The one rule: `gpu_memory_utilization` must leave room for the aperture
 
 Yes — explicitly, and it is enforced. `gpu_memory_utilization` is vLLM's flag, not MIA's
-(`--gpu-memory-utilization` on the server); it tells vLLM what fraction of the card to claim for
-weights and KV cache. **The aperture lives entirely in the fraction vLLM does not claim**, and
-engine start fails unless:
+(`--gpu-memory-utilization` on the server, default 0.9); it tells vLLM what fraction of the card
+to claim for weights and KV cache. **The aperture lives entirely in the fraction vLLM does not
+claim**, and engine start fails unless:
 
 ```
 MIA_APERTURE_GPU_BYTES  ≤  (1 − gpu_memory_utilization) × total GPU bytes
@@ -261,6 +308,9 @@ On an 80 GiB card, with the 4 GiB default:
 | 0.90 | 8.0 GiB | fits |
 | 0.95 | 4.0 GiB | exactly at the limit |
 | 0.97 | 2.4 GiB | **refused** |
+
+On a card of 40 GB or less, vLLM's default 0.9 leaves under 4 GiB, which is refused: pass 0.8 or
+lower, or set a smaller `MIA_APERTURE_GPU_BYTES`.
 
 Two things worth knowing about that check. It is computed from the *fraction*, not from a
 measurement — so it does not know about anything else sharing the card; and it runs at engine
@@ -301,11 +351,14 @@ explicit `save_to_disk` is never overridden.
 ## Limits
 
 - Graph-mode capture can move per-token logprobs slightly; `enforce_eager=True`
-  (`--enforce-eager`) is bit-exact.
+  (`--enforce-eager`) is bit-exact. `MIA_ALLOW_CUDAGRAPH=0` selects eager for every engine in the
+  process, `vllm serve` included.
 - Q/K capture turns prefix caching off unless you set it.
 - Offline score capture, and Q/K with explicit prefix caching or DP > 1, run eager; a served score
   request on a graph engine is refused (start the server with `--enforce-eager`).
 - Graph steering: at most `MIA_STEER_VMAX` (16) distinct vectors per engine; more are refused.
+- CoRe batch reranking (several cases in one `analyze`) fails when the cases' prompts differ in
+  length; rerank one case at a time, as `demo_corer.py` does.
 
 ## Tuning
 

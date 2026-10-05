@@ -162,8 +162,8 @@ Transformers `5.12.0`, and the stock QK worker at upstream baseline
 `e3d6885899264c81ac61c403c8b56efaf5a02dab` (package version `0.2.0`).
 
 Re-validated on this tree (vLLM `0.29.0`, PyTorch `2.13.0`, Transformers `5.17.0`,
-H100 80GB, bfloat16, eager): the same 8 columns at `top_p=0.80`, recall 100%,
-precision 62.50%, AP 1.0.
+H100 80GB, bfloat16) under the default CUDA graphs: the same 8 columns at `top_p=0.80`,
+recall 100%, precision 62.50%, AP 1.0. For bit-exact attention, pass `enforce_eager=True`.
 
 CPU checks can be run without a model download:
 

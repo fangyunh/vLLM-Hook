@@ -20,7 +20,7 @@ Using TruthfulQA as the training signal, the best layer is selected by held-out 
 
 ## How it integrates with MIA
 
-MIA installs a forward hook on the model's transformer layers at startup (`HSCaptureWorker`). During inference, when the residual stream passes through the probe's best layer, the hook captures the last-token hidden state vector and saves it to disk.
+MIA's hidden-state worker (`capture_hs`) captures the residual stream at the probe's best layer, inside the engine's CUDA graphs, and keeps the last-token vector. It comes back on the output (`out[0].probes`), or under `<hook_dir>/<run_id>/` with `save_to_disk=True`, as in the quick start below.
 
 After generation, `HNodeHallucinationAnalyzer` reads that vector, runs it through the probe, and returns:
 
@@ -75,7 +75,7 @@ llm = MiaLLM(
     worker_name="capture_hs",
     analyzer_name="hnode_hallucination",
     config_file="model_configs/hnode_hallucination/Qwen2.5-1.5B-Instruct.infer.json",
-    gpu_memory_utilization=0.85,
+    gpu_memory_utilization=0.7,
     max_model_len=1024,
     dtype=torch.float16,
     enable_hook=True,

@@ -21,19 +21,10 @@ demo. The five modules beside it are deliberately few: they cover the parts of t
 V2 port that have no use case of their own, and that would fail silently rather than
 loudly if they regressed.
 
-These tests are **resource-aware** and do assume enough access to GPU resources. To reduce contention on shared systems:
-- tests use low `gpu_memory_utilization` values
-- only small or mid-sized models are enabled by default
-
-If the GPU is heavily loaded, model initialization may fail. Current tests assume enough compute to host a 7B model and have `gpu_memory_utilization=0.2~0.5`.
-
 ---
 ## Run Tests
-From the project root:
 
-```bash
-pytest -vv
-```
+Install pytest first (`pip install pytest`), and run from the project root.
 
 ### The hermetic gate (no GPU needed)
 
@@ -41,30 +32,43 @@ Tests that boot a real engine carry the `gpu` marker. To run everything else —
 CI and code review use — select on the **marker**:
 
 ```bash
-pytest tests -q -m "not gpu"      # 90 passed, 11 deselected
+pytest tests -q -m "not gpu"      # 104 passed, 11 deselected
 ```
 
-Use `-m`, **never `-k "not gpu"`**. `-k` is a substring filter over test ids, so it has no
-idea what a GPU test is and gets it wrong both ways: it lets the real-engine tests through
-(they fail on a CPU-only node with `RuntimeError: Device string must not be empty`) and it
-drops pure-CPU tests whose names merely contain "gpu", such as the GPU-*routing* checks,
-which need no GPU at all. See the comment in `tests/conftest.py`.
+Use `-m`, **never `-k "not gpu"`**: `-k` filters test names, so it lets the engine tests through
+and drops CPU tests whose names merely contain "gpu".
 
-Run only attention tracker tests:
+### The GPU tests
 
 ```bash
-pytest tests/use_cases/test_attntracker.py -vv
+pytest tests/use_cases -m gpu
 ```
 
-Run a single model:
+- They boot one engine at a time (each test shuts its engine down) on small models: opt-125m,
+  gpt2, Qwen2-1.5B, Phi-3-mini and Mistral-7B (gated: `hf auth login`), downloaded on first use.
+- Keep them in their own pytest run, apart from the gate: on a GPU in exclusive-process mode
+  (common on clusters) a second process cannot open the device while another holds it, and the
+  engine fails with `CUDA-capable device(s) is/are busy or unavailable`.
+- They use `gpu_memory_utilization` 0.2–0.5 of the card, and write `hs_aperture_dump/` /
+  `qk_aperture_dump/` in the working directory.
+- Models without a shipped config get a random test config in pytest's temporary directory.
+
+Run only the attention tracker tests, or one model:
 
 ```bash
-pytest tests/use_cases/test_attntracker.py::test_attention_tracker[gpt2] -vv
+pytest tests/use_cases/test_attntracker.py -m gpu -vv
+pytest "tests/use_cases/test_attntracker.py::test_attention_tracker[gpt2]" -vv
 ```
 
 ---
 
 ## Common Failures
 
-- **Installed 0 hooks**  
-  Model architecture not matched or config contains no heads.
+- **Nothing captured** (`probes` is `None`, analyzer output empty): the engine log prints
+  `no decoder layers matched` / `no attention modules matched` when the model's module names are
+  not ones MIA knows ([supported models](../docs/configs.md#supported-models)); in eager mode it
+  prints `Installed 0 ... hooks`.
+- **`CUDA-capable device(s) is/are busy or unavailable`**: another process holds the GPU; see
+  above.
+- **`Cannot find any model weights`**: the model was not downloaded (offline, or a gated model
+  without `hf auth login`).
