@@ -116,9 +116,11 @@ from mia.run_utils import (
 from mia.runner import UnsupportedRunnerError
 from mia.workers._common import match_internal_ids
 from mia.workers.steer_worker import (
+    _effective_key,
     _load_steering_vector,
     _parse_steer_layers,
     _resolve_steer_config,
+    resolve_steer_modes,
 )
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
@@ -127,6 +129,7 @@ _ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
 _original_create_engine_config: Callable | None = None
 _original_generate: Callable | None = None
 _original_add_request: Callable | None = None
+_original_process_inputs: Callable | None = None
 _original_llm_generate: Callable | None = None
 _original_completion_response: Callable | None = None
 _original_chat_full_generator: Callable | None = None
@@ -2051,6 +2054,30 @@ async def _patched_add_request(self, request_id, *args, **kwargs):
     return q
 
 
+def _steer_cache_salt(extra) -> str | None:
+    """Prefix-cache salt of a steered request, one per distinct steering; else None."""
+    if not isinstance(extra, dict) or not extra.get("steer"):
+        return None
+    cfg = _resolve_steer_config(extra["steer"], os.environ.get("MIA_STEER_CONFIG"))
+    if not isinstance(cfg, dict) or not cfg.get("vector_path"):
+        return None
+    try:
+        key = [*_effective_key(cfg), cfg.get("optimal_layer", -1), *resolve_steer_modes(cfg)]
+    except (TypeError, ValueError):
+        key = cfg                                 # a config the worker cannot parse: salt it whole
+    digest = hashlib.sha256(_json.dumps(key, sort_keys=True, default=repr).encode()).hexdigest()
+    return f"mia-steer-{digest[:32]}"
+
+
+def _patched_process_inputs(self, *args, **kwargs):
+    """Wrap InputProcessor.process_inputs: salt a steered request, after any caller salt."""
+    request = _original_process_inputs(self, *args, **kwargs)
+    salt = _steer_cache_salt(getattr(getattr(request, "sampling_params", None), "extra_args", None))
+    if salt is not None:
+        request.cache_salt = f"{request.cache_salt}|{salt}" if request.cache_salt else salt
+    return request
+
+
 @contextlib.contextmanager
 def _engine_request_ids(llm):
     eng = getattr(llm, "llm_engine", None)
@@ -2625,12 +2652,14 @@ def register() -> None:
     """Entry point called by vLLM's plugin system at engine startup."""
     global _original_create_engine_config
     global _original_generate, _original_add_request, _original_llm_generate
+    global _original_process_inputs
     global _original_completion_response, _original_chat_full_generator
 
     _apply_delivery_selector()
 
-    # lazy: AsyncLLM and graph install code load only when register() runs
+    # lazy: AsyncLLM, InputProcessor and graph install code load only when register() runs
     from vllm.v1.engine.async_llm import AsyncLLM
+    from vllm.v1.engine.input_processor import InputProcessor
 
     _original_create_engine_config = EngineArgs.create_engine_config
     EngineArgs.create_engine_config = _patched_create_engine_config
@@ -2646,6 +2675,8 @@ def register() -> None:
     AsyncLLM.generate = _patched_generate
     _original_add_request = AsyncLLM.add_request
     AsyncLLM.add_request = _patched_add_request
+    _original_process_inputs = InputProcessor.process_inputs
+    InputProcessor.process_inputs = _patched_process_inputs
 
     try:
         _patch_sample_cached()
