@@ -1,0 +1,12 @@
+{
+    "model_info": {
+        "name": "qwen-attn",
+        "model_id": "Qwen/Qwen2-1.5B-Instruct"
+    },
+    "params": {
+        "important_heads": [[10, 6], [11, 0], [11, 2], [11, 8], [11, 9], [11, 11], [12, 8], [13, 10], [14, 8], [15, 7], [15, 11], [17, 0], [18, 9], [19, 7]]
+    },
+    "hookq":{
+        "hookq_mode": "last_token"
+    }
+}
