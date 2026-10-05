@@ -1,20 +1,8 @@
 """What each TP rank installs, and what MIA refuses, at tensor_parallel_size > 1.
 
-Phase-1 fixes pinned here, each through the REAL install functions driven on CPU with a
-fake V2 worker (no GPU, no engine):
-
-  * HS rank gating (the ``MIA_HS_TP_SHARD=0`` layout, kept for A/B). The residual stream is
-    replicated, so tp_rank 0 captures it. The other ranks used to allocate the full (4+ GiB)
-    aperture, start a drain thread and a writer PROCESS, and create an empty ``tp_rank_<r>`` dir
-    -- all to write nothing. Now they bake the same capture op at the same call sites (the NCCL
-    graph-capture lockstep needs a SYMMETRIC graph) against a 1-row sink, and allocate/start/
-    create nothing else. The default at TP > 1 is the round-robin LAYER shard, pinned in
-    the round-robin LAYER shard (the default at TP > 1).
-  * QK on every rank. Each rank captures its own heads into ``tp_rank_<r>`` with its shard
-    geometry in the sidecar header, buffers sized to its SHARD.
-  * Pipeline parallelism is refused loudly at engine construction (and at install).
-  * The default aperture is sized from the model: a 70B all-layer HS capture no longer gets a
-    fixed 4 GiB that holds 3276 of an 8192-token step's rows.
+The real install functions run on CPU against a fake V2 worker: HS rank gating and its symmetric
+sink op, Q/K on every rank with its own shard, pipeline parallelism refused, and the aperture sized
+from the model.
 """
 from __future__ import annotations
 
@@ -22,15 +10,39 @@ import types
 from types import SimpleNamespace
 
 import pytest
-
-pytest.importorskip("vllm")  # `import mia` pulls in vLLM (mia/llm.py); skip, never error the whole collection
-
 import torch
 import torch.nn as nn
 
+pytest.importorskip("vllm")  # `import mia` pulls in vLLM; skip, never error the whole collection
+
+import mia._plugin as plugin
+import mia.graph.writer_process as wp
+from mia._plugin import _derive_safe_max_batched_tokens, _model_dims
 from mia.errors import MiaConfigurationError, MiaRefusal, MiaSizingError
+from mia.graph.aperture_metadata import ReqCaptureRecord
+from mia.graph.aperture_reader import read_sidecar_header
+from mia.graph.aperture_sizing import (
+    DEFAULT_APERTURE_GPU_BYTES,
+    DEFAULT_AUTOCAP_HEADROOM_BYTES,
+    DEFAULT_AUTOCAP_SAFETY,
+    compute_safe_max_batched_tokens,
+    per_layer_token_bytes_qk,
+)
+from mia.graph.install import (
+    _resolve_qk_aperture_rows,
+    install_execute_model_wrapper,
+    install_qk_hosts,
+)
+from mia.graph.install_hs import (
+    _resolve_aperture_rows,
+    install_execute_model_wrapper_hs,
+    install_hs_hosts,
+)
+from mia.graph.install_steer import install_steer_hosts
+from mia.graph.ops import _capture_hs_impl
 from mia.graph.registry import get_registry
-from mia.graph.tp_shard import resolve_tp_coords
+from mia.graph.tp_shard import qk_shard, resolve_tp_coords
+from mia.workers.hs_capture_worker import HSCaptureWorker
 
 GIB = 1 << 30
 HIDDEN, LAYERS, H_Q, H_KV, CAP = 16, 3, 4, 2, 16
@@ -60,8 +72,7 @@ class _Runner:
 
 
 def _model(tp, *, attn_heads=None):
-    """A fresh model with FRESH layer/attention classes (MIA wraps classes, so each test gets
-    its own), modules named exactly like vLLM's Llama so MIA's matchers find them."""
+    """A model with fresh classes (MIA wraps classes), named like vLLM's Llama for the matchers."""
     local_q = H_Q // tp
     local_kv = max(1, H_KV // tp)
     q_heads = local_q if attn_heads is None else attn_heads
@@ -109,9 +120,7 @@ def _worker(tp, rank, pp=1, model=None):
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
-    """Aperture dumps into tmp; a small explicit aperture (CPU 'devices' report 1 GiB); the
-    synchronous drain (no consumer thread); and a COUNTING stub for the writer process, so a
-    rank that starts one is caught without spawning a real child."""
+    """A tmp aperture dir, a small aperture, the synchronous drain and a counting writer stub."""
     monkeypatch.setenv("MIA_APERTURE_DIR", str(tmp_path / "aperture"))
     monkeypatch.setenv("MIA_APERTURE_GPU_BYTES", str(1 << 20))
     monkeypatch.setenv("MIA_APERTURE_SYNC_DRAIN", "1")
@@ -119,20 +128,17 @@ def env(monkeypatch, tmp_path):
     monkeypatch.delenv("MIA_HS_TP_SYMMETRIC", raising=False)
     monkeypatch.delenv("MIA_HS_TP_SHARD", raising=False)
     started = []
-    import mia.graph.writer_process as wp
     monkeypatch.setattr(wp.WriterProcess, "from_env",
                         classmethod(lambda cls: started.append(1) or object()))
     return SimpleNamespace(aperture=tmp_path / "aperture", writers=started)
 
 
 def _install_hs(worker):
-    from mia.graph.install_hs import install_execute_model_wrapper_hs, install_hs_hosts
     install_hs_hosts(worker)
     install_execute_model_wrapper_hs(worker.model_runner, worker)
 
 
 def _install_qk(worker):
-    from mia.graph.install import install_execute_model_wrapper, install_qk_hosts
     install_qk_hosts(worker)
     install_execute_model_wrapper(worker.model_runner, worker)
 
@@ -142,13 +148,9 @@ def _hosts(worker, attr):
             if getattr(m, attr, None) is not None}
 
 
-# --------------------------------------------------------------------------------------
-# HS
-# --------------------------------------------------------------------------------------
+# --- HS ---
 
 def test_hs_non_capture_rank_allocates_and_starts_nothing(env, monkeypatch):
-    from mia.workers.hs_capture_worker import HSCaptureWorker
-
     monkeypatch.setenv("MIA_HS_TP_SHARD", "0")                # the rank-0-only A/B layout
     w = _worker(tp=2, rank=1)
     _install_hs(w)
@@ -164,10 +166,7 @@ def test_hs_non_capture_rank_allocates_and_starts_nothing(env, monkeypatch):
 
 
 def test_hs_non_capture_rank_still_bakes_the_op_symmetrically(env, monkeypatch):
-    """The sink must keep the graph IDENTICAL to rank 0's: a host with the op on every layer,
-    a per-layer buffer, a capture_index row the width of the token cap -- only the buffer's
-    row count differs (1 vs R+1). (The rank-0-only A/B layout; the layer shard's per-layer
-    version of this invariant is covered by the layer-shard path.)"""
+    """A sink rank bakes rank 0's graph; only the buffer's row count differs (1 vs R+1)."""
     monkeypatch.setenv("MIA_HS_TP_SHARD", "0")
     w0, w1 = _worker(tp=2, rank=0), _worker(tp=2, rank=1)
     _install_hs(w0)
@@ -183,10 +182,9 @@ def test_hs_non_capture_rank_still_bakes_the_op_symmetrically(env, monkeypatch):
         assert a.hs_buf.shape[1] == b.hs_buf.shape[1] == HIDDEN
         assert a.hs_buf.shape[0] > CAP and b.hs_buf.shape == (1, HIDDEN)
         assert int(b.capture_index.abs().sum()) == 0
-    # per-layer sink buffers, like rank 0's per-layer apertures (no shared mutated buffer)
+    # One sink buffer per layer, like rank 0's per-layer apertures.
     assert len({h.hs_buf.data_ptr() for h in h1.values()}) == LAYERS
-    # ...and a replay of the sink op lands every token on the sink row, in bounds.
-    from mia.graph.ops import _capture_hs_impl
+    # A replay of the sink op lands every token on the sink row, in bounds.
     b = h1["model.layers.0"]
     x = torch.randn(CAP, HIDDEN)
     _capture_hs_impl(x, x, b.hs_buf, b.capture_index, 1)
@@ -195,9 +193,6 @@ def test_hs_non_capture_rank_still_bakes_the_op_symmetrically(env, monkeypatch):
 
 
 def test_hs_capture_rank_gets_the_aperture_a_header_and_a_rank0_dir(env):
-    from mia.graph.aperture_reader import read_sidecar_header
-    from mia.workers.hs_capture_worker import HSCaptureWorker
-
     w = _worker(tp=2, rank=0)
     _install_hs(w)
     assert w._should_capture is True and get_registry(w, "hs") is not None
@@ -205,7 +200,7 @@ def test_hs_capture_rank_gets_the_aperture_a_header_and_a_rank0_dir(env):
     assert env.writers == [1]
     run_dir = env.aperture / "tp_rank_0"
     assert run_dir.is_dir()
-    # nothing captured yet -> flush_aperture returns no dir (only dirs HOLDING data)
+    # Nothing captured yet, so no dir to return.
     assert HSCaptureWorker.flush_aperture(w) is None
     hdr = read_sidecar_header(str(run_dir / "hs_aperture_meta.jsonl"))
     assert (hdr["tp_rank"], hdr["tp_size"], hdr["num_layers"], hdr["capture_all_ranks"]) \
@@ -214,9 +209,6 @@ def test_hs_capture_rank_gets_the_aperture_a_header_and_a_rank0_dir(env):
 
 
 def test_hs_flush_returns_the_dir_once_it_holds_rows(env):
-    from mia.graph.aperture_metadata import ReqCaptureRecord
-    from mia.workers.hs_capture_worker import HSCaptureWorker
-
     w = _worker(tp=1, rank=0)
     _install_hs(w)
     drain, ap = w._hs_drain, w._capture_aperture
@@ -236,9 +228,7 @@ def test_hs_capture_all_ranks_diagnostic_still_captures_everywhere(env, monkeypa
 
 
 def test_hs_eager_non_capture_rank_starts_no_writer(env, monkeypatch):
-    """The eager path's install_hooks: rank 1 must not start a writer process either."""
-    from mia.workers.hs_capture_worker import HSCaptureWorker
-
+    """The eager path's install_hooks: rank 1 starts no writer process either."""
     monkeypatch.setattr("mia.workers.hs_capture_worker.require_v2_runner", lambda r: None)
     w = _worker(tp=2, rank=1)
     w._hooks_installed = False
@@ -252,17 +242,11 @@ def test_hs_eager_non_capture_rank_starts_no_writer(env, monkeypatch):
     assert w0._should_capture is True and env.writers == [1]
 
 
-# --------------------------------------------------------------------------------------
-# QK
-# --------------------------------------------------------------------------------------
+# --- QK ---
 
 @pytest.mark.parametrize("rank", [0, 1])
 def test_qk_every_rank_captures_its_own_shard(env, rank):
-    """Rank 1 used to install NOTHING (should_capture = rank % tp == 0). Now every rank has
-    hosts sized to its shard, a drain into its own tp_rank dir, and its geometry in the
-    header."""
-    from mia.graph.aperture_reader import read_sidecar_header
-
+    """Each rank gets hosts sized to its shard, its own tp_rank dir and its header geometry."""
     w = _worker(tp=2, rank=rank)
     _install_qk(w)
     assert w._should_capture is True and get_registry(w, "qk") is not None
@@ -287,7 +271,6 @@ def test_qk_every_rank_captures_its_own_shard(env, rank):
 
 def test_qk_refuses_a_model_whose_attention_modules_shard_differently(env):
     w = _worker(tp=2, rank=0, model=_model(2, attn_heads=3))
-    from mia.graph.install import install_qk_hosts
     with pytest.raises(MiaConfigurationError, match="shard geometry mismatch"):
         install_qk_hosts(w)
 
@@ -297,12 +280,10 @@ def test_tp_coords_fall_back_to_rank_mod_tp():
     assert resolve_tp_coords(SimpleNamespace(rank=0)) == (0, 1)
 
 
-# --------------------------------------------------------------------------------------
-# Pipeline parallelism: refused loudly
-# --------------------------------------------------------------------------------------
+# --- Pipeline parallelism: refused loudly ---
 
 def _drive_seam(monkeypatch, engine_pp=1, resolved_pp=1):
-    import mia._plugin as plugin
+    """Run the engine-config seam on fake args; return (config, calls to vLLM's original)."""
     called = []
     config = SimpleNamespace(
         compilation_config=SimpleNamespace(cudagraph_mode="NONE"),
@@ -338,23 +319,15 @@ def test_pp1_passes_the_seam(monkeypatch):
 
 @pytest.mark.parametrize("which", ["hs", "qk", "steer"])
 def test_pp_is_refused_at_install_and_is_a_refusal(env, which):
-    """Belt to the engine-construction braces, and a MiaRefusal so the load_model handler
-    re-raises it instead of degrading to 'no capture'."""
+    """Refused at install too, as a MiaRefusal so load_model re-raises it."""
     w = _worker(tp=1, rank=0, pp=2)
-    if which == "hs":
-        from mia.graph.install_hs import install_hs_hosts as fn
-    elif which == "qk":
-        from mia.graph.install import install_qk_hosts as fn
-    else:
-        from mia.graph.install_steer import install_steer_hosts as fn
+    fn = {"hs": install_hs_hosts, "qk": install_qk_hosts, "steer": install_steer_hosts}[which]
     with pytest.raises(MiaConfigurationError, match="pipeline") as e:
         fn(w)
     assert isinstance(e.value, MiaRefusal)
 
 
-# --------------------------------------------------------------------------------------
-# Aperture sizing at the study's shapes
-# --------------------------------------------------------------------------------------
+# --- Aperture sizing at 8B and 70B shapes ---
 
 H100 = 80 * GIB
 ROW_70B_HS = 80 * 8192 * 2                   # one token, every layer, bf16: 1.25 MiB
@@ -363,7 +336,6 @@ ROW_8B_HS = 32 * 4096 * 2
 
 def _rows(monkeypatch, util, num_layers, width, rows_needed, total=H100):
     """Drive install_hs._resolve_aperture_rows with a fake CUDA device of ``total`` bytes."""
-    from mia.graph.install_hs import _resolve_aperture_rows
     monkeypatch.setattr(torch.cuda, "get_device_properties",
                         lambda d: SimpleNamespace(total_memory=total))
     w = SimpleNamespace(vllm_config=SimpleNamespace(
@@ -373,9 +345,7 @@ def _rows(monkeypatch, util, num_layers, width, rows_needed, total=H100):
 
 
 def test_the_old_fixed_default_could_not_hold_one_70b_step(monkeypatch):
-    """The defect, stated: 4 GiB / 1.25 MiB = 3276 rows < an 8192-token step, so the reserve
-    of a long prefill could never succeed -> ApertureBackpressureError mid-run."""
-    from mia.graph.aperture_sizing import DEFAULT_APERTURE_GPU_BYTES
+    """4 GiB holds 3276 of a 70B step's rows: a fixed default could not admit an 8192-token step."""
     assert DEFAULT_APERTURE_GPU_BYTES // ROW_70B_HS == 3276 < 8192
 
 
@@ -401,9 +371,7 @@ def test_an_explicit_aperture_always_wins(monkeypatch):
 
 
 def test_8b_tp1_defaults_are_unchanged(monkeypatch):
-    """TP=1 byte-identity for the existing MIA_v2 rows (server, max_num_batched_tokens 8192):
-    both 8B capture kinds still get exactly the legacy 4 GiB."""
-    from mia.graph.install import _resolve_qk_aperture_rows
+    """At TP=1 and an 8192-token step, both 8B capture kinds get exactly 4 GiB."""
     monkeypatch.delenv("MIA_APERTURE_GPU_BYTES", raising=False)
     R, nbytes = _rows(monkeypatch, 0.9, 32, 4096, 8192)
     assert (R, nbytes) == (16384, 4 * GIB)
@@ -415,10 +383,7 @@ def test_8b_tp1_defaults_are_unchanged(monkeypatch):
 
 
 def test_qk_aperture_uses_sharded_widths_at_70b(monkeypatch):
-    """Per rank, a 70B QK row is 80 x (16 + 2 heads) x 128 x 2 B at TP4 -- the default 4 GiB
-    already holds a full 8192-token step there; the FULL width would have claimed 11.25 GiB."""
-    from mia.graph.install import _resolve_qk_aperture_rows
-    from mia.graph.tp_shard import qk_shard
+    """A 70B Q/K row is sized per rank's shard, so 4 GiB holds a full 8192-token step at TP4/TP8."""
     monkeypatch.delenv("MIA_APERTURE_GPU_BYTES", raising=False)
     monkeypatch.setattr(torch.cuda, "get_device_properties",
                         lambda d: SimpleNamespace(total_memory=H100))
@@ -431,9 +396,7 @@ def test_qk_aperture_uses_sharded_widths_at_70b(monkeypatch):
         assert nbytes == 4 * GIB and R >= 8192, (tp, R)
 
 
-# --------------------------------------------------------------------------------------
-# Autocap (opt-in OOM guard) uses SHARDED QK widths and the model-sized aperture
-# --------------------------------------------------------------------------------------
+# --- Autocap (opt-in OOM guard): sharded Q/K widths and the model-sized aperture ---
 
 def _cfg70b(tp, util=0.85, mnbt=8192):
     text = SimpleNamespace(num_hidden_layers=80, hidden_size=8192, num_attention_heads=64,
@@ -457,15 +420,11 @@ def nvml(monkeypatch):
 
 @pytest.mark.parametrize("tp,local_q,local_kv", [(1, 64, 8), (4, 16, 2), (8, 8, 1)])
 def test_autocap_dims_are_per_rank_shards(nvml, tp, local_q, local_kv):
-    from mia._plugin import _model_dims
     dims = _model_dims(_cfg70b(tp))
     assert (dims["n_q_heads"], dims["n_kv_heads"], dims["head_dim"]) == (local_q, local_kv, 128)
 
 
 def test_autocap_qk_cap_is_computed_on_the_shard(nvml):
-    from mia._plugin import _derive_safe_max_batched_tokens
-    from mia.graph.aperture_sizing import (
-        DEFAULT_APERTURE_GPU_BYTES, compute_safe_max_batched_tokens, per_layer_token_bytes_qk)
     got = _derive_safe_max_batched_tokens(_cfg70b(4), ["qk"])
     want = compute_safe_max_batched_tokens(H100, 0.85, DEFAULT_APERTURE_GPU_BYTES, 80,
                                            per_layer_token_bytes_qk(16, 2, 128, 2))
@@ -477,14 +436,7 @@ def test_autocap_qk_cap_is_computed_on_the_shard(nvml):
 @pytest.mark.parametrize("shard,layers_per_rank", [("0", 80), (None, 20)])
 def test_autocap_accounts_for_a_default_aperture_grown_to_the_step(nvml, monkeypatch, shard,
                                                                     layers_per_rank):
-    """With a wide margin the fixed-4-GiB cap would be large enough that the INSTALL grows the
-    default aperture past 4 GiB -- the re-solved cap must still fit aperture + transient. The
-    per-rank HS row is every layer with MIA_HS_TP_SHARD=0 (rank 0 captures all 80) and rank 0's
-    round-robin share (20 of 80 at TP4) under the default layer shard."""
-    from mia._plugin import _derive_safe_max_batched_tokens
-    from mia.graph.aperture_sizing import (
-        DEFAULT_APERTURE_GPU_BYTES, DEFAULT_AUTOCAP_HEADROOM_BYTES, DEFAULT_AUTOCAP_SAFETY,
-        compute_safe_max_batched_tokens)
+    """The cap fits the aperture grown to one step plus the transient (rank 0's per-rank row)."""
     if shard is None:
         monkeypatch.delenv("MIA_HS_TP_SHARD", raising=False)
     else:
@@ -501,5 +453,5 @@ def test_autocap_accounts_for_a_default_aperture_grown_to_the_step(nvml, monkeyp
         return cap * row * DEFAULT_AUTOCAP_SAFETY + max(
             DEFAULT_APERTURE_GPU_BYTES, cap * row) <= margin
 
-    assert not fits(naive)          # the fixed-aperture answer would overcommit
+    assert not fits(naive)          # a fixed-aperture cap would overcommit
     assert fits(got) and not fits(got + 1)

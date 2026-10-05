@@ -1,10 +1,7 @@
-"""What MiaClient actually puts on the wire.
+"""What MiaClient puts on the wire, with the OpenAI transport stubbed: no server, no GPU.
 
-The client's whole job is to turn a call into one request whose `vllm_xargs` the plugin will
-read back correctly, so these tests stub the OpenAI transport and assert on the request --
-no server, no GPU. The cases that matter are the ones a wrong answer would hide: a dict that
-the plugin does not JSON-decode would arrive as a string and be silently ignored, and a
-token-exact prompt that went through the chat endpoint would be re-tokenized.
+The cases that matter: a dict under a key the plugin does not JSON-decode would arrive as an
+ignored string, and token ids sent through the chat endpoint would be re-tokenized.
 """
 from __future__ import annotations
 

@@ -12,8 +12,11 @@ import numpy as np
 import pytest
 import torch
 
-pytest.importorskip("vllm")  # `import mia` pulls in vLLM (mia/llm.py); skip, never error the whole collection
+pytest.importorskip("vllm")  # `import mia` pulls in vLLM; skip, never error the whole collection
 
+import mia.workers.hs_capture_worker as hs
+import mia.workers.qk_capture_worker as qk
+import mia.workers.steer_worker as steer
 from mia.runner import (
     StepView,
     UnsupportedRunnerError,
@@ -23,9 +26,7 @@ from mia.runner import (
     step_view,
 )
 
-
-# A value no live row could plausibly hold, so a dropped `[:n]` slice leaks it
-# straight into an assertion instead of hiding behind a same-length coincidence.
+# A value no live row holds, so a dropped `[:n]` slice shows up in an assertion.
 _STALE = 999999
 
 
@@ -33,11 +34,7 @@ class _FakeV2Runner:
     __module__ = "vllm.v1.worker.gpu.model_runner"
 
     def __init__(self, num_reqs=2, pad=3):
-        # [max_num_reqs, 3]; V2's block_tables is a genuine max_num_reqs-sized
-        # buffer whose tail rows hold stale block ids from a previous step
-        # (block_table.py zeroes/refills only `[:num_reqs]` on each append).
-        # Live rows are [[0, 1, 2], [3, 4, 5]]; stale rows start at 6 and would
-        # never coincide with a live row's contents.
+        # Like V2's block tables: max_num_reqs rows; live rows [[0, 1, 2], [3, 4, 5]], stale tail.
         max_num_reqs = num_reqs + pad
         self.block_tables = types.SimpleNamespace(
             input_block_tables=(
@@ -46,11 +43,7 @@ class _FakeV2Runner:
                 ),
             )
         )
-        # req_states.prompt_len is indexed by a PERSISTENT req_state SLOT, not the batch
-        # row `i` -- distinct per-slot values (1000, 1001, ...) so a step_view() that
-        # forgot the idx_mapping indirection (see _fake_input_batch's idx_mapping_np,
-        # which is REVERSED for the live rows) reads the wrong values, not a coincidental
-        # match.
+        # Indexed by req_state slot, not batch row: distinct values expose a skipped idx_mapping.
         self.req_states = types.SimpleNamespace(
             prompt_len=types.SimpleNamespace(
                 np=np.arange(1000, 1000 + max_num_reqs, dtype=np.int32)
@@ -71,16 +64,7 @@ class _FakeV1Runner:
 
 
 def _fake_input_batch(num_reqs=2, pad=3):
-    """Every sliced field is allocated PADDED to max_num_reqs = num_reqs + pad,
-    with a stale/sentinel tail.
-
-    This mirrors real V2: `query_start_loc`/`query_start_loc_np`/`seq_lens` come
-    back from `prepare_inputs` sized to `num_reqs_padded` (cudagraph batching;
-    model_runner.py ~1233-1274), and MIA's own `step_view()` slices every field
-    defensively for the same reason `block_tables` needs it — so the fake pads
-    them all, to prove `step_view()` cannot forget a slice and silently route
-    another (stale) row's data into a live request.
-    """
+    """A V2 InputBatch, every field padded past num_reqs with a sentinel tail (as under graphs)."""
     max_num_reqs = num_reqs + pad
 
     num_scheduled_tokens = np.full(max_num_reqs, _STALE, dtype=np.int32)
@@ -96,20 +80,14 @@ def _fake_input_batch(num_reqs=2, pad=3):
     prefill_len_np = np.full(max_num_reqs, _STALE, dtype=np.int32)
     prefill_len_np[:num_reqs] = [5, 9]
 
-    # Tail deliberately True: row 1's live value is False, so a dropped slice
-    # that leaks a tail element flips a result the live rows never produce.
+    # A True tail: a leaked tail element differs from row 1's live False.
     is_prefilling_np = np.full(max_num_reqs, True)
     is_prefilling_np[:num_reqs] = [True, False]
 
     seq_lens = torch.full((max_num_reqs,), _STALE, dtype=torch.int32)
     seq_lens[:num_reqs] = torch.tensor([5, 10], dtype=torch.int32)
 
-    # batch row -> req_state slot (see RequestState.prompt_len on _FakeV2Runner).
-    # REVERSED for the live rows (row i -> slot num_reqs-1-i) so a step_view() that
-    # forgot the indirection (indexed prompt_len.np[i] directly) reads the wrong slot,
-    # not a coincidental match. Padded tail rows map to slots >= num_reqs -- distinct
-    # from every live slot -- so a dropped `[:n]` slice leaks recognizably-wrong extra
-    # elements instead of silently agreeing on length.
+    # Batch row -> req_state slot, reversed for live rows; tail rows map to unused slots.
     idx_mapping_np = np.arange(max_num_reqs, dtype=np.intp)
     idx_mapping_np[:num_reqs] = np.arange(num_reqs - 1, -1, -1, dtype=np.intp)
 
@@ -175,13 +153,7 @@ def test_stash_install_is_idempotent():
 
 
 def test_step_view_maps_every_field_and_slices_to_num_reqs():
-    """Every field is padded past num_reqs with a stale/sentinel tail (see
-    `_fake_input_batch`/`_FakeV2Runner`). Asserting exact contents — not just
-    length or a single shape check — means a dropped `[:n]` anywhere in
-    `step_view()` leaks a sentinel (999999, a stray True, or an extra stale
-    block-table row) straight into a failing assertion, rather than passing by
-    coincidence because the live and padded lengths matched.
-    """
+    """Exact contents: a dropped `[:n]` anywhere in `step_view()` leaks a sentinel."""
     runner = _FakeV2Runner()
     stash = install_request_arg_stash(runner)
     view = step_view(runner, _fake_input_batch(), stash)
@@ -194,9 +166,7 @@ def test_step_view_maps_every_field_and_slices_to_num_reqs():
     assert view.query_start_loc_np.tolist() == [0, 5, 6]
     assert view.num_computed_tokens_np.tolist() == [0, 9]
     assert view.prefill_len_np.tolist() == [5, 9]
-    # row0 -> slot idx_mapping_np[0]=1 -> prompt_len.np[1]=1001;
-    # row1 -> slot idx_mapping_np[1]=0 -> prompt_len.np[0]=1000. The reversed order
-    # proves the idx_mapping indirection ran -- identity indexing would read [1000, 1001].
+    # Reversed by idx_mapping: identity indexing would read [1000, 1001].
     assert view.prompt_len_np.tolist() == [1001, 1000]
     assert view.is_prefilling_np.tolist() == [True, False]
     assert view.seq_lens.tolist() == [5, 10]
@@ -211,18 +181,10 @@ def test_step_view_is_immutable():
         view.num_reqs = 99
 
 
-# ---------------------------------------------------------------------------
-# Worker refusal: the pre-port failure mode was SILENCE (a V1 runner captured
-# nothing and reported success). Every eager worker's install_hooks() must now
-# raise instead. Each `_Worker` subclass bypasses vLLM's real `Worker.__init__`
-# so the fake never needs a real GPU model/config -- `install_hooks` must reject
-# the runner before it touches anything else.
-# ---------------------------------------------------------------------------
+# --- Each eager worker's install_hooks() refuses a V1 runner before touching anything else. ---
 
 
 def test_workers_refuse_a_v1_runner():
-    import mia.workers.hs_capture_worker as hs
-
     class _Worker(hs.HSCaptureWorker):
         def __init__(self):  # bypass vLLM's Worker.__init__
             self.model_runner = _FakeV1Runner()
@@ -232,8 +194,6 @@ def test_workers_refuse_a_v1_runner():
 
 
 def test_qk_worker_refuses_a_v1_runner():
-    import mia.workers.qk_capture_worker as qk
-
     class _Worker(qk.QKCaptureWorker):
         def __init__(self):
             self.model_runner = _FakeV1Runner()
@@ -243,11 +203,7 @@ def test_qk_worker_refuses_a_v1_runner():
 
 
 def test_steer_worker_refuses_a_v1_runner():
-    """SteerWorker.install_hooks wraps its real work in a broad
-    `try/except Exception: print(...)` -- require_v2_runner must run OUTSIDE that
-    guard, or this raise gets swallowed into a log line and capture silently no-ops."""
-    import mia.workers.steer_worker as steer
-
+    """The refusal runs outside install_hooks' broad except, so it is raised, not printed."""
     class _Worker(steer.SteerWorker):
         def __init__(self):
             self.model_runner = _FakeV1Runner()

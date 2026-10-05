@@ -1,4 +1,4 @@
-"""CPU checks; run directly with Python or through the repository's pytest suite."""
+"""AttnLink analyzer and demo helpers on CPU; runs under pytest or directly with Python."""
 import copy
 import hashlib
 import math
@@ -12,13 +12,12 @@ from unittest.mock import patch
 import pytest
 import torch
 
-# `mia` reaches `from vllm import LLM` via mia/llm.py, so guard the optional dependency here
-# rather than letting a missing vLLM ERROR collection for the whole suite.
-pytest.importorskip("vllm")
+pytest.importorskip("vllm")  # `import mia` pulls in vLLM; skip, never error the whole collection
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples"))
-from demo_attnlink import INPUT_SEQ, evaluate_ranking, prepare_prompt
 from mia.analyzers.attnlink_analyzer import AttnLinkAnalyzer, select_columns
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples"))  # for a direct run
+from demo_attnlink import INPUT_SEQ, evaluate_ranking, prepare_prompt  # noqa: E402
 
 
 class CharacterTokenizer:
@@ -49,8 +48,7 @@ class TestAttnLink(unittest.TestCase):
 
     def test_gqa_full_softmax_and_mean_pooling(self):
         result = self.analyzer.analyze(self.spec, probes=self.capture)
-        # Full probabilities: [0.1, 0.2, 0.4, 0.1, 0.2]. Candidate-only
-        # normalization and span-sum pooling both give different results.
+        # Full softmax is [0.1, 0.2, 0.4, 0.1, 0.2]; candidate-only softmax or span sums differ.
         torch.testing.assert_close(torch.tensor(result["scores"]), torch.tensor([0.3, 0.2]))
         self.assertEqual(result["ranking"], [0, 1])
 
