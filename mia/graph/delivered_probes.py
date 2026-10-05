@@ -91,7 +91,7 @@ def pass_sizes(n_rows: int, meta: dict) -> List[int]:
         return [n_rows]
     if hooks == "decode":
         return [1] * n_rows
-    # Prompt pass: the prompt tokens this sample computed, at most n_rows - (n_gen - 1); then 1 row.
+    # Prompt pass: tokens this sample computed (<= rows - n_gen + 1); each later pass is one row.
     bound = n_rows - max(int(meta["n_gen"]) - 1, 0)
     cached = meta.get("n_cached")
     p = bound if cached is None else int(meta["n_prompt"]) - int(cached)

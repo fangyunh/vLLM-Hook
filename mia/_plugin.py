@@ -162,7 +162,7 @@ _DEFAULT_HOOK_DIR = "/dev/shm/mia"
 
 
 def _graph_mode() -> bool:
-    # lazy: graph install code (reads env at import) stays out of plugin load
+    # lazy: graph install code (reads env at import) stays out of import mia._plugin
     from mia.graph.install import graph_mode_enabled
     return graph_mode_enabled()
 
@@ -223,7 +223,7 @@ _SAMPLE_CACHED_ATTR = "_mia_n_cached"
 
 
 def _patch_sample_cached() -> None:
-    """Record each n>1 sample's own prefix-cache count on its output (vLLM keeps one per parent)."""
+    """Record every sample's own prefix-cache count on its output (vLLM keeps one per parent)."""
     orig = op.RequestState._new_completion_output
     if getattr(orig, "_mia", False):
         return
@@ -250,7 +250,7 @@ def _sample_cached(output, sample, n: int):
 
 def _hybrid_marker(output, extra: dict, explicit_save, gen_counts: dict, nonce=None,
                    key=None, cached_counts=None) -> dict:
-    # lazy: graph install code (reads env at import) stays out of plugin load
+    # lazy: graph install code (reads env at import) stays out of import mia._plugin
     from mia.graph.install_hs import DEFAULT_HOOKS_ON, DEFAULT_HS_MODE
     outs = list(getattr(output, "outputs", None) or [])
     n = max(len(outs), 1)
@@ -1222,7 +1222,7 @@ def _patched_create_engine_config(self, *args, **kwargs):
         _drop_inherited_delivery()
     mode = resolve_capture_mode(self, os.environ, _ENGINE_HINTS.get(), kind=_wkind)
     graph_mode = mode.graph
-    # lazy: graph install code (reads env at import) stays out of plugin load
+    # lazy: graph install code (reads env at import) stays out of import mia._plugin
     from mia.graph.install import set_graph_mode
     set_graph_mode(graph_mode)
     if mode.engine_eager:
@@ -1822,11 +1822,8 @@ async def _patched_generate(
     **kwargs,
 ) -> AsyncIterator:
     effective_params = sampling_params
-    try:
-        if isinstance(prompt, EngineCoreRequest) and prompt.sampling_params is not None:
-            effective_params = prompt.sampling_params
-    except ImportError:
-        pass
+    if isinstance(prompt, EngineCoreRequest) and prompt.sampling_params is not None:
+        effective_params = prompt.sampling_params
 
     extra = dict(effective_params.extra_args or {})
     for _k in ("output_qk", "output_hidden_states", "steer"):
@@ -2118,7 +2115,7 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
     info = _offline_delivery_info(llm)
     if not info.get("roots"):
         return set()
-    # lazy: tests patch these readers; graph install code stays out of plugin load
+    # lazy: tests patch these readers; graph install code stays out of import mia._plugin
     from mia.graph.aperture_gather import GatherError, load_delivered, wait_delivered
     from mia.graph.delivered_probes import hs_probes
     from mia.graph.install_hs import DEFAULT_HOOKS_ON, DEFAULT_HS_MODE

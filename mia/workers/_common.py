@@ -10,7 +10,7 @@ import torch
 import vllm.envs as envs
 from safetensors.torch import save_file as _st_save
 
-from mia._profiler import PROF, PROF as _PROF, is_enabled as _en
+from mia._profiler import PROF, is_enabled
 from mia.artifact_quant import (
     quant_nbytes,
     quantize,
@@ -210,9 +210,9 @@ def save_safetensors_atomic(flat_dict: dict, meta: dict, run_dir: str, basename:
         os.rename(tmp_st, out_path)
 
     try:
-        if _en():
+        if is_enabled():
             meta = dict(meta)
-            meta["profile"] = _PROF.summary_only()
+            meta["profile"] = PROF.summary_only()
     except Exception:
         pass
 

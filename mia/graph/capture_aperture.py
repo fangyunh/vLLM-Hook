@@ -1,6 +1,8 @@
 """Fixed-size GPU capture aperture written in-graph at an advancing cursor, drained off-loop."""
 from __future__ import annotations
+
 from typing import List, Optional, Tuple
+
 import torch
 
 

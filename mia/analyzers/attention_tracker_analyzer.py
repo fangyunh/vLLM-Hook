@@ -1,8 +1,9 @@
 """Attention Tracker analyzer: prompt-injection detection from captured attention."""
+from typing import Dict, Tuple, Optional, List
+
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-from typing import Dict, Tuple, Optional, List
 
 from mia._profiler import PROF
 from mia.run_utils import load_and_merge_qk_cache, unpack_qk

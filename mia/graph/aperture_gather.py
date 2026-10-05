@@ -5,7 +5,6 @@ import glob
 import json
 import logging
 import multiprocessing
-import multiprocessing as mp
 import os
 import queue as _queue
 import re
@@ -1439,7 +1438,7 @@ class ApertureGatherProcess:
                          f"below the published floor in hs_trim.w*of*.json are RECLAIMED and "
                          f"aperture_reader names them instead of returning zeros. The delivered "
                          f"artifacts under {self.out_dir} are this run's product")
-        ctx = mp.get_context("spawn")
+        ctx = multiprocessing.get_context("spawn")
         saved = {k: os.environ.get(k) for k in (*_CHILD_THREAD_ENV, "CUDA_VISIBLE_DEVICES")}
         try:
             for k, v in _CHILD_THREAD_ENV.items():

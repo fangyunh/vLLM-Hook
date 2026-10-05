@@ -1,5 +1,6 @@
 """Per-request delivery router: picks the transport (RPC or disk) and where to analyze."""
 from __future__ import annotations
+
 from dataclasses import dataclass
 
 @dataclass(frozen=True)

@@ -6,7 +6,6 @@ import os
 
 import numpy as np
 import torch
-import torch as _torch
 
 from .aperture_metadata import read_qk_sidecar, read_sidecar
 from .aperture_run_index import INDEX_NAME, read_run_index, read_run_segments, run_slices
@@ -432,7 +431,7 @@ def _hs_replicas_equal(found, headers, *, skip_trimmed: bool = False) -> None:
                 f"than tp_rank 0: missing {sorted(keys0 - keys)[:4]} extra {sorted(keys - keys0)[:4]}")
         for q, L in sorted(keys0, key=lambda x: (str(x[0]), int(x[1]))):
             a, b = art[q][L], base[q][L]
-            if a.shape != b.shape or not _torch.equal(a, b):
+            if a.shape != b.shape or not torch.equal(a, b):
                 raise TPShardError(
                     f"all-ranks HS replicas differ: req {q!r} layer {L} on tp_rank {r} is not "
                     f"bitwise equal to tp_rank 0's (shapes {tuple(a.shape)} vs {tuple(b.shape)})")

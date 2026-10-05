@@ -154,7 +154,8 @@ class MiaClient:
 
         Args:
             messages, model: as for ``chat.completions.create``.
-            save_to_disk: write captured data to ``<hook_dir>/<run_id>/`` instead of ``probes``.
+            save_to_disk: True writes the capture to ``<hook_dir>/<run_id>/``, False returns it on
+                ``probes``; None (default) omits the setting and the server decides.
             run_id: the run's name (default: a new uuid).
             extra_xargs: per-request settings the config file lacks, e.g. ``{"hooks_on": "both"}``.
             steer: a steering config for this request alone.

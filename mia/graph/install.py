@@ -10,7 +10,6 @@ from typing import Any, Dict, Optional
 
 import torch
 from vllm.forward_context import get_forward_context
-from vllm.v1.worker.gpu_worker import Worker
 
 from mia._profiler import PROF
 from mia.graph import register_graph_ops
@@ -758,6 +757,8 @@ def patch_worker_load_model() -> None:
     if _LOAD_MODEL_PATCHED:
         return
 
+    # lazy: vLLM worker internals load only when the patch runs
+    from vllm.v1.worker.gpu_worker import Worker
     orig_load_model = Worker.load_model
 
     def patched_load_model(self, *args, **kwargs):
