@@ -68,8 +68,6 @@ def _require_buffer_mode() -> None:
             "capture mode was removed. Buffer mode is the only FULL-cudagraph capture path; "
             "unset MIA_QK_CAPTURE or set it to 'buffer'.")
 
-_BATCHED_EGRESS = os.environ.get("MIA_BATCHED_EGRESS", "1") == "1"
-
 _capture_dbg = {"n": 0}
 
 _NO_PREFIXK = os.environ.get("MIA_QK_NO_PREFIXK") == "1"

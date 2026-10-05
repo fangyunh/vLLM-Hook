@@ -6,10 +6,6 @@ import os
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 PUBLIC_LEVERS: Dict[str, Tuple[str, str, str]] = {
-    "batched_egress": (
-        "MIA_BATCHED_EGRESS", "on",
-        "Copy captured rows out with one gather per layer, not one copy per request. Default on.",
-    ),
     "steer_fused": (
         "MIA_STEER_FUSED", "on",
         "Run the steering op as one fused kernel; 0 gives bit-reproducible steering. Default on.",
@@ -41,6 +37,11 @@ PUBLIC_LEVERS: Dict[str, Tuple[str, str, str]] = {
         "Graph mode: lower max_num_batched_tokens (auto, or an int) so a capture step fits in "
         "GPU memory; never raises it. Default off.",
     ),
+}
+
+# Removed levers and why, so a stale config gets one clear message.
+_REMOVED = {
+    "batched_egress": "it had no effect (nothing read MIA_BATCHED_EGRESS); delete it from the config",
 }
 
 _TRUE = ("1", "true", "on", "yes")
@@ -83,6 +84,11 @@ def apply_optimizations(config_data: Mapping[str, Any]) -> Dict[str, str]:
     if not isinstance(opts, dict):
         raise ValueError(
             f"config 'optimizations' must be an object, got {type(opts).__name__}")
+
+    gone = sorted(set(opts) & set(_REMOVED))
+    if gone:
+        raise ValueError("; ".join(
+            f"optimization {k!r} was removed: {_REMOVED[k]}" for k in gone))
 
     unknown = sorted(set(opts) - set(PUBLIC_LEVERS))
     if unknown:

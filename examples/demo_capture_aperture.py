@@ -18,7 +18,6 @@ from _paths import config_path
 
 #: Why each other lever is not flipped on this one engine.
 LEVER_NOTES = {
-    "batched_egress": "Q/K capture only; this demo captures hidden states.",
     "steer_fused": "steering only (see demo_actsteer.py).",
     "compact_kall": "Q/K capture only; it selects itself per request.",
     "storage_router": "served requests only; inert offline.",
