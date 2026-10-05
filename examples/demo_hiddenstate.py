@@ -76,7 +76,7 @@ def main():
 #     from _serve import (HS, chat, completion_text, completion_tokens, print_evidence,
 #                         require_server)
 #
-#     url = require_server(MODEL, HS)
+#     url = require_server(MODEL, HS, model_env=True)
 #     client = MiaClient(base_url=url, analyzer_name="hidden_states", config_file=CONFIG)
 #
 #     print("=" * 50)

@@ -111,7 +111,7 @@ def main():
 #     from mia import MiaClient
 #     from _serve import QK, completion_text, completion_tokens, print_evidence, require_server
 #
-#     url = require_server(MODEL, QK)
+#     url = require_server(MODEL, QK, model_env=True)
 #     client = MiaClient(base_url=url, analyzer_name="attn_tracker", config_file=CONFIG)
 #     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 #

@@ -74,7 +74,7 @@ def main():
 #
 #     from _serve import STEER, base_url, print_evidence, require_server
 #
-#     require_server(MODEL, STEER, max_model_len=4096)
+#     require_server(MODEL, STEER, max_model_len=4096, model_env=True)
 #     client = openai.OpenAI(base_url=base_url(), api_key="EMPTY")
 #     steer = steer_config()
 #

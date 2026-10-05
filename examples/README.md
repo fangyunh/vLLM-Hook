@@ -241,7 +241,8 @@ Run every demo from the repo root, e.g. `python examples/demo_hiddenstate.py`. A
 - **`MIA_DEMO_MODEL` / `MIA_CONFIG_FILE`** swap the model and config of `demo_hiddenstate.py`,
   `demo_actsteer.py`, `demo_attntracker.py` (granite, Mistral-7B or Qwen2-1.5B: it needs a
   token-range recipe per chat template), `demo_capture_aperture.py` and the two
-  `profiling_longdecode/` demos. The other demos are tied to their model.
+  `profiling_longdecode/` demos. The other demos are tied to their model. `demo_actsteer.py` on
+  another model needs your own steering config and vector: only Phi-3 ships a real one.
 - **`demo_actsteer_serve.py`** is server-only: start the server it prints, then run it
   ([Server mode](#8-server-mode)).
 - **`demo_capture_aperture.py`** checks graph-mode capture: two runs byte-identical, and a

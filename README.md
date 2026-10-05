@@ -87,7 +87,7 @@ not supported, and Q/K `score` capture requires TP = 1.
 
 **Requirements**
 - Linux and an NVIDIA GPU with a CUDA 13 driver; validated on an H100 80 GB.
-- Python 3.10–3.14 (vLLM 0.29's range); validated on 3.12.
+- Python 3.11–3.14; validated on 3.12.
 - About 12 GB for the environment, plus the models, downloaded on first use (the hidden-state,
   steering, attention-tracker and capture-aperture demos need about 33 GB).
 - GPU memory: capture keeps a 4 GiB buffer outside vLLM's `gpu_memory_utilization` share. The demos
@@ -118,9 +118,9 @@ pip install pytest                # for the checks below
 
 Versions match [`requirement.txt`](requirement.txt). `pip check` flags the removed `torchcodec`; that is expected.
 
-MIA registers itself as a vLLM plugin, so every vLLM engine in this environment loads it, and
-`vllm serve` without `MIA_WORKER` captures hidden states. Keep a dedicated environment; set
-`VLLM_PLUGINS=''` to run stock vLLM in it.
+MIA registers itself as a vLLM plugin, so every vLLM engine in this environment loads it: without
+`MIA_WORKER` it installs the hidden-state capture worker (and its 4 GiB GPU buffer) in every
+engine. Keep a dedicated environment; set `VLLM_PLUGINS=''` to run stock vLLM in it.
 
 ### 3. Check the install
 
@@ -160,6 +160,7 @@ if __name__ == "__main__":
     stats = llm.analyze(analyzer_spec={"reduce": "none"}, probes=out[0].probes)
     for layer, tensors in sorted(stats["hidden_states"].items()):
         print(layer, tuple(tensors[0].shape))
+    llm.llm_engine.engine_core.shutdown()
 ```
 
 **Steer, offline:**
@@ -181,6 +182,7 @@ if __name__ == "__main__":
     steer = {"method": "add_vector", "coefficient": 10}   # overrides the config's steering keys
     sp = SamplingParams(temperature=0.0, max_tokens=100, extra_args={"steer": steer})
     print(llm.generate("Write three bullet points about tea.", sp)[0].outputs[0].text)
+    llm.llm_engine.engine_core.shutdown()
 ```
 
 **Served:** start the server in one shell and wait for `Application startup complete.` (about a

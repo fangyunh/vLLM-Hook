@@ -66,7 +66,7 @@ def main():
 #
 #     print(f"[longdec-qk] model={MODEL} config={CONFIG} "
 #           f"max_tokens={MAX_TOKENS} hooks_on={HOOKS_ON}")
-#     url = require_server(MODEL, QK)
+#     url = require_server(MODEL, QK, model_env=True)
 #     client = MiaClient(base_url=url, analyzer_name="attn_tracker", config_file=CONFIG)
 #
 #     print("=" * 50)

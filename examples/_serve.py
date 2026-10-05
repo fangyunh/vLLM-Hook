@@ -47,8 +47,11 @@ def serve_command(model: str, worker: str, *, graph: bool = True,
 
 def require_server(model: str, worker: str, *, graph: bool = True,
                    max_model_len: int = 2048, tp: int = 1,
-                   extra_args: Sequence[str] = ()) -> str:
-    """Return the base URL, or explain how to start the server and exit."""
+                   extra_args: Sequence[str] = (), model_env: bool = False) -> str:
+    """Return the base URL, or explain how to start the server and exit.
+
+    `model_env=True` for a demo that reads ``MIA_DEMO_MODEL``: a model mismatch then names it.
+    """
     url = base_url()
     try:
         with urllib.request.urlopen(url.rstrip("/") + "/models", timeout=5) as r:
@@ -60,9 +63,9 @@ def require_server(model: str, worker: str, *, graph: bool = True,
         raise SystemExit(1)
 
     if served and model not in served:
-        print(f"[mia] the server at {url} serves {sorted(served)}, not {model!r}. Either "
-              f"restart it for this model or set MIA_DEMO_MODEL to one it serves.",
-              file=sys.stderr)
+        hint = " or set MIA_DEMO_MODEL to one it serves" if model_env else ""
+        print(f"[mia] the server at {url} serves {sorted(served)}, not {model!r}. Restart it "
+              f"for this model{hint}.", file=sys.stderr)
         raise SystemExit(1)
 
     print(f"[mia] server at {url}, model {model}, MIA_WORKER={worker}"

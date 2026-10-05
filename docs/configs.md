@@ -63,12 +63,11 @@ your worker uses are read.
 
 | Key | Values | Meaning |
 |---|---|---|
-| `hidden_states.layers` | list of ints; `[]` = every layer | **1-based** hidden-state indices: layer `i` is the output of decoder block `i - 1` (`[32]` is Llama-3.1-8B's last block) |
+| `hidden_states.layers` | list of ints; `[]` = every layer | **1-based** hidden-state indices: layer `i` is the output of decoder block `i - 1` (`[32]` is Llama-3.1-8B's last block); `analyze()` keys it `model.layers.<i-1>`, `load_delivered` keys it `i` |
 | `hidden_states.mode` | `last_token` (default) · `all_tokens` | which token positions to capture |
 | `params.important_heads` | list of `[layer, head]` | the Q/K capture targets, both **0-based** |
 | `hookq.hookq_mode` | `all_tokens` (default) · `last_token` | which query positions to capture |
 | `hookq.capture` | `qk` (default) · `score` | `score` captures the listed heads' attention scores instead of Q/K (eager only; TP = 1) |
-| `hookq.score_head` | int, default 0 | the head `score` capture uses when a layer lists none |
 | `steering.method` | `adjust_rs` (default) · `add_vector` | `add_vector` adds `coefficient × dir`; `adjust_rs` moves the projection on `dir` to `avg_proj` |
 | `steering.coefficient` | float | the `add_vector` scale |
 | `steering.optimal_layer` | int · list of ints · `"all"` | the decoder blocks to steer, **0-based** |
@@ -79,7 +78,8 @@ your worker uses are read.
 | `optimizations` | `{lever: value}` | sets a [performance lever](#tuning) unless its env var is already set |
 | `model_info` | any | descriptive only; MIA does not read it |
 
-Analyzer-specific sections (e.g. `scihal.clf_path`) are read by their demo.
+Analyzer-specific sections (e.g. `scihal.clf_path`) are read by their demo. `score` capture of a
+layer with no listed heads uses the single head `MIA_QK_SCORE_HEAD` (env var, default 0).
 
 ---
 
@@ -237,9 +237,8 @@ the capture ones, a request overrides them:
 | `hooks_on` | `prefill` (default) · `decode` · `both` | which passes capture |
 | `hs_mode` | `last_token` · `all_tokens` | hidden-state positions (`hidden_states.mode`) |
 | `hookq_mode` | `last_token` · `all_tokens` | Q/K positions (`hookq.hookq_mode`) |
-| `qk_capture` | `qk` · `score` | Q/K or one head's attention scores (`hookq.capture`) |
-| `score_head` | int | the fallback head for `score` capture (`hookq.score_head`) |
-| `steer` | a steering dict (JSON string over serve) | this request's steering keys, merged over the config's |
+| `qk_capture` | `qk` · `score` | Q/K or the listed heads' attention scores (`hookq.capture`) |
+| `steer` | a steering dict (JSON string over serve) | offline: merged over the config's `steering`; served: the full steering config |
 
 `extra_xargs` values must be **scalars** unless the key is one the plugin JSON-decodes
 (`output_qk`, `output_hidden_states`, `steer`); a dict under any other key would reach the worker
