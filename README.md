@@ -333,16 +333,6 @@ We welcome contributions from the community!
   installs forward hooks, which only run in eager mode: build its engine with
   `enforce_eager=True` (`--enforce-eager`).
 
-### Coming from vLLM-Hook v0
-
-| vLLM-Hook v0 | MIA |
-|---|---|
-| `HookLLM`, `HookClient` | `MiaLLM`, `MiaClient` |
-| `VLLM_HOOK_*` env vars (e.g. `VLLM_HOOK_WORKER`) | `MIA_*` (e.g. `MIA_WORKER`) |
-| workers `probe_hook_qk`, `probe_hidden_states`, `steer_hook_act` | `capture_qk`, `capture_hs`, `steer` |
-| package `vllm_hook_plugins` | package `mia`, installed from the repo root |
-| Spotlight, Token Highlighter, notebooks | not ported |
-
 ---
 
 ## 🌟 Feeling Inspired
