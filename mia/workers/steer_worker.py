@@ -1,16 +1,14 @@
 """Activation-steering worker (steer): eager hooks and the CUDA-graph buffer path."""
 import os
 import json
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
 import numpy as np
 import torch
-from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from mia._profiler import PROF
 from mia.runner import StepView, install_request_arg_stash, require_v2_runner, step_view
 from mia.workers._common import iter_matched_modules, match_layer
-
-if TYPE_CHECKING:
-    from vllm.config import ParallelConfig
 
 
 def _load_steering_vector(vector_path: str) -> Dict:
@@ -160,6 +158,7 @@ class SteerWorker:
         self._hooks_installed = True
         runner = self.model_runner
         require_v2_runner(runner)
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.tp_shard import refuse_pipeline_parallel
         refuse_pipeline_parallel(
             getattr(getattr(self, "parallel_config", None), "pipeline_parallel_size", 1),
@@ -184,7 +183,6 @@ class SteerWorker:
 
     def dump_profiler(self) -> "str | None":
         """Dump this worker's profiler snapshot to MIA_PROFILE_DIR; return the path or None."""
-        from mia._profiler import PROF
         return PROF.dump(role="worker-rpc")
 
     def _install_hooks(self):
@@ -301,6 +299,7 @@ class SteerWorker:
 
     def graph_install(self):
         """Install the CUDA-graph steering path (buffer mode)."""
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.install_steer import install_steer_hosts
         install_steer_hosts(self)
 

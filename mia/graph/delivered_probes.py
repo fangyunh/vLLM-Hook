@@ -15,10 +15,14 @@ import threading
 import weakref
 from typing import Any, Callable, Dict, List, Optional
 
+import torch
+from safetensors.torch import load, save
+from torch.nn.utils.rnn import pad_sequence
+
 from mia._profiler import PROF
 from mia.errors import MiaDeliveryError
-
 from .aperture_gather import DeliveryTimeoutError
+from mia.workers.qk_capture_worker import _use_compact_kall
 
 ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 SUFFIX_RE = r"-[0-9a-f]{8}"
@@ -44,7 +48,6 @@ def trim_probes(probes: dict, key: str, expected_len: int) -> None:
 
 def serialize_probes(probes: dict) -> dict:
     """Serialize probe tensors to lists for JSON transport."""
-    import torch
     PROF.incr("serve.serialize_probes.calls")
     with PROF.timed("serve.serialize_probes"):
         result = {}
@@ -141,8 +144,6 @@ def _zero_pages(nbytes: int):
 
 
 def _fill(out, passes) -> None:
-    import torch
-
     single = [i for i, p in enumerate(passes) if p.shape[0] == 1]
     if single:
         out[torch.tensor(single), 0] = torch.cat([passes[i] for i in single])
@@ -156,8 +157,6 @@ def _sparse(padded: int, real: int) -> bool:
 
 
 def _zero_page_tensors(shapes: Dict[int, tuple], dtype) -> Dict[int, Any]:
-    import torch
-
     esize = torch.empty((), dtype=dtype).element_size()
     offsets, total = {}, 0
     for L, sh in shapes.items():
@@ -170,8 +169,6 @@ def _zero_page_tensors(shapes: Dict[int, tuple], dtype) -> Dict[int, Any]:
 
 def pad_layers(passes_by_layer: Dict[int, list]) -> Dict[int, Any]:
     """``pad_sequence(passes, batch_first=True)`` per layer."""
-    from torch.nn.utils.rnn import pad_sequence
-
     shapes = {L: (len(ps), max(int(p.shape[0]) for p in ps)) + tuple(ps[0].shape[1:])
               for L, ps in passes_by_layer.items()}
     padded = sum(math.prod(sh) * passes_by_layer[L][0].element_size() for L, sh in shapes.items())
@@ -190,8 +187,6 @@ def padded_reader(meta: dict) -> Optional[Callable]:
         return None
 
     def into(layers, n_rows, row_shape, dtype_name):
-        import torch
-
         sizes = pass_sizes(n_rows, meta)
         dtype = getattr(torch, dtype_name)
         esize = torch.empty((), dtype=dtype).element_size()
@@ -229,8 +224,6 @@ def padded_offline_probes(padded_by_layer: Dict[int, Any], meta, module_names) -
 def hs_probes(rows_by_layer: Dict[int, Any], meta: dict, module_names: Dict[int, str], *,
               layout: str = "rpc") -> dict:
     """One request's delivered rows ``{layer: (rows, hidden)}`` in an eager HS shape."""
-    import torch
-
     if layout not in ("rpc", "disk"):
         raise ValueError(f"layout must be 'rpc' or 'disk', not {layout!r}")
     mode = meta["hs_mode"]
@@ -323,11 +316,6 @@ def qk_pass_rows(n_q: int, prefix_ends: List[int], mode: str) -> List[int]:
 def qk_probes(payload: dict, *, n_prompt: int, n_gen: int, hookq_mode: Optional[str] = None,
               hooks_on: Optional[str] = None, layout: str = "rpc") -> Optional[dict]:
     """One request's delivered Q/K in an eager shape, or None when it captured nothing."""
-    import torch
-    from torch.nn.utils.rnn import pad_sequence
-
-    from mia.workers.qk_capture_worker import _use_compact_kall
-
     if layout not in ("rpc", "disk"):
         raise ValueError(f"layout must be 'rpc' or 'disk', not {layout!r}")
     per_layer = payload.get("qk_cache") or {}
@@ -372,6 +360,7 @@ def qk_probes(payload: dict, *, n_prompt: int, n_gen: int, hookq_mode: Optional[
                            "layer_num": layer, "hookq_mode": mode}
     if layout == "disk":
         return {"config": conf, "qk_cache": cache}
+    # lazy: import cycle (mia._plugin imports this module)
     from mia._plugin import _reconstruct_compact_qk
 
     probes = {"qk_cache": cache, "config": conf}
@@ -445,8 +434,6 @@ def match_keys(names, ext: str, n: int, *, suffix: bool = True) -> Dict[int, str
 
 def encode_delivery(samples: List[Dict[int, Any]], *, keys: List[str],
                     names: Dict[int, str], config: dict) -> bytes:
-    from safetensors.torch import save
-
     tensors = {f"{j}/{int(L)}": t.contiguous() for j, s in enumerate(samples)
                for L, t in s.items()}
     meta = {"format": WIRE_FORMAT, "keys": json.dumps(list(keys)),
@@ -457,8 +444,6 @@ def encode_delivery(samples: List[Dict[int, Any]], *, keys: List[str],
 
 def decode_delivery(data: bytes):
     """``(samples, keys, names, config)`` from :func:`encode_delivery` bytes."""
-    from safetensors.torch import load
-
     n = struct.unpack("<Q", data[:8])[0]
     meta = json.loads(data[8:8 + n].decode("utf-8")).get("__metadata__") or {}
     if meta.get("format") != WIRE_FORMAT:
@@ -678,6 +663,7 @@ def _plain_lazy_type(base: type) -> type:
 
 def attach_lazy(obj, loader: Callable[[], Any], *, first: Optional[Callable] = None) -> None:
     """Make ``obj.probes`` lazy: ``loader()`` runs on first use."""
+    # lazy: optional dependency (pydantic)
     import pydantic
 
     base = _BASES.get(type(obj), type(obj))

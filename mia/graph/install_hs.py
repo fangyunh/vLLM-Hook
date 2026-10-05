@@ -1,6 +1,7 @@
 """CUDA-graph hidden-state capture install on the capture-aperture path."""
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import time
@@ -26,11 +27,19 @@ from mia.graph.install import (
     _resolve_max_num_batched_tokens,
     _run_dummy_pass,
     install_prepare_inputs_routing,
+    predict_capture_write_shape,
 )
 from mia.errors import MiaConfigurationError, MiaSizingError
 from mia.runner import StepView
 from mia.workers._common import iter_matched_modules
 from mia.workers.hs_capture_worker import match_layer
+from mia.graph.aperture_drain_hs import (
+    MultiLayerApertureDrain,
+    OffLoopApertureDrain,
+    record_captured_cells,
+    _torch_dtype_name,
+)
+from mia.graph.writer_process import init_writer_process, mark_no_writer
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +167,6 @@ def install_hs_hosts(worker) -> Optional[HostRegistry]:
     if not getattr(worker, "_disk_states", None):
         worker._disk_states = {}
 
-    from mia.graph.writer_process import init_writer_process, mark_no_writer
     if should_capture:
         init_writer_process(worker)
     else:
@@ -778,8 +786,6 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
     drain = None
     _sync_drain = os.environ.get("MIA_APERTURE_SYNC_DRAIN", "0") == "1"
     if registry is not None and aperture is not None:
-        from mia.graph.aperture_drain_hs import (
-            MultiLayerApertureDrain, OffLoopApertureDrain, _torch_dtype_name, record_captured_cells)
         hidden = int(worker._conf["hidden_size"])
         layers = [(host.egress_layer_num, host.hs_buf) for _, host in registry.iter_hosts()]
         buf_dtype = layers[0][1].dtype if layers else torch.float32
@@ -802,7 +808,6 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
         header.update(_dp)
         if getattr(worker, "_hs_shard_mode", None) == HS_MODE_ROUND_ROBIN:
             header.update(HSShard.of(int(tp_rank), _tp_size, _num_layers).as_header())
-        from mia.graph.install import predict_capture_write_shape
         _shape = predict_capture_write_shape(
             worker, "hs", str(getattr(worker, "hs_mode", "last_token") or "last_token"),
             int(aperture.n_slots))
@@ -849,7 +854,6 @@ def install_execute_model_wrapper_hs(model_runner, worker) -> None:
                   f"{drain.write_path_summary()}")
         print(_wline, flush=True)
         logger.info(_wline)
-        import atexit
         atexit.register(lambda d=drain: d.close())
         print(f"[graph/install_hs] HS aperture drain ON -> {run_dir} "
               f"(R={aperture.n_slots} rows/layer, {len(layers)} layers, {_mode})", flush=True)

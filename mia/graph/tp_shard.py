@@ -6,7 +6,11 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+import torch
+from vllm.distributed import parallel_state as ps
+
 from mia.errors import MiaConfigurationError
+from mia.graph.delivery_selector import DP_SIZE_ENV, _dp_size
 
 RANK_DIR_PREFIX = "tp_rank_"
 _RANK_DIR_RE = re.compile(r"^tp_rank_(\d+)$")
@@ -68,8 +72,6 @@ def parse_dp_dir(name: str) -> Optional[int]:
 
 def dp_layout(worker) -> dict:
     """``{"dp_rank": i, "dp_size": n}`` when ``MIA_DP_SIZE`` > 1, else ``{}``."""
-    from .delivery_selector import DP_SIZE_ENV, _dp_size
-
     n = _dp_size(os.environ)
     if n <= 1:
         return {}
@@ -109,7 +111,6 @@ def resolve_tp_coords(worker) -> Tuple[int, int]:
     pc = getattr(worker, "parallel_config", None)
     tp_size = int(getattr(pc, "tensor_parallel_size", 1) or 1)
     try:
-        from vllm.distributed import parallel_state as ps
         if ps.model_parallel_is_initialized():
             ws = int(ps.get_tensor_model_parallel_world_size())
             if ws == tp_size:
@@ -270,8 +271,6 @@ def _width(t) -> int:
 def merge_head_tensors(kind: str, items: Sequence[Tuple[QKShard, "object"]],
                        check_replicas: bool = False):
     """Concatenate per-rank Q or K tensors in global head order, de-duplicating replicated KV heads."""
-    import torch
-
     if kind not in ("q", "k"):
         raise ValueError(f"kind must be 'q' or 'k', got {kind!r}")
     shards = [s for s, _ in items]
@@ -319,8 +318,6 @@ def merge_head_tensors(kind: str, items: Sequence[Tuple[QKShard, "object"]],
 
 
 def _merge_field(kind: str, values: Sequence[Tuple[QKShard, "object"]], check_replicas: bool):
-    import torch
-
     first = values[0][1]
     if torch.is_tensor(first):
         return merge_head_tensors(kind, values, check_replicas)

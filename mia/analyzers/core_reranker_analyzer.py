@@ -1,8 +1,8 @@
 """CoRe reranker analyzer: document relevance from captured Q/K attention."""
-import torch
-from typing import Dict, List, Tuple, Optional
-import glob
 import math
+from typing import Dict, List, Optional
+
+import torch
 
 from mia._profiler import PROF
 from mia.run_utils import load_and_merge_qk_cache

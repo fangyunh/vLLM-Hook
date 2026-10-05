@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 
 import torch
+from torch.library import Library
 
 _STEER_FUSED = os.environ.get("MIA_STEER_FUSED", "1") == "1"
 
@@ -42,6 +43,7 @@ def _steer_buffer_impl(
     n = residual.shape[0]
     if _STEER_FUSED and residual.is_cuda:
         try:
+            # lazy: Triton kernels load on first use; a failed import falls back below
             from mia.graph.steer_triton import steer_buffer_fused
             steer_buffer_fused(residual, coeff, vec_id, vec_table, avg_proj, steer_mode, n)
             return None
@@ -145,6 +147,7 @@ def _capture_hs_impl(
             and hs_buf.dtype == hidden.dtype
             and hs_buf.dtype in _FUSED_OK_DTYPES):
         try:
+            # lazy: Triton kernels load on first use; a failed import falls back below
             from mia.graph.capture_triton import capture_hs_fused
             capture_hs_fused(hidden, residual, hs_buf, index, has_residual)
             _FUSED_FIRE_COUNT[0] += 1
@@ -174,8 +177,6 @@ def register_graph_ops() -> None:
     global _LIB, _OPS_REGISTERED
     if _OPS_REGISTERED:
         return
-
-    from torch.library import Library
 
     direct_register_custom_op = _import_direct_register_custom_op()
 

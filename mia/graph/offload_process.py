@@ -7,6 +7,8 @@ import shutil
 import threading
 import time
 
+import torch.multiprocessing as tmp
+
 
 def _aperture_debug() -> bool:
     return os.environ.get("MIA_APERTURE_DEBUG") == "1"
@@ -51,6 +53,7 @@ def _run_transfer_with_retries(transfer_fn, req_id: str, src_path: str, dest: st
 
 def _offload_child(q_in, q_out, max_retries: int, retry_delay: float) -> None:
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    # lazy: child_process reads env at import; keep it out of plugin load
     from mia.graph.child_process import get_until_parent_exits
     while True:
         item = get_until_parent_exits(q_in)
@@ -80,7 +83,6 @@ class OffloadProcess:
         self._failed: list[str] = []
 
         if self._use_process:
-            import torch.multiprocessing as tmp
             self._ctx = tmp.get_context("spawn")
             self._q = self._ctx.Queue()
             self._q.cancel_join_thread()
@@ -93,6 +95,7 @@ class OffloadProcess:
                     target=_offload_child,
                     args=(self._q, self._q_out, self._max_retries, self._retry_delay),
                     daemon=True, name="mia-offload")
+                # lazy: child_process reads env at import; keep it out of plugin load
                 from mia.graph.child_process import start_child
                 start_child(self._proc)
             finally:

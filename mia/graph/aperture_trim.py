@@ -7,6 +7,7 @@ import glob
 import json
 import os
 import re
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
 TRIM_ENV = "MIA_APERTURE_GATHER_TRIM"
@@ -168,8 +169,6 @@ def punch_hole(fd: int, offset: int, length: int) -> None:
 
 def punch_supported(directory: str) -> Tuple[bool, str]:
     """Whether files in ``directory`` can be hole-punched."""
-    import tempfile
-
     try:
         fd, path = tempfile.mkstemp(dir=directory, prefix=".mia-trim-probe-")
     except OSError as e:

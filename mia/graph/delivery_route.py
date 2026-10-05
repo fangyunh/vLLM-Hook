@@ -7,11 +7,17 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 from urllib.parse import unquote
 
+import vllm.envs as envs
+
+from . import run_artifact
 from .aperture_gather import (DELIVERY_HARD_CAP_S, DeliveryTimeoutError, GatherError,
                               NoDeliveryError, delivery_base, delivery_root, delivery_timeout_s,
                               discover_delivery_ranks, poll_delivered)
 from .delivered_probes import (AmbiguousDelivery, check_id, encode_delivery, external_id,
                                hs_probes, key_pattern, match_keys, response_id)
+from .delivery_selector import STAMP_ENV
+from .tp_shard import parse_rank_dir
+from mia.errors import MiaConfigurationError
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +34,11 @@ _POLL_S = 0.25
 def route_enabled() -> bool:
     v = os.environ.get(ROUTE_ENV, "")
     if v not in ("", "0", "1"):
-        from mia.errors import MiaConfigurationError
         raise MiaConfigurationError(f"{ROUTE_ENV}={v!r}: use 1 (default) or 0")
     return v != "0"
 
 
 def _suffix() -> bool:
-    import vllm.envs as envs
     return not bool(envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION)
 
 
@@ -45,8 +49,6 @@ def run_filter(info: dict):
 
 def merge_info(results) -> dict:
     """One engine's ``mia_delivery_info`` results as names, config, roots and run ids."""
-    from .tp_shard import parse_rank_dir
-
     names: Dict[int, str] = {}
     config: dict = {}
     roots: List[str] = []
@@ -175,6 +177,7 @@ def _not_ready(rid: str, e: DeliveryTimeoutError) -> str:
 
 
 def build_router():
+    # lazy: optional dependency (fastapi)
     from fastapi import APIRouter, Query, Request
     from fastapi.responses import JSONResponse, Response
 
@@ -196,7 +199,6 @@ def build_router():
                 raise ValueError("key does not belong to this response")
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
-        from .delivery_selector import STAMP_ENV
         if (os.environ.get(STAMP_ENV) or "").partition(":")[0] != "hybrid":
             return JSONResponse({"error": "no capture for this id"}, status_code=404)
         loop = asyncio.get_running_loop()
@@ -236,6 +238,7 @@ def attach(app) -> None:
 
 def patch_app_builder() -> None:
     """Wrap vLLM's ``attach_endpoint_plugins`` (called once by ``build_app``) to add the route."""
+    # lazy: vLLM's API server app loads only when the patch runs
     import vllm.entrypoints.launchers.app as app_mod
 
     orig = app_mod.attach_endpoint_plugins
@@ -253,8 +256,6 @@ def patch_app_builder() -> None:
 def _write_items(ext: str, n: int, samples, metas: List[dict], names, config,
                  hook_dir: str, run_id: str, unit=None, stamp=None, nonce=None,
                  start=None) -> List[str]:
-    from . import run_artifact
-
     items = []
     for j, rows in enumerate(samples):
         key = ext if int(n) == 1 else f"{j}_{ext}"

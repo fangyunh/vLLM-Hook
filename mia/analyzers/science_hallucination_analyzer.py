@@ -1,8 +1,10 @@
 """Science hallucination analyzer: classifies captured hidden states with a trained probe."""
 import json
 import os
-import torch
 from typing import Dict, Optional, Tuple
+
+import torch
+from safetensors import safe_open
 
 from mia.run_utils import load_and_merge_hs_cache, unpack_hidden_states
 from mia.shm_utils import load_from_shm
@@ -19,8 +21,8 @@ class ScienceHallucinationAnalyzer:
     def _fetch_final_norm(self, model_id: str) -> Tuple[torch.Tensor, float]:
         if model_id in self._norm_cache:
             return self._norm_cache[model_id]
+        # lazy: optional dependency (huggingface_hub)
         from huggingface_hub import snapshot_download
-        from safetensors import safe_open
 
         snap = snapshot_download(model_id, allow_patterns=[
             "config.json",
@@ -65,6 +67,7 @@ class ScienceHallucinationAnalyzer:
         if clf_path is None:
             raise ValueError("ScienceHallucinationAnalyzer requires analyzer_spec['clf_path'] or analyzer.default_clf_path to be set.")
         if self._clf is None:
+            # lazy: optional dependency (joblib)
             import joblib  
             self._clf = joblib.load(clf_path)
         clf = self._clf

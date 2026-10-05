@@ -1,15 +1,16 @@
 """CUDA-graph QK capture: install, per-step routing and egress."""
 from __future__ import annotations
 
+import atexit
 import contextlib
 import math
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import torch
-
 from vllm.forward_context import get_forward_context
+from vllm.v1.worker.gpu_worker import Worker
 
 from mia._profiler import PROF
 from mia.graph import register_graph_ops
@@ -32,6 +33,9 @@ from mia.errors import MiaConfigurationError, MiaRefusal, MiaSizingError
 from mia.runner import StepView, install_request_arg_stash, require_v2_runner, step_view
 from mia.workers._common import iter_matched_modules
 from mia.workers.qk_capture_worker import match_attn
+from mia.graph.aperture_drain_hs import _torch_dtype_name
+from mia.graph.aperture_drain_qk import MultiLayerQKApertureDrain, OffLoopQKApertureDrain
+from mia.graph.aperture_sink import predict_rows_per_write
 
 
 _GRAPH_MODE_ENV = "MIA_GRAPH_MODE"
@@ -199,7 +203,6 @@ def _resolve_max_num_seqs(worker) -> Optional[int]:
 
 def predict_capture_write_shape(worker, kind: str, capture_mode: str, aperture_rows: int):
     """Upper bound on one step's per-file write for this worker's capture, or None if unknown."""
-    from .aperture_sink import predict_rows_per_write
     try:
         return predict_rows_per_write(
             kind, capture_mode=capture_mode,
@@ -265,6 +268,7 @@ def install_qk_hosts(worker) -> Optional[HostRegistry]:
     if not hasattr(worker, "_disk_states") or worker._disk_states is None:
         worker._disk_states = {}
 
+    # lazy: child_process reads env at import; keep it out of plugin load
     from mia.graph.writer_process import init_writer_process
     init_writer_process(worker)
 
@@ -639,9 +643,6 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     drain = None
     _sync_drain = os.environ.get("MIA_APERTURE_SYNC_DRAIN", "0") == "1"
     if registry is not None and aperture is not None:
-        from mia.graph.aperture_drain_hs import _torch_dtype_name
-        from mia.graph.aperture_drain_qk import (
-            MultiLayerQKApertureDrain, OffLoopQKApertureDrain)
         layers = [(layer_num, host.q_buf, host.k_buf)
                   for layer_num, host in registry.iter_hosts()]
         buf_dtype = layers[0][1].dtype if layers else torch.float32
@@ -677,7 +678,6 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         worker._qk_run_dir = run_dir
         print(f"[graph/install] QK aperture write path (tp_rank {int(tp_rank)}): "
               f"{drain.write_path_summary()}", flush=True)
-        import atexit
         atexit.register(lambda d=drain: d.close())
         print(f"[graph/install] QK aperture drain ON -> {run_dir} "
               f"(R={aperture.n_slots} rows/layer, {len(layers)} layers, {_mode})", flush=True)
@@ -757,8 +757,6 @@ def patch_worker_load_model() -> None:
     global _LOAD_MODEL_PATCHED
     if _LOAD_MODEL_PATCHED:
         return
-
-    from vllm.v1.worker.gpu_worker import Worker
 
     orig_load_model = Worker.load_model
 

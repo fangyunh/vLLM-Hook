@@ -3,16 +3,21 @@ from __future__ import annotations
 
 import copy
 import glob
+import inspect
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 
 import torch
+from transformers import AutoTokenizer
 
 from mia._profiler import PROF
+from mia.errors import MiaDeliveryError
+from mia.registry import PluginRegistry
 from mia.run_utils import dispatch_disk_analyze
 
 
@@ -29,7 +34,7 @@ class MiaClient:
         hook_dir: str = None,
         tokenizer_for: Optional[str] = None,
     ):
-        from mia.registry import PluginRegistry
+        # lazy: import cycle (mia/__init__ imports mia.client); optional dependency (openai)
         from mia import register_plugins
         register_plugins()
 
@@ -231,7 +236,6 @@ class MiaClient:
                     "no tokenizer bound: construct the client with "
                     "tokenizer_for=<model id>, or load one yourself with "
                     "transformers.AutoTokenizer.")
-            from transformers import AutoTokenizer
             self._tokenizer = AutoTokenizer.from_pretrained(self._tokenizer_for)
         return self._tokenizer
 
@@ -282,7 +286,7 @@ class MiaClient:
 
     def _attach_delivery(self, response, run_id: str) -> None:
         """A hybrid server's response: lazy ``probes``, or with save_to_disk the run's keys."""
-        from mia.errors import MiaDeliveryError
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.delivered_probes import attach_lazy, check_id, external_id
 
         extra = getattr(response, "__pydantic_extra__", None)
@@ -327,9 +331,9 @@ class MiaClient:
 
     def _read_delivered(self, rid: str, kind: str, it: dict):
         """``(samples, keys, names, config)`` of one response item, from the server's route."""
+        # lazy: optional deps (httpx, openai); keep mia.graph out of import mia; tests patch it
         import httpx
         import openai
-        from mia.errors import MiaDeliveryError
         from mia.graph.aperture_gather import DELIVERY_HARD_CAP_S
         from mia.graph.delivered_probes import DeliveryReadTimeout, decode_delivery
 
@@ -355,7 +359,7 @@ class MiaClient:
 
     def _analyze_delivered_run(self, analyzer_spec, run_id, run_ids):
         """Disk analyze of hybrid save_to_disk runs, once each run holds its requests."""
-        import inspect
+        # lazy: keep mia.graph out of import mia; tests patch delivered_probes.hs_probes
         from mia.graph import run_artifact
         from mia.graph.aperture_gather import delivery_timeout_s
         from mia.graph.delivered_probes import hs_probes, merge_disk
@@ -495,12 +499,12 @@ class _ItemFetch:
     """One response item's samples as client-visible probes, read once on first use."""
 
     def __init__(self, client: "MiaClient", rid: str, kind: str, it: dict):
-        import threading
         self._client, self._rid, self._kind, self._it = client, rid, kind, it
         self._lock = threading.Lock()
         self._value: Optional[list] = None
 
     def __call__(self) -> list:
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.delivered_probes import client_probes
         with self._lock:
             if self._value is None:

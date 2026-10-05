@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
+import functools
 import logging
 import mmap
 import os
@@ -63,8 +65,6 @@ class RunDirLockError(ApertureWriteConfigError, MiaRefusal):
 
 def lock_run_dir(run_dir: str, kind: str):
     """Exclusive per-kind lock on ``run_dir`` for one live drain."""
-    import fcntl
-
     path = os.path.join(run_dir, f".{kind}_aperture.lock")
     while True:
         fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o666)
@@ -107,8 +107,6 @@ def release_run_lock(drain) -> None:
 
 def releases_run_lock_on_failure(init):
     """Decorate a drain ``__init__``: a construction that raises gives its run-dir lock back."""
-    import functools
-
     @functools.wraps(init)
     def wrapper(self, *args, **kwargs):
         try:

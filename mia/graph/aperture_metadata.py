@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+import numpy as np
+
 
 @dataclass
 class LayerEntry:
@@ -209,7 +211,6 @@ class _LayerLists:
 
 
 def _plain_rows(fields: list, n_cols: int):
-    import numpy as np
     try:
         arr = np.array(fields)
     except (ValueError, TypeError, OverflowError):
@@ -269,7 +270,6 @@ class HsSidecarLog:
         if n == 0:
             return None
         if not isinstance(cursor, int):
-            import numpy as np
             cursor = np.array(cursor, dtype=np.int64, copy=True)
         return ("rows", int(step_start), arr, cursor, plans, n)
 

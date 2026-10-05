@@ -1,9 +1,13 @@
 """Start MIA helper child processes from any process, daemonic TP workers included."""
 from __future__ import annotations
 
+import atexit
+import multiprocessing
+import multiprocessing.process as mpp
 import os
 import queue as _queue
 import threading
+from multiprocessing import util
 
 SHUTDOWN_EXIT_PRIORITY = 100
 
@@ -32,8 +36,6 @@ _START_LOCK = threading.Lock()
 
 def start_child(proc) -> bool:
     """``proc.start()``, also from a DAEMONIC process."""
-    import multiprocessing.process as mpp
-
     cur = mpp.current_process()
     with _START_LOCK:
         daemonic = bool(cur._config.get("daemon"))
@@ -49,17 +51,12 @@ def start_child(proc) -> bool:
 
 def register_shutdown(close) -> None:
     """Run ``close`` at interpreter or process exit, in shutdown order."""
-    import atexit
-    from multiprocessing import util
-
     util.Finalize(None, close, exitpriority=SHUTDOWN_EXIT_PRIORITY)
     atexit.register(close)
 
 
 def get_until_parent_exits(q, poll_s: float | None = None):
     """``q.get()`` for a helper child: next item, or None once the queue is empty and the parent exited."""
-    import multiprocessing
-
     parent = multiprocessing.parent_process()
     if parent is None:
         return q.get()

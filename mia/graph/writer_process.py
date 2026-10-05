@@ -3,9 +3,16 @@ from __future__ import annotations
 
 import os
 import queue as _queue
+import threading
 
+import torch.multiprocessing as tmp
+
+from mia._profiler import PROF
+from mia.graph.artifact_writer import write_artifact
 from mia.graph.child_process import get_until_parent_exits, register_shutdown, start_child
+from mia.graph.tensor_pack import pack_tensor_tree, unpack_tensor_tree
 from mia.graph.thread_device import bind_thread_to_device, creator_cuda_device
+from mia.graph.tp_shard import resolve_tp_coords
 
 _CHILD_THREAD_ENV = {
     "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
@@ -17,8 +24,6 @@ def _writer_child(q) -> None:
     for k, v in _CHILD_THREAD_ENV.items():
         os.environ.setdefault(k, v)
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-    from mia.graph.artifact_writer import write_artifact
-    from mia.graph.tensor_pack import unpack_tensor_tree
     while True:
         item = get_until_parent_exits(q)
         if item is None:
@@ -40,7 +45,6 @@ class WriterProcess:
 
     def __init__(self, maxsize: int = 4, n_writers: int = 1) -> None:
         self._device = creator_cuda_device()
-        import torch.multiprocessing as tmp
         self._n_writers = max(1, int(n_writers))
         _want = os.environ.get("MIA_WRITER_SHARING", "file_system")
         try:
@@ -70,8 +74,6 @@ class WriterProcess:
                 else:
                     os.environ[k] = v
 
-        import threading
-        from mia.graph.tensor_pack import pack_tensor_tree
         self._pack = os.environ.get("MIA_WRITER_PACK", "1") != "0"
         self._pack_fn = pack_tensor_tree
         self._put_timeout = float(os.environ.get("MIA_WRITER_PUT_TIMEOUT", "30") or "30")
@@ -90,7 +92,6 @@ class WriterProcess:
             print(f"[writer-process] feeder thread could not select {self._device}: {e!r}; the "
                   f"writer refuses new work (submit -> False -> inline save)", flush=True)
             return
-        from mia.graph.artifact_writer import write_artifact
         while True:
             raw = self._inq.get()
             if raw is None:
@@ -226,7 +227,6 @@ def _resolve_flush_budget() -> int:
 
 def _tp_label(worker) -> str:
     try:
-        from mia.graph.tp_shard import resolve_tp_coords
         tp_rank, tp_size = resolve_tp_coords(worker)
         return f"tp_rank {tp_rank}/{tp_size}"
     except Exception:  # noqa: BLE001
@@ -248,7 +248,6 @@ def note_submit_refused(worker, wp) -> None:
         alive = False
     reason = ("queue full past MIA_WRITER_PUT_TIMEOUT" if alive else "writer gone")
     try:
-        from mia._profiler import PROF
         PROF.incr("writer.submit_refused")
     except Exception:  # noqa: BLE001
         pass
@@ -275,7 +274,6 @@ def init_writer_process(worker) -> None:
     if hasattr(worker, "_writer_process"):
         return
     try:
-        from mia.graph.tp_shard import resolve_tp_coords
         tp_rank, tp_size = resolve_tp_coords(worker)
         where = f"tp_rank {tp_rank}/{tp_size}"
     except Exception:  # noqa: BLE001

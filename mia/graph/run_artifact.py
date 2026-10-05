@@ -9,12 +9,20 @@ import logging
 import math
 import os
 import shutil
+import socket
 import tempfile
 import threading
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import torch
+from safetensors import safe_open
+
 from mia.errors import MiaDeliveryError
+from mia.graph.artifact_writer import write_artifact
+from mia.graph.delivered_probes import merge_disk
+from mia.graph.tp_shard import rank_dir_name
+from mia.run_utils import QK_REFUSED_FILE, load_and_merge_hs_cache
 
 RUN_FORMAT = "mia-run-v1"
 RUN_MANIFEST = "mia_run.json"
@@ -36,7 +44,6 @@ class RunArtifactError(MiaDeliveryError):
 
 
 def run_dir(hook_dir: str, run_id: str) -> str:
-    from .tp_shard import rank_dir_name
     return os.path.join(hook_dir, str(run_id), rank_dir_name(0))
 
 
@@ -81,12 +88,9 @@ def _use_safetensors() -> bool:
 
 
 def _load_qk_compact(d: str) -> dict:
-    import torch
-
     pt = os.path.join(d, _KINDS["qk"][0])
     if os.path.exists(pt):
         return torch.load(pt, map_location="cpu")
-    from safetensors import safe_open
     with open(os.path.join(d, "qk.json"), encoding="utf-8") as f:
         meta = json.load(f)
     out: dict = {"config": meta["config"], "qk_cache": {}}
@@ -117,7 +121,6 @@ def _load_qk_compact(d: str) -> dict:
 
 def _load_current(kind: str, hook_dir: str, run_id: str) -> dict:
     if kind == "hs":
-        from mia.run_utils import load_and_merge_hs_cache
         return load_and_merge_hs_cache(hook_dir, str(run_id))
     if kind == "qk":
         return _load_qk_compact(run_dir(hook_dir, run_id))
@@ -125,7 +128,6 @@ def _load_current(kind: str, hook_dir: str, run_id: str) -> dict:
 
 
 def _write(kind: str, cache: dict, d: str, mode: str) -> None:
-    from .artifact_writer import write_artifact
     if kind in _KINDS:
         write_artifact(kind, cache, d, mode, 0, _use_safetensors(), False, _KINDS[kind][0])
         return
@@ -136,7 +138,6 @@ def _kind_files(hook_dir: str, run_id: str, kind: str) -> List[str]:
     base = _KINDS[kind][0].rsplit(".", 1)[0]
     names = [f"{base}.pt", f"{base}.safetensors", f"{base}.json"]
     if kind == "qk":
-        from mia.run_utils import QK_REFUSED_FILE
         names.append(QK_REFUSED_FILE)
     root = os.path.join(hook_dir, str(run_id))
     return sorted(p for n in names for p in glob.glob(os.path.join(root, "**", n), recursive=True))
@@ -154,8 +155,6 @@ def append(hook_dir: str, run_id: str, *, kind: str, items: Iterable[Tuple[str, 
            unit: Optional[str] = None, stamp: Optional[int] = None,
            nonce: Optional[str] = None, start: Optional[int] = None) -> List[str]:
     """Add ``items`` to the run in order; returns its keys."""
-    from .delivered_probes import merge_disk
-
     if kind not in _KINDS:
         raise RunArtifactError(f"no run artifact for kind {kind!r}")
     items = list(items)
@@ -307,8 +306,6 @@ def _note_in_place(hook_dir: str, why) -> None:
 
 def snapshot(hook_dir: str, run_ids: Iterable[str]) -> Optional[str]:
     """A hook dir of hard links to each run's artifact files, taken under :func:`read_lock`."""
-    import socket
-
     prefix = f"{SNAPSHOT_PREFIX}{socket.gethostname().split('.', 1)[0]}_"
     _sweep_snapshots(hook_dir, prefix)
     try:

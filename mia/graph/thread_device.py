@@ -1,10 +1,11 @@
 """Bind every MIA thread that can reach CUDA to its device first."""
 from __future__ import annotations
 
+import torch
+
 
 def creator_cuda_device():
     """The calling thread's current CUDA device, or None when CUDA is not initialized."""
-    import torch
     try:
         if not torch.cuda.is_initialized():
             return None
@@ -17,7 +18,6 @@ def bind_thread_to_device(device):
     """Make ``device`` the calling thread's current CUDA device and return it."""
     if device is None:
         return None
-    import torch
     dev = torch.device(device)
     if dev.type != "cuda":
         return None

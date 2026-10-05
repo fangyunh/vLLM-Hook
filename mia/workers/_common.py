@@ -1,19 +1,27 @@
 """Stateless helpers shared by the capture workers: request matching, atomic writes, metadata."""
 from __future__ import annotations
 
+import json as _json
 import os
 import re
 from typing import Any, Iterator
 
 import torch
+import vllm.envs as envs
+from safetensors.torch import save_file as _st_save
 
-from mia._profiler import PROF
+from mia._profiler import PROF, PROF as _PROF, is_enabled as _en
+from mia.artifact_quant import (
+    quant_nbytes,
+    quantize,
+    resolve_dtype,
+    resolve_granularity,
+    resolve_group_size,
+)
 
 
 def resolve_capture_quant(artifact: str):
     """Return ``(tag, gran, group_size)`` for an artifact family (``"qk"``/``"hs"``/``"score"``)."""
-    from mia.artifact_quant import (
-        resolve_dtype, resolve_granularity, resolve_group_size)
     return resolve_dtype(artifact), resolve_granularity(), resolve_group_size()
 
 
@@ -21,14 +29,12 @@ def quant_clone(x, tag, gran, group_size=128):
     """Quantize a captured GPU clone."""
     if tag is None:
         return x, None, None
-    from mia.artifact_quant import quantize
     packed, scale, _zp, qmeta = quantize(x, tag, gran, group_size)
     return packed, scale, qmeta
 
 
 def capture_bytes(*tensors):
     """Resident bytes of a (possibly quantized) captured artifact — packed + scale."""
-    from mia.artifact_quant import quant_nbytes
     return quant_nbytes(*tensors)
 
 
@@ -107,7 +113,6 @@ _HEX = frozenset("0123456789abcdef")
 
 
 def _randomized() -> bool:
-    import vllm.envs as envs
     return not envs.VLLM_DISABLE_REQUEST_ID_RANDOMIZATION
 
 
@@ -195,9 +200,6 @@ def iter_matched_modules(model, match_fn, layer_filter=None):
 
 def save_safetensors_atomic(flat_dict: dict, meta: dict, run_dir: str, basename: str) -> None:
     """Write ``flat_dict`` as safetensors plus a JSON ``meta`` sidecar, atomically."""
-    import json as _json
-    from safetensors.torch import save_file as _st_save
-
     out_path = os.path.join(run_dir, f"{basename}.safetensors")
     meta_path = os.path.join(run_dir, f"{basename}.json")
     tmp_st = out_path + ".tmp"
@@ -208,7 +210,6 @@ def save_safetensors_atomic(flat_dict: dict, meta: dict, run_dir: str, basename:
         os.rename(tmp_st, out_path)
 
     try:
-        from mia._profiler import PROF as _PROF, is_enabled as _en
         if _en():
             meta = dict(meta)
             meta["profile"] = _PROF.summary_only()

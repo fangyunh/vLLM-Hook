@@ -2,10 +2,12 @@
 import contextlib
 import os
 import pickle
+from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, Any
 
 import torch
 import zstandard as zstd
+from torch.nn.utils.rnn import pad_sequence
 from vllm.forward_context import get_forward_context
 
 from mia._profiler import PROF
@@ -15,6 +17,7 @@ from mia.workers._common import (
     clear_rank_artifact,
     clear_states_for_req,
     compact_page_backed_cache,
+    cpu_list_batched,
     get_query_metadata,
     iter_matched_modules,
     iter_matching_req_ids,
@@ -22,7 +25,6 @@ from mia.workers._common import (
     quant_clone,
     resolve_capture_quant,
     save_pt_atomic,
-    save_safetensors_atomic,
 )
 
 if TYPE_CHECKING:
@@ -42,10 +44,10 @@ _BATCHED_FLUSH = os.environ.get("MIA_BATCHED_FLUSH") == "1"
 
 def _cpu_list(tensors, acc: dict | None):
     if acc is not None:
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.census import cpu_list_measured
         return cpu_list_measured(tensors, acc)
     if _BATCHED_FLUSH:
-        from mia.workers._common import cpu_list_batched
         return cpu_list_batched(tensors)
     return [t.cpu() for t in tensors]
 
@@ -54,11 +56,13 @@ def _worker_tp_rank(worker) -> int:
     r = getattr(worker, "_tp_rank", None)
     if r is not None:
         return int(r)
+    # lazy: keep mia.graph (reads env at import) out of import mia
     from mia.graph.tp_shard import resolve_tp_coords
     return resolve_tp_coords(worker)[0]
 
 
 def _hs_layer_shard(worker):
+    # lazy: keep mia.graph (reads env at import) out of import mia
     from mia.graph.tp_shard import HS_MODE_ROUND_ROBIN, HSShard
     if getattr(worker, "_hs_shard_mode", None) != HS_MODE_ROUND_ROBIN:
         return None
@@ -78,6 +82,7 @@ def _marshal_perreq_hs(per_layer: dict, conf, shard=None) -> bytes:
         }
     payload = {"hs_cache": hs_cache, "config": conf}
     if shard is not None:
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.tp_shard import HS_SHARD_KEY
         payload[HS_SHARD_KEY] = shard.as_header()
     return _ZSTD_COMPRESSOR.compress(pickle.dumps(payload))
@@ -128,7 +133,6 @@ class HSCaptureWorker:
         self._shm = None
         if os.environ.get("MIA_USE_SHM", "0") == "1":
             try:
-                from multiprocessing.shared_memory import SharedMemory
                 shm_name = os.environ["MIA_SHM_NAME"]
                 self._shm = SharedMemory(create=False, name=shm_name)
                 self._shm_hidden_size = int(os.environ["MIA_SHM_HIDDEN_SIZE"])
@@ -141,6 +145,7 @@ class HSCaptureWorker:
                 print(f"SHM attach failed: {e} — falling back to disk path")
                 self._shm = None
 
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.tp_shard import refuse_pipeline_parallel, resolve_tp_coords
         refuse_pipeline_parallel(getattr(self.parallel_config, "pipeline_parallel_size", 1),
                                  "HS install_hooks")
@@ -294,6 +299,7 @@ class HSCaptureWorker:
             self._captured_states = {}
         if not getattr(self, "_disk_states", None):
             self._disk_states = {}
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.install_hs import (
             install_execute_model_wrapper_hs,
             install_hs_hosts,
@@ -312,6 +318,7 @@ class HSCaptureWorker:
         else:
             drain.drain_once()
         drain.close()
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.tp_shard import drain_holds_data
         if not drain_holds_data(drain):
             return None
@@ -319,6 +326,7 @@ class HSCaptureWorker:
 
     def get_drain_row_counts(self) -> dict:
         """Read-only diagnostic: aperture rows this worker's HS drain copied and skipped."""
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.install_hs import get_drain_row_counts
         return get_drain_row_counts(self)
 
@@ -420,6 +428,7 @@ class HSCaptureWorker:
             return False
         shard = _hs_layer_shard(self)
         if shard is not None:
+            # lazy: keep mia.graph (reads env at import) out of import mia
             from mia.graph.tp_shard import rank_dir_name
             dest = os.path.join(str(dest), rank_dir_name(shard.tp_rank))
         _aperture_disk_dbg(f"worker.route_aperture_to_disk: req_id={req_id!r} (EXTERNAL) dest={dest!r}")
@@ -460,6 +469,7 @@ class HSCaptureWorker:
 
     def get_captured_states(self, external_req_id: str) -> bytes | None:
         """Retrieve and remove captured hidden states for a completed request."""
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.drain import drain_barrier
         drain_barrier(self)
         consumer = getattr(self, "_capture_consumer", None)
@@ -487,7 +497,6 @@ class HSCaptureWorker:
                             if mode == "last_token":
                                 stacked = torch.stack(tensors)
                             else:
-                                from torch.nn.utils.rnn import pad_sequence
                                 stacked = pad_sequence(tensors, batch_first=True)
                         cpu_dict[mod_name] = {"hidden_states": stacked,
                                               "layer_num": entry["layer_num"], "hs_mode": mode}
@@ -528,7 +537,6 @@ class HSCaptureWorker:
 
     def dump_profiler(self) -> str | None:
         """Dump this worker's profiler snapshot to MIA_PROFILE_DIR; return the path or None."""
-        from mia._profiler import PROF
         return PROF.dump(role="worker-rpc")
 
     def clear_captured_states(self, external_req_id: str) -> None:
@@ -544,6 +552,7 @@ class HSCaptureWorker:
 
     def flush_disk(self, external_req_ids: list, run_id: str, hook_dir: str) -> bool:
         """Write captured hidden states for all requests in the batch to one artifact."""
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.drain import drain_barrier
         drain_barrier(self)
         consumer = getattr(self, "_capture_consumer", None)
@@ -639,6 +648,7 @@ class HSCaptureWorker:
         return run_dir
 
     def _save_safetensors(self, cpu_cache: dict, run_dir: str):
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.artifact_writer import save_hs_cache_safetensors
         save_hs_cache_safetensors(cpu_cache, run_dir, self.hs_mode, _worker_tp_rank(self))
 

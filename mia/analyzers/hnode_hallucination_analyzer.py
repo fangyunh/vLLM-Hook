@@ -8,6 +8,7 @@ import torch
 
 from mia.run_utils import load_and_merge_hs_cache, unpack_hidden_states
 from mia.shm_utils import load_from_shm
+from mia.utils.hnode.score import HNodeProbe
 
 
 class HNodeHallucinationAnalyzer:
@@ -17,8 +18,6 @@ class HNodeHallucinationAnalyzer:
         self._probe_path: Optional[str] = None
 
     def _ensure_probe(self, probe_path: str):
-        from mia.utils.hnode.score import HNodeProbe
-
         if self._probe is None or self._probe_path != probe_path:
             self._probe = HNodeProbe.load(probe_path)
             self._probe_path = probe_path

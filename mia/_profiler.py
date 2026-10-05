@@ -81,6 +81,7 @@ class Profiler:
     @contextmanager
     def _timed_cuda_active(self, name: str) -> Iterator[None]:
         try:
+            # lazy: the profiler also runs without torch (ImportError path below)
             import torch
         except ImportError:
             yield
@@ -255,6 +256,7 @@ class MemorySampler:
 
     def _try_init(self) -> bool:
         try:
+            # lazy: optional deps (pynvml, psutil); the profiler also runs without torch
             import pynvml
             pynvml.nvmlInit()
             self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(self.gpu_index)
@@ -284,6 +286,7 @@ class MemorySampler:
             used = [d for d in range(t.cuda.device_count()) if t.cuda.memory_reserved(d) > 0]
             if len(used) != 1:
                 return None
+            # lazy: keep mia.graph out of import mia; optional dependency (pynvml)
             from mia.graph.thread_device import bind_thread_to_device
             bind_thread_to_device(t.device("cuda", used[0]))
         except Exception:
@@ -300,6 +303,7 @@ class MemorySampler:
         return self._cuda_dev
 
     def _loop(self) -> None:
+        # lazy: optional dependency (pynvml)
         import pynvml
         while not self._stop.is_set():
             dev = self._own_cuda_device()

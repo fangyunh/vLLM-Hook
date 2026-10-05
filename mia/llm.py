@@ -5,13 +5,16 @@ import json
 import uuid
 from typing import Optional, Dict, List
 
+import vllm.plugins
 from vllm import LLM, SamplingParams
+
 from mia.optimizations import apply_optimizations
 from mia.registry import PluginRegistry
-from mia.run_utils import dispatch_disk_analyze
+from mia.run_utils import dispatch_disk_analyze, qk_score_size_select
 from mia._profiler import PROF
-from mia.shm_utils import teardown_shm
+from mia.shm_utils import setup_shm, teardown_shm
 from mia.workers.steer_worker import resolve_steer_modes
+from mia.artifact_quant import dequantize_cache_inplace
 
 
 def _merge_probes(all_probes: list) -> dict:
@@ -50,7 +53,6 @@ def _merge_probes(all_probes: list) -> dict:
 
 def _dequantized(p0):
     if p0:
-        from mia.artifact_quant import dequantize_cache_inplace
         if isinstance(p0.get("qk_cache"), dict):
             dequantize_cache_inplace(p0["qk_cache"], ("q", "k_all"))
         if isinstance(p0.get("hs_cache"), dict):
@@ -101,18 +103,17 @@ class MiaLLM:
 
         self._hook_shm = None
         if os.environ.get("MIA_USE_SHM", "0") == "1":
-            from mia.shm_utils import setup_shm
             self._hook_shm = setup_shm(config_file, worker_name)
 
         worker = None
         if worker_name:
-            import vllm.plugins
             vllm.plugins.load_general_plugins()
             worker = PluginRegistry.get_worker(worker_name).path
 
         llm_kwargs = dict(vllm_kwargs)
         if download_dir is not None:
             llm_kwargs['download_dir'] = download_dir
+        # lazy: keep mia._plugin and mia.graph out of import mia
         from mia._plugin import engine_hints
         with engine_hints(qk_score=self._qk_capture == "score"):
             self.llm = LLM(
@@ -220,7 +221,6 @@ class MiaLLM:
         dims = self._model_dims
         if not dims or not self.layer_to_heads:
             return "qk"
-        from mia.run_utils import qk_score_size_select
         return qk_score_size_select(prompt_len, mode, self.layer_to_heads,
                                     dims["H_q"], dims["H_kv"], dims["d"])
 
@@ -237,6 +237,7 @@ class MiaLLM:
             return
         if self._model_dims is None:
             return
+        # lazy: keep mia._plugin and mia.graph out of import mia
         from mia._plugin import _engine_graph, _engine_tp_size
         if _engine_tp_size(self.llm) > 1 or _engine_graph(self.llm):
             return
@@ -320,6 +321,7 @@ class MiaLLM:
                 outputs = self.llm.generate(prompts, sp_list, **passthrough)
 
         if hook and self.worker_name and not save_to_disk:
+            # lazy: keep mia.graph (reads env at import) out of import mia
             from mia.graph.delivered_probes import attach_lazy, merge_source, pending
             srcs = [merge_source(o) for o in outputs]
             if len(outputs) > 1 and any(s is not None for s in srcs):

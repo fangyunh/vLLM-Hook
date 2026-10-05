@@ -5,6 +5,14 @@ import os
 import queue as _queue
 import threading
 
+import torch.multiprocessing as tmp
+
+from mia import register_plugins
+from mia.graph.child_process import get_until_parent_exits, register_shutdown, start_child
+from mia.graph.thread_device import bind_thread_to_device, creator_cuda_device
+from mia.registry import PluginRegistry
+from mia.run_utils import dispatch_disk_analyze
+
 
 _CHILD_THREAD_ENV = {
     "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
@@ -17,15 +25,12 @@ _registry_ready = False
 def _ensure_registry() -> None:
     global _registry_ready
     if not _registry_ready:
-        from mia import register_plugins
         register_plugins()
         _registry_ready = True
 
 
 def _default_analyze_fn(source_kind: str, source: dict, analyzer_name: str, analyzer_spec):
     _ensure_registry()
-    from mia.registry import PluginRegistry
-    from mia.run_utils import dispatch_disk_analyze
 
     entry = PluginRegistry.get_analyzer(analyzer_name)
     if entry is None:
@@ -63,7 +68,6 @@ def _analyze_child(q_in, q_out) -> None:
     for k, v in _CHILD_THREAD_ENV.items():
         os.environ.setdefault(k, v)
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-    from mia.graph.child_process import get_until_parent_exits
     _consume_loop(lambda: get_until_parent_exits(q_in), q_out.put, _default_analyze_fn)
 
 
@@ -75,7 +79,6 @@ class ServerAnalyzeProcess:
         self._put_timeout = float(put_timeout)
         self._use_process = bool(use_process) and analyze_fn is None
         self._analyze_fn = analyze_fn or _default_analyze_fn
-        from mia.graph.thread_device import creator_cuda_device
         self._device = creator_cuda_device()
 
         self._lock = threading.Lock()
@@ -88,7 +91,6 @@ class ServerAnalyzeProcess:
         self._failed: list = []
 
         if self._use_process:
-            import torch.multiprocessing as tmp
             self._ctx = tmp.get_context("spawn")
             self._q_in = self._ctx.Queue(maxsize=max(1, int(maxsize)))
             self._q_in.cancel_join_thread()
@@ -101,7 +103,6 @@ class ServerAnalyzeProcess:
                 os.environ["CUDA_VISIBLE_DEVICES"] = ""
                 self._proc = self._ctx.Process(target=_analyze_child, args=(self._q_in, self._q_out),
                                                daemon=True, name="mia-server-analyze")
-                from mia.graph.child_process import start_child
                 start_child(self._proc)
             finally:
                 for k, v in saved.items():
@@ -208,7 +209,6 @@ class ServerAnalyzeProcess:
 
 
     def _run_thread(self) -> None:
-        from mia.graph.thread_device import bind_thread_to_device
         bind_thread_to_device(self._device)
         _consume_loop(self._q_in.get, self._handle_result, self._analyze_fn)
 
@@ -244,7 +244,6 @@ def init_server_analyze_process(worker) -> None:
         return
     try:
         worker._server_analyze_process = ServerAnalyzeProcess()
-        from mia.graph.child_process import register_shutdown
         register_shutdown(worker._server_analyze_process.close)
         print("[server-analyze] CPU analyze process ON", flush=True)
     except Exception as e:  # noqa: BLE001

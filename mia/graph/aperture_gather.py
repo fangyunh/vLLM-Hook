@@ -4,13 +4,18 @@ from __future__ import annotations
 import glob
 import json
 import logging
+import multiprocessing
+import multiprocessing as mp
 import os
+import queue as _queue
 import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 import numpy as np
+import torch
 
 from .aperture_run_index import (RUN_ID_KEY, ChainCursor, RunIndexError, read_run_index,
                                  segment_name, segment_paths)
@@ -19,6 +24,21 @@ from .aperture_trim import (TRIM_ENV as GATHER_TRIM_ENV, TrimError, TrimLog, ali
                             punch_supported, trim_align, trim_chunk_bytes, trim_enabled,
                             trim_explicit, trim_lag_bytes, trimmed_floor_rows)
 from .cpu_budget import allocated_cpus
+from .tp_shard import (
+    RANK_DIR_PREFIX,
+    HSShard,
+    TPShardError,
+    check_hs_shard_set,
+    dp_dir_name,
+    hs_expected_ranks,
+    hs_owned_rows,
+    hs_requested_layers,
+    hs_shard_from_header,
+    merge_hs_layer_maps,
+    parse_dp_dir,
+    parse_rank_dir,
+    rank_dir_name,
+)
 from mia.errors import MiaRefusal
 
 logger = logging.getLogger(__name__)
@@ -182,8 +202,6 @@ def delivery_timeout_s() -> float:
 def delivery_dir(run_dir: str, *, tp_rank: Optional[int] = None,
                  dp_rank: Optional[int] = None) -> str:
     """Delivery root: ``MIA_APERTURE_GATHER_DIR`` or ``<run_dir>/delivered``, per rank if sharded."""
-    from .tp_shard import RANK_DIR_PREFIX, dp_dir_name, parse_rank_dir, rank_dir_name
-
     d = os.environ.get(DIR_ENV)
     if d and dp_rank is not None:
         d = os.path.join(d, dp_dir_name(int(dp_rank)))
@@ -209,8 +227,6 @@ def delivery_dir(run_dir: str, *, tp_rank: Optional[int] = None,
 
 def req_dir_name(req_id: str) -> str:
     """One request's directory name, percent-encoded so it is injective and stays in the root."""
-    from urllib.parse import quote
-
     return quote(str(req_id), safe="")
 
 
@@ -291,7 +307,6 @@ class GatherPass:
         self.num_layers = None if num_layers is None else int(num_layers)
         self.shard = None
         if self.tp_rank is not None:
-            from .tp_shard import HSShard
             if self.num_layers is None:
                 raise GatherError(
                     "a layer-sharded gather needs num_layers: the shard rule (and so which layers "
@@ -300,7 +315,6 @@ class GatherPass:
         self.out_dir = str(out_dir) if out_dir is not None else delivery_dir(
             self.run_dir, tp_rank=self.tp_rank)
         if self.tp_rank is not None:
-            from .tp_shard import parse_rank_dir
             named = parse_rank_dir(self.out_dir)
             if named is None or int(named) != self.tp_rank:
                 raise GatherError(
@@ -349,8 +363,6 @@ class GatherPass:
         os.replace(tmp, path)
 
     def _check_shard_header(self, hdr: dict) -> None:
-        from .tp_shard import TPShardError, hs_shard_from_header
-
         try:
             got = hs_shard_from_header(hdr)
         except TPShardError as e:
@@ -700,8 +712,6 @@ def _as_id_set(req_ids):
 
 
 def _manifest_shard(man: dict, where: str):
-    from .tp_shard import TPShardError, hs_shard_from_header
-
     try:
         return hs_shard_from_header(man)
     except TPShardError as e:
@@ -710,8 +720,6 @@ def _manifest_shard(man: dict, where: str):
 
 def discover_delivery_ranks(root: str) -> List[Tuple[int, str]]:
     """``[(tp_rank, dir), ...]`` for each marked ``tp_rank_<N>`` delivery root under ``root``."""
-    from .tp_shard import parse_rank_dir
-
     for base in (root, os.path.join(root, DELIVERY_DIRNAME)):
         out: List[Tuple[int, str]] = []
         try:
@@ -829,8 +837,6 @@ def load_delivery(req_dir: str, *, allow_shard: bool = False, run_ids=None, into
             f"{req_dir}: the manifests cover layers {sorted(covered)}, not the request's "
             f"{sorted(layers_all)} exactly once")
 
-    import torch
-
     row_shape = tuple(int(x) for x in first["row_shape"])
     dtype_name = first["dtype"]
     np_dtype = np.dtype(_np_name(dtype_name))
@@ -919,8 +925,6 @@ def _rank_shards(ranks: Sequence[Tuple[int, str]]):
 
 
 def _expected_ranks_for(ask, tp_size: int, num_layers: int):
-    from .tp_shard import hs_expected_ranks, hs_owned_rows, hs_requested_layers
-
     if ask is None:
         return sorted(r for r in range(int(tp_size))
                       if hs_owned_rows(int(num_layers), int(tp_size), r))
@@ -935,8 +939,6 @@ def _listdir(d: str) -> List[str]:
 
 
 def _aperture_contents(d: str) -> List[str]:
-    from .tp_shard import parse_rank_dir
-
     out = []
     for n in _listdir(d):
         p = os.path.join(d, n)
@@ -948,8 +950,6 @@ def _aperture_contents(d: str) -> List[str]:
 
 
 def _level_root(d: str) -> Optional[str]:
-    from .tp_shard import parse_rank_dir
-
     ranks = discover_delivery_ranks(d)
     if ranks:
         return os.path.dirname(ranks[0][1])
@@ -983,8 +983,6 @@ def _check_delivery_root(root: str) -> None:
 
 
 def _resolve_roots(d, skipped: Optional[List[str]] = None) -> List[str]:
-    from .tp_shard import parse_dp_dir, parse_rank_dir
-
     d = os.path.abspath(os.fspath(d))
     if not os.path.isdir(d):
         raise NoDeliveryError(f"{d}: no such delivery root or aperture dir",
@@ -1071,8 +1069,6 @@ def load_delivered(out_dir, *, expected_layers=None, req_ids=None, run_ids=None,
 
 def _load_delivered_root(out_dir: str, *, expected_layers=None, req_ids=None,
                          run_ids=None, into=None) -> dict:
-    from .tp_shard import check_hs_shard_set, merge_hs_layer_maps
-
     ranks = discover_delivery_ranks(out_dir)
     if not ranks:
         return _load_delivered_one_rank(out_dir, req_ids=_as_id_set(req_ids), run_ids=run_ids,
@@ -1099,7 +1095,6 @@ def _load_delivered_root(out_dir: str, *, expected_layers=None, req_ids=None,
                 os.path.join(dirs[r], req_dir_name(rid)), run_ids)), default=0)
                 for r in sorted(have)}
             if len(set(rows.values())) > 1:
-                from .tp_shard import TPShardError
                 raise TPShardError(
                     f"req {rid!r}: its layers hold different row counts across ranks (rank -> "
                     f"rows {rows}); every layer of a request captures the same tokens, so the "
@@ -1142,8 +1137,6 @@ def _worker_gap(req_dir: str, run_ids=None) -> str:
 class _WaitRoot:
 
     def __init__(self, root: str, expected_layers):
-        from .tp_shard import check_hs_shard_set
-
         self.root = root
         ranks = discover_delivery_ranks(root)
         self.ranks: Dict[int, str] = {}
@@ -1335,12 +1328,9 @@ def _gather_child(ctl_q, run_dir: str, out_dir: str, worker: int, n_workers: int
                   trim_chunk: int = 0, trim_lag: int = 0, tp_rank: Optional[int] = None,
                   tp_size: int = 1, num_layers: Optional[int] = None,
                   run_id: Optional[str] = None, progress=None) -> None:
-    import queue as _queue
-
     for k, v in _CHILD_THREAD_ENV.items():
         os.environ.setdefault(k, v)
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-    import multiprocessing
 
     parent = multiprocessing.parent_process()
     p = GatherPass(run_dir, out_dir, worker=worker, n_workers=n_workers, batch_bytes=batch_bytes,
@@ -1427,8 +1417,7 @@ class ApertureGatherProcess:
         return gp
 
     def start(self) -> None:
-        import multiprocessing as mp
-
+        # lazy: child_process reads env at import; keep it out of plugin load
         from .child_process import register_shutdown, start_child
 
         if self._procs:

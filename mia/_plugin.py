@@ -2,21 +2,124 @@
 
 from __future__ import annotations
 
+import ast as _ast
+import asyncio
 import contextlib
 import contextvars
+import copy
+import glob
+import hashlib
+import importlib as _il
+import json as _json
 import os
 import pickle
+import shutil
+import subprocess
+import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+from urllib.parse import quote
 
+import torch._dynamo
+import vllm
 import zstandard as zstd
+from torch.nn.utils.rnn import pad_sequence
+from vllm import LLM
+from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.config.compilation import CompilationMode
+from vllm.engine.arg_utils import EngineArgs
+from vllm.v1.engine import EngineCoreRequest, output_processor as op
+from vllm.v1.engine.core_client import InprocClient
 
+from mia import register_plugins
 from mia._profiler import PROF
-from mia.errors import MiaConfigurationError, MiaDeliveryError, MiaRefusal
+from mia.errors import MiaConfigurationError, MiaDeliveryError
+from mia.graph import (
+    aperture_gather as ag,
+    delivery_selector as ds,
+    disk_flush_probe as _dfp,
+    run_artifact,
+)
+from mia.graph.aperture_reader import load_qk_aperture_tp
+from mia.graph.aperture_sizing import (
+    CAPTURE_SUBSYSTEMS,
+    DEFAULT_AUTOCAP_HEADROOM_BYTES,
+    DEFAULT_AUTOCAP_SAFETY,
+    aperture_bytes_is_explicit,
+    apply_min_only,
+    compute_safe_max_batched_tokens,
+    parse_autocap_setting,
+    per_token_row_bytes,
+    resolve_aperture_bytes,
+    resolve_aperture_bytes_auto,
+    safe_cap_with_model_sized_aperture,
+)
+from mia.graph.delivered_probes import (
+    DeliveryReadTimeout,
+    qk_probes,
+    response_id,
+    serialize_probes as _serialize_probes,
+    trim_probes as _trim_probes,
+)
+from mia.graph.delivery_route import (
+    _WRITE_POOL,
+    await_turn,
+    end_turn,
+    engine_info,
+    merge_info,
+    patch_app_builder,
+    route_enabled,
+    run_filter,
+)
+from mia.graph.delivery_router import RouteDecision, decide_route
+from mia.graph.delivery_selector import DP_SIZE_ENV, STAMP_ENV
+from mia.graph.run_artifact import artifact_wait_s
+from mia.graph.run_mode import DEFAULT_MIA_WORKER, capture_mode_from_env, parse_mia_worker_env
+from mia.graph.run_mode import MIA_WORKER_VALUES, UnknownMiaWorkerError  # noqa: F401  (re-exported)
+from mia.graph.tp_shard import (
+    HS_ALL_RANKS_ENV,
+    HS_LAYER_SHARD_RULE,
+    HS_MODE_ALL_RANKS,
+    HS_MODE_RANK0,
+    HS_MODE_ROUND_ROBIN,
+    HS_SHARD_ENV,
+    HS_SHARD_KEY,
+    TP_SHARD_KEY,
+    TPShardError,
+    hs_expected_ranks,
+    hs_max_owned_layers,
+    hs_requested_layers,
+    merge_hs_payloads,
+    merge_qk_payloads,
+    parse_rank_dir,
+    qk_shard,
+    rank_dir_name,
+    refuse_pipeline_parallel,
+    resolve_hs_shard_mode,
+)
+from mia.optimizations import env_is_on
+from mia.registry import PluginRegistry
+from mia.run_utils import (
+    estimate_gen_len,
+    predict_artifact_kb,
+    predicted_rpc_ms,
+    qk_score_size_select,
+    read_refused_qk,
+    route_to_disk,
+    rpc_disk_crossover_kb,
+)
+from mia.runner import UnsupportedRunnerError
+from mia.workers._common import match_internal_ids
+from mia.workers.steer_worker import (
+    _load_steering_vector,
+    _parse_steer_layers,
+    _resolve_steer_config,
+)
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
@@ -34,13 +137,6 @@ _WORKER_EXT_HS = "mia.workers.hs_capture_worker.HSCaptureWorker"
 _WORKER_EXT_QK = "mia.workers.qk_capture_worker.QKCaptureWorker"
 _WORKER_EXT_STEER = "mia.workers.steer_worker.SteerWorker"
 
-from mia.graph.run_mode import (  # noqa: E402
-    DEFAULT_MIA_WORKER,
-    MIA_WORKER_VALUES,
-    UnknownMiaWorkerError,
-    capture_mode_from_env,
-    parse_mia_worker_env,
-)
 _WORKER_EXT_BY_KIND = {
     "hidden_states": _WORKER_EXT_HS,
     "qk": _WORKER_EXT_QK,
@@ -66,6 +162,7 @@ _DEFAULT_HOOK_DIR = "/dev/shm/mia"
 
 
 def _graph_mode() -> bool:
+    # lazy: graph install code (reads env at import) stays out of plugin load
     from mia.graph.install import graph_mode_enabled
     return graph_mode_enabled()
 
@@ -104,7 +201,6 @@ def _takes_aperture_per_request(extra: dict, wants_hs: bool, wants_qk: bool,
 
 def _hybrid_serves(extra: dict, wants_hs: bool, wants_qk: bool, wants_steer: bool,
                    engine=None) -> bool:
-    from mia.graph.delivery_selector import STAMP_ENV
     stamp = os.environ.get(STAMP_ENV) or ""
     graph = _engine_graph(engine) if engine is not None else _graph_mode()
     return (stamp.partition(":")[0] == "hybrid" and graph
@@ -129,7 +225,6 @@ _SAMPLE_CACHED_ATTR = "_mia_n_cached"
 def _patch_sample_cached() -> None:
     """Record each sample's prefix-cache count on its output; vLLM keeps one per parent request
     (the last sample to finish), and siblings hit each other's prompt blocks."""
-    from vllm.v1.engine import output_processor as op
     orig = op.RequestState._new_completion_output
     if getattr(orig, "_mia", False):
         return
@@ -156,6 +251,7 @@ def _sample_cached(output, sample, n: int):
 
 def _hybrid_marker(output, extra: dict, explicit_save, gen_counts: dict, nonce=None,
                    key=None, cached_counts=None) -> dict:
+    # lazy: graph install code (reads env at import) stays out of plugin load
     from mia.graph.install_hs import DEFAULT_HOOKS_ON, DEFAULT_HS_MODE
     outs = list(getattr(output, "outputs", None) or [])
     n = max(len(outs), 1)
@@ -186,7 +282,7 @@ def _sample_metas(mark: dict) -> list:
 
 def _spawn_hybrid_writer(engine, request_id, mark: dict, extra: dict, internal=None,
                          start=None) -> None:
-    from mia.graph.delivered_probes import response_id
+    # lazy: tests patch delivery_route.spawn_writer
     from mia.graph.delivery_route import spawn_writer
     spawn_writer(engine, ext=str(request_id), n=mark["n"], layers=mark["layers"],
                  metas=_sample_metas(mark),
@@ -198,7 +294,6 @@ def _spawn_hybrid_writer(engine, request_id, mark: dict, extra: dict, internal=N
 
 
 def _end_completion_turn(extra: dict, request_id) -> None:
-    from mia.graph.delivery_route import end_turn
     end_turn(extra.get("hook_dir") or _DEFAULT_HOOK_DIR, str(extra.get("run_id") or request_id),
              str(request_id))
 
@@ -208,7 +303,6 @@ def _sample_keys(base: str, n: int) -> list:
 
 
 def _qk_dest(hook_dir: str, run_id, key: str) -> str:
-    from urllib.parse import quote
     return os.path.join(hook_dir, str(run_id), ".mia_qk", quote(str(key), safe=""))
 
 
@@ -228,7 +322,6 @@ def _outputs_by_index(output) -> list:
 
 
 def _raise_delivery_errors(request_id, parts) -> None:
-    from mia.errors import MiaDeliveryError
     for p in parts:
         if isinstance(p, dict) and "mia_error" in p:
             raise MiaDeliveryError(
@@ -244,7 +337,6 @@ def _qk_hooks(extra: dict) -> str:
 
 
 async def _qk_serve_rpc(engine, output, keys, mode: str, hooks: str) -> None:
-    from mia.graph.delivered_probes import qk_probes
     outs = _outputs_by_index(output)
     n_prompt = len(getattr(output, "prompt_token_ids", None) or [])
     probes = []
@@ -262,7 +354,6 @@ async def _qk_serve_rpc(engine, output, keys, mode: str, hooks: str) -> None:
 
 
 def _drop_qk_staging(hook_dir: str, run_id, keys) -> None:
-    import shutil
     for key in keys:
         shutil.rmtree(_qk_dest(hook_dir, run_id, key), ignore_errors=True)
     try:
@@ -273,9 +364,6 @@ def _drop_qk_staging(hook_dir: str, run_id, keys) -> None:
 
 def _write_qk_run(output, keys, info, hook_dir: str, run_id: str, mode: str, hooks: str,
                   unit=None, stamp=None, nonce=None, start=None) -> None:
-    from mia.graph import run_artifact
-    from mia.graph.aperture_reader import load_qk_aperture_tp
-    from mia.graph.delivered_probes import qk_probes
     outs = _outputs_by_index(output)
     n_prompt = len(getattr(output, "prompt_token_ids", None) or [])
     try:
@@ -300,10 +388,6 @@ def _write_qk_run(output, keys, info, hook_dir: str, run_id: str, mode: str, hoo
 
 
 async def _qk_serve_disk(engine, output, extra, keys, request_id, start=None) -> None:
-    import asyncio
-
-    from mia.graph.delivered_probes import response_id
-    from mia.graph.delivery_route import _WRITE_POOL, await_turn, end_turn, engine_info
     stamp, nonce = time.time_ns(), uuid.uuid4().hex
     run_id = str(extra.get("run_id") or request_id)
     hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
@@ -330,7 +414,6 @@ def _reconstruct_compact_qk(probes: dict) -> None:
     qk = probes.get("qk_cache") if isinstance(probes, dict) else None
     if not isinstance(qk, dict):
         return
-    from torch.nn.utils.rnn import pad_sequence
     for entry in qk.values():
         if not isinstance(entry, dict):
             continue
@@ -340,11 +423,7 @@ def _reconstruct_compact_qk(probes: dict) -> None:
             entry["k_all"] = pad_sequence([full[:int(L)] for L in ends], batch_first=True)
 
 
-from mia.graph.delivered_probes import trim_probes as _trim_probes  # noqa: E402
-
-
 def _stable_artifact_files(run_dir: str) -> list:
-    import glob
     try:
         return sorted(
             f for f in glob.glob(os.path.join(run_dir, "**", "*"), recursive=True)
@@ -360,7 +439,6 @@ _ARTIFACT_POLL_S = 0.005
 
 def _artifact_wait_s() -> float:
     if os.environ.get("MIA_ARTIFACT_WAIT_S"):
-        from mia.graph.run_artifact import artifact_wait_s
         return artifact_wait_s()
     return _ARTIFACT_WAIT_S
 
@@ -368,7 +446,6 @@ def _artifact_wait_s() -> float:
 def _flushed_rank_dirs(results, run_id: str, hook_dir: str):
     if not isinstance(results, (list, tuple)) or any(r is True for r in results):
         return None
-    from mia.graph.tp_shard import parse_rank_dir, rank_dir_name
     run_dir = os.path.join(hook_dir, run_id)
     dirs = set()
     for r in results:
@@ -392,8 +469,6 @@ def _landed(files: list) -> bool:
 
 def _all_refused(hook_dir: str, run_id, req_ids) -> bool:
     """Every request's Q/K capture was refused, so its flush wrote no artifact to wait for."""
-    from mia.run_utils import read_refused_qk
-    from mia.workers._common import match_internal_ids
     gone = read_refused_qk(hook_dir, str(run_id))
     return bool(gone) and all(match_internal_ids(gone, str(r)) for r in req_ids)
 
@@ -432,7 +507,6 @@ def _resolve_sink(extra: dict) -> str:
 
 
 async def _await_disk_artifact(run_id: str, hook_dir: str, rank_dirs=None) -> bool:
-    import asyncio
     run_dir = os.path.join(hook_dir, run_id)
     prev = None
     for _ in range(max(2, int(_artifact_wait_s() / _ARTIFACT_POLL_S))):
@@ -448,7 +522,6 @@ async def _await_disk_artifact(run_id: str, hook_dir: str, rank_dirs=None) -> bo
 
 
 def _wait_disk_artifact(run_id: str, hook_dir: str, rank_dirs=None) -> bool:
-    import time
     run_dir = os.path.join(hook_dir, run_id)
     prev = None
     for _ in range(max(2, int(_artifact_wait_s() / _ARTIFACT_POLL_S))):
@@ -474,8 +547,6 @@ def _aperture_deliver_timeout_s() -> float:
 
 
 async def _await_aperture_per_request(engine, request_id, hs_layers=None):
-    import asyncio
-    import time
     timeout = _aperture_deliver_timeout_s()
     deadline = time.monotonic() + timeout
     collected: dict = {}
@@ -500,8 +571,6 @@ async def _await_aperture_per_request(engine, request_id, hs_layers=None):
 
 
 def _collect_aperture_per_request_sync(rpc, request_id, hs_layers=None, *, wait=False):
-    import time
-    from mia.errors import MiaDeliveryError
     collected: dict = {}
     deadline = None
     while True:
@@ -536,8 +605,6 @@ def _collect_aperture_per_request_sync(rpc, request_id, hs_layers=None, *, wait=
 
 
 def _expected_probe_parts(parts, hs_layers=None) -> int:
-    from mia.graph.tp_shard import (
-        HS_SHARD_KEY, TP_SHARD_KEY, hs_expected_ranks, hs_requested_layers)
     for p in parts:
         shard = p.get(TP_SHARD_KEY) if isinstance(p, dict) else None
         if isinstance(shard, dict) and "tp_size" in shard:
@@ -552,8 +619,6 @@ def _expected_probe_parts(parts, hs_layers=None) -> int:
 
 def merge_probe_parts(parts, hs_layers=None):
     """Merge per-worker probe results from a retrieval collective_rpc into one dict."""
-    from mia.graph.tp_shard import (
-        HS_SHARD_KEY, TP_SHARD_KEY, TPShardError, merge_hs_payloads, merge_qk_payloads)
     parts = [p for p in parts if p is not None]
     if not parts:
         return None
@@ -572,8 +637,6 @@ def merge_probe_parts(parts, hs_layers=None):
 
 
 async def _await_aperture_disk_confirm(engine, request_id) -> bool:
-    import asyncio
-    import time
     timeout = _aperture_deliver_timeout_s()
     deadline = time.monotonic() + timeout
     while True:
@@ -592,7 +655,6 @@ async def _await_aperture_disk_confirm(engine, request_id) -> bool:
 
 def _apply_delivery_selector():
     global _STARTED_STAMPED
-    from mia.graph import delivery_selector as ds
     if os.environ.get(ds.STAMP_ENV):
         _STARTED_STAMPED = True
         return ds.apply()
@@ -618,9 +680,7 @@ def _mia_setenv(key: str, value) -> None:
 
 def _drop_inherited_delivery() -> None:
     """A process that inherited a delivery stamp and builds an engine resolves that engine itself."""
-    import os
     global _STARTED_STAMPED
-    from mia.graph import delivery_selector as ds
     mode = (os.environ.pop(ds.STAMP_ENV, None) or "").partition(":")[0]
     implied = {"hybrid": (ds.GATHER_ENV, ds.DELIVER_ENV), "drain": (ds.PER_REQUEST_ENV,)}
     for key in implied.get(mode, ()):
@@ -640,7 +700,6 @@ def _revert_mia_writes() -> None:
                 os.environ[key] = prev
     _MIA_WRITES.clear()
     if _MIA_DYNAMO_WRITE is not None:
-        import torch._dynamo
         prev, written = _MIA_DYNAMO_WRITE
         if torch._dynamo.config.disable == written:
             torch._dynamo.config.disable = prev
@@ -648,7 +707,6 @@ def _revert_mia_writes() -> None:
 
 
 def _apply_engine_delivery(worker_kind: str, graph: bool):
-    from mia.graph import delivery_selector as ds
     before = {k: os.environ.get(k) for k in ds.WRITES}
     sel = ds.apply(os.environ, worker_kind=worker_kind, graph=graph)
     for k in ds.WRITES:
@@ -681,7 +739,7 @@ def _note_vllm_version() -> None:
         return
     _VLLM_VER_NOTED = True
     try:
-        import vllm
+        # lazy: optional dependency (packaging)
         from packaging.version import Version
         raw = vllm.__version__
         ver = Version(raw)
@@ -727,7 +785,6 @@ def _dtype_element_size(dt) -> int:
 
 
 def _autocap_setting():
-    from mia.graph.aperture_sizing import parse_autocap_setting
     return parse_autocap_setting(os.environ.get("MIA_APERTURE_MAX_BATCHED_TOKENS"))
 
 
@@ -755,7 +812,6 @@ def _model_dims(config) -> dict:
         head_dim = int(getattr(tc, "head_dim", 0) or (hidden // h_q))
         tp = int(getattr(getattr(config, "parallel_config", None),
                          "tensor_parallel_size", 1) or 1)
-        from mia.graph.tp_shard import qk_shard
         shard = qk_shard(0, tp, h_q, h_kv, head_dim)
         dims["n_q_heads"] = shard.num_local_q_heads
         dims["n_kv_heads"] = shard.num_local_kv_heads
@@ -765,20 +821,13 @@ def _model_dims(config) -> dict:
 
 
 def _hs_layers_per_rank(config, n_layers: int) -> int:
-    from mia.graph.tp_shard import hs_max_owned_layers, resolve_hs_shard_mode
     tp = int(getattr(getattr(config, "parallel_config", None), "tensor_parallel_size", 1) or 1)
     return hs_max_owned_layers(int(n_layers), tp, resolve_hs_shard_mode(tp))
 
 
 def _derive_safe_max_batched_tokens(config, worker_kinds):
+    # lazy: resolved at call time (tests patch vllm.platforms.current_platform)
     from vllm.platforms import current_platform
-    from mia.graph.aperture_sizing import (
-        resolve_aperture_bytes_auto, resolve_aperture_bytes, per_token_row_bytes,
-        compute_safe_max_batched_tokens,
-        DEFAULT_AUTOCAP_SAFETY, DEFAULT_AUTOCAP_HEADROOM_BYTES,
-    )
-    from mia.graph.aperture_sizing import (
-        aperture_bytes_is_explicit, safe_cap_with_model_sized_aperture)
     dims = _model_dims(config)
     n_layers = dims["layers"]
     gpu_util = float(config.cache_config.gpu_memory_utilization)
@@ -810,7 +859,6 @@ def _maybe_autocap_max_batched_tokens(config, worker_kinds) -> None:
         if mode == "off":
             return
         subsystems = _enabled_subsystems(worker_kinds)
-        from mia.graph.aperture_sizing import CAPTURE_SUBSYSTEMS
         if not (subsystems & set(CAPTURE_SUBSYSTEMS)):
             return
         if mode == "explicit":
@@ -819,7 +867,6 @@ def _maybe_autocap_max_batched_tokens(config, worker_kinds) -> None:
             safe = _derive_safe_max_batched_tokens(config, worker_kinds)
         if safe is None:
             return
-        from mia.graph.aperture_sizing import apply_min_only
         sc = config.scheduler_config
         current = getattr(sc, "max_num_batched_tokens", None)
         new = apply_min_only(current, safe)
@@ -836,14 +883,13 @@ _COMPILE_CACHE_STAMP_KEY = "mia_graph_capture"
 
 
 def _mia_source_id() -> str:
-    import subprocess
-
     cached = getattr(_mia_source_id, "_cached", None)
     if cached is not None:
         return cached
 
     version = "0.6.0"
     try:
+        # lazy: as _v it would clash with the _v locals elsewhere in this module
         from importlib.metadata import version as _v
         version = _v("mia")
     except Exception:  # noqa: BLE001
@@ -853,8 +899,6 @@ def _mia_source_id() -> str:
         sha = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"],
                              capture_output=True, text=True, timeout=5)
         if sha.returncode == 0:
-            import hashlib
-
             state = hashlib.sha256()
             diff = subprocess.run(["git", "-C", root, "diff", "HEAD", "--", "mia"],
                                   capture_output=True, text=True, timeout=10)
@@ -898,9 +942,6 @@ def mia_graph_layout(engine_args, worker_kind: str) -> dict:
     layout: dict = {"kind": kind, "tp_size": tp_size, "aperture_gpu_bytes": aperture}
 
     if kind == "hidden_states":
-        from mia.graph.tp_shard import (
-            HS_ALL_RANKS_ENV, HS_LAYER_SHARD_RULE, HS_MODE_ALL_RANKS, HS_MODE_RANK0,
-            HS_MODE_ROUND_ROBIN, HS_SHARD_ENV, resolve_hs_shard_mode)
         mode = resolve_hs_shard_mode(tp_size)
         owned = {
             HS_MODE_ROUND_ROBIN: f"layers i where i % {tp_size} == tp_rank",
@@ -951,7 +992,6 @@ def stamp_compile_cache_key(engine_args, worker_kind: str) -> None:
               f"than one MIA worker kind on this machine, set VLLM_DISABLE_COMPILE_CACHE=1.",
               flush=True)
         return
-    import json as _json
     print(f"[mia] compile-cache key stamped with worker={worker_kind} mia={stamp['mia']} "
           f"layout={_json.dumps(stamp['layout'], sort_keys=True)} "
           f"(worker_extension_cls is excluded from vLLM's own key)", flush=True)
@@ -988,7 +1028,6 @@ def validate_v2_runner_selected(config) -> None:
     except Exception:  # noqa: BLE001
         return
     if selected is False:
-        from mia.runner import UnsupportedRunnerError
         raise UnsupportedRunnerError(
             "MIA requires vLLM's V2 model runner, but this engine config resolves to V1 "
             "(VllmConfig.use_v2_model_runner is False) with VLLM_USE_V2_MODEL_RUNNER unset. "
@@ -1091,7 +1130,6 @@ def _compile_mode_name(cc):
     m = cc.get("mode") if isinstance(cc, dict) else getattr(cc, "mode", None)
     if m is None:
         return None
-    from vllm.config.compilation import CompilationMode
     try:
         if isinstance(m, str) and not m.isdigit():
             return CompilationMode[m.upper()].name
@@ -1111,14 +1149,11 @@ def _default_cudagraph_mode(cc):
 
 def _with_default_cudagraph(cc, default=DEFAULT_CUDAGRAPH_MODE):
     if cc is None:
-        from vllm.config import CompilationConfig, CUDAGraphMode
         return CompilationConfig(cudagraph_mode=CUDAGraphMode[default])
     if isinstance(cc, dict):
         return (cc if cc.get("cudagraph_mode") is not None
                 else {**cc, "cudagraph_mode": default})
     if getattr(cc, "cudagraph_mode", "missing") is None:
-        import copy
-        from vllm.config import CUDAGraphMode
         new = copy.deepcopy(cc)
         new.cudagraph_mode = CUDAGraphMode[default]
         return new
@@ -1130,7 +1165,6 @@ def _disable_dynamo_for_eager_hooks() -> None:
     if os.environ.get("TORCHDYNAMO_DISABLE") is not None:
         return
     _mia_setenv("TORCHDYNAMO_DISABLE", "1")
-    import torch._dynamo
     prev = torch._dynamo.config.disable
     torch._dynamo.config.disable = True
     _MIA_DYNAMO_WRITE = (prev, True)
@@ -1177,7 +1211,6 @@ def _patched_create_engine_config(self, *args, **kwargs):
             "Unset it (0.29 defaults to V2) or set it to 1."
         )
 
-    from mia.graph.tp_shard import refuse_pipeline_parallel, resolve_hs_shard_mode
     refuse_pipeline_parallel(getattr(self, "pipeline_parallel_size", 1), "engine arguments")
 
     resolve_hs_shard_mode(int(getattr(self, "tensor_parallel_size", 1) or 1))
@@ -1190,6 +1223,7 @@ def _patched_create_engine_config(self, *args, **kwargs):
         _drop_inherited_delivery()
     mode = resolve_capture_mode(self, os.environ, _ENGINE_HINTS.get(), kind=_wkind)
     graph_mode = mode.graph
+    # lazy: graph install code (reads env at import) stays out of plugin load
     from mia.graph.install import set_graph_mode
     set_graph_mode(graph_mode)
     if mode.engine_eager:
@@ -1210,7 +1244,6 @@ def _patched_create_engine_config(self, *args, **kwargs):
         _disable_dynamo_for_eager_hooks()
     dp_size = int(getattr(self, "data_parallel_size", 1) or 1)
     if dp_size > 1:
-        from mia.graph.delivery_selector import DP_SIZE_ENV
         _mia_setenv(DP_SIZE_ENV, str(dp_size))
     print(_capture_mode_line(mode, self, cg_explicit, cg_why), flush=True)
     # vLLM may resolve the mode in place on this object; keep what MIA handed it.
@@ -1364,7 +1397,6 @@ def _emit_capture_evidence(engine, output, extra, wants_hs, wants_qk, gen_tokens
 
 
 def _maybe_storage_route(engine, prompt, extra, max_tokens) -> bool | None:
-    from mia.optimizations import env_is_on
     if not env_is_on("storage_router"):
         return None
     _dbg = os.environ.get("MIA_ROUTER_DEBUG") == "1"
@@ -1386,10 +1418,8 @@ def _maybe_storage_route(engine, prompt, extra, max_tokens) -> bool | None:
         _log(f"P=None (prompt type={type(prompt).__name__}) -> no route")
         return None
     hooks_on = extra.get("hooks_on", "both")
-    from mia.run_utils import estimate_gen_len
     gen_len = estimate_gen_len(max_tokens)
     try:
-        from mia.run_utils import predict_artifact_kb, route_to_disk, predicted_rpc_ms
         if wants_qk:
             dims = _qk_model_dims(engine)
             if not dims:
@@ -1435,8 +1465,6 @@ _FLUSH_ANNOUNCED: set = set()
 
 async def _flush_disk_coalesced(engine, *, request_id, run_id, hook_dir, wants_hs, wants_qk,
                                 wants_steer, sink, per_request, durable_wait):
-    from mia.graph import disk_flush_probe as _dfp
-
     cls = None
     if _dfp.skip_enabled():
         cls = _dfp.flush_class(graph=_engine_graph(engine), wants_hs=bool(wants_hs),
@@ -1484,7 +1512,6 @@ def _profile_mode() -> bool:
 
 
 def _aperture_route_thresholds(worker_kind: str = "hs") -> "tuple[int, int]":
-    from mia.run_utils import rpc_disk_crossover_kb
     derived = int(rpc_disk_crossover_kb(worker_kind) * 1024)
     t_rpc = int(os.environ.get("MIA_ROUTER_T_RPC", derived))
     t_analyze = int(os.environ.get("MIA_ROUTER_T_ANALYZE", derived))
@@ -1498,10 +1525,8 @@ def _analyzer_reducible(analyzer_name, analyzer_spec) -> bool:
         return reducible_reduce
     entry = None
     try:
-        from mia.registry import PluginRegistry
         entry = PluginRegistry.get_analyzer(analyzer_name)
         if entry is None:
-            from mia import register_plugins
             register_plugins()
             entry = PluginRegistry.get_analyzer(analyzer_name)
     except Exception:  # noqa: BLE001
@@ -1517,7 +1542,6 @@ def _analyzer_reducible(analyzer_name, analyzer_spec) -> bool:
 def _explicit_disk_route(extra: dict):
     if _resolve_sink(extra) != "disk":
         return None
-    from mia.graph.delivery_router import RouteDecision
     return RouteDecision("disk", "none")
 
 
@@ -1540,18 +1564,14 @@ def _decide_aperture_route(engine, prompt, extra, max_tokens):
         return _explicit_disk_route(extra)
     gran = extra.get("hs_mode", "last_token")
     hooks_on = extra.get("hooks_on", "both")
-    from mia.run_utils import estimate_gen_len
     gen_len = estimate_gen_len(max_tokens)
     try:
-        from mia.run_utils import predict_artifact_kb
-        from mia.graph.delivery_router import decide_route
         kb = predict_artifact_kb("hs", gran, P, n_layers, 1, dims[2], hidden, 2, gen_len, hooks_on)
         predicted_bytes = int(kb * 1024)
         reducible = _analyzer_reducible(extra.get("analyzer"), extra.get("analyzer_spec"))
         t_rpc, t_analyze = _aperture_route_thresholds("hs")
         decision = decide_route(predicted_bytes, reducible, t_rpc, t_analyze)
         if _resolve_sink(extra) == "disk" and decision.transport != "disk":
-            from mia.graph.delivery_router import RouteDecision
             return RouteDecision("disk", decision.analyze_where)
         return decision
     except Exception:  # noqa: BLE001
@@ -1576,11 +1596,8 @@ def _decide_aperture_route_qk(engine, prompt, extra, max_tokens):
         return _explicit_disk_route(extra)
     gran = extra.get("hookq_mode", "all_tokens")
     hooks_on = extra.get("hooks_on", "both")
-    from mia.run_utils import estimate_gen_len
     gen_len = estimate_gen_len(max_tokens)
     try:
-        from mia.run_utils import predict_artifact_kb
-        from mia.graph.delivery_router import decide_route
         kb = predict_artifact_kb("qk", gran, P, head_layers, 1, head_dim,
                                  H_q * head_dim, 2, gen_len, hooks_on)
         predicted_bytes = int(kb * 1024)
@@ -1588,11 +1605,9 @@ def _decide_aperture_route_qk(engine, prompt, extra, max_tokens):
         t_rpc, t_analyze = _aperture_route_thresholds("qk")
         decision = decide_route(predicted_bytes, reducible, t_rpc, t_analyze)
         if _resolve_sink(extra) == "disk" and decision.transport != "disk":
-            from mia.graph.delivery_router import RouteDecision
             return RouteDecision("disk", decision.analyze_where)
         if ("save_to_disk" in extra and _resolve_sink(extra) == "rpc"
                 and decision.transport != "rpc"):
-            from mia.graph.delivery_router import RouteDecision
             return RouteDecision("rpc", decision.analyze_where)
         return decision
     except Exception:  # noqa: BLE001
@@ -1689,7 +1704,6 @@ def _engine_attr_dict(engine, name: str) -> dict:
 
 
 def _steer_target(engine, steer_arg):
-    from mia.workers.steer_worker import _parse_steer_layers, _resolve_steer_config
     cfg = _resolve_steer_config(steer_arg, os.environ.get("MIA_STEER_CONFIG"))
     if not isinstance(cfg, dict):
         return None
@@ -1702,7 +1716,6 @@ def _steer_target(engine, steer_arg):
 
 
 def _load_steer_info(path: str):
-    from mia.workers.steer_worker import _load_steering_vector
     try:
         raw = _load_steering_vector(path)
         if "dir" not in raw:
@@ -1765,7 +1778,6 @@ def _check_steer_vmax(engine, path, pending=()) -> None:
 
 
 async def _refuse_on_graph_serve(engine, extra):
-    import asyncio
     info = None
     if isinstance(extra, dict) and extra.get("steer") and _engine_graph(engine):
         target = _steer_target(engine, extra.get("steer"))
@@ -1813,21 +1825,18 @@ async def _patched_generate(
 ) -> AsyncIterator:
     effective_params = sampling_params
     try:
-        from vllm.v1.engine import EngineCoreRequest
         if isinstance(prompt, EngineCoreRequest) and prompt.sampling_params is not None:
             effective_params = prompt.sampling_params
     except ImportError:
         pass
 
     extra = dict(effective_params.extra_args or {})
-    import json as _json
     for _k in ("output_qk", "output_hidden_states", "steer"):
         if isinstance(extra.get(_k), str):
             try:
                 _decoded = _json.loads(extra[_k])
             except (ValueError, TypeError):
                 try:
-                    import ast as _ast
                     _decoded = _ast.literal_eval(extra[_k])
                 except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
                     continue
@@ -1888,7 +1897,6 @@ async def _patched_generate(
                 _plen = _prompt_token_len(prompt)
                 _oqk = extra.get("output_qk")
                 if _dims and _plen and isinstance(_oqk, dict):
-                    from mia.run_utils import qk_score_size_select
                     _pick = qk_score_size_select(
                         _plen, extra.get("hookq_mode", "all_tokens"), _oqk, *_dims)
                     extra["qk_capture"] = _pick
@@ -2019,7 +2027,6 @@ async def _patched_generate(
                         _trim_probes(probes, "qk_cache", expected_len)
                         output.probes = probes
                 if _hybrid and not _hs_ask_is_empty(extra, _hs_num_layers(self)):
-                    from mia.graph.delivery_route import route_enabled
                     _mark = _hybrid_marker(output, extra, _explicit_std, _gen_counts, _nonce,
                                            _added[0] if _added else None, _cached_counts)
                     if route_enabled():
@@ -2081,7 +2088,6 @@ def _offline_delivery_info(llm) -> dict:
     eng = getattr(llm, "llm_engine", None)
     info = {}
     if eng is not None and _engine_worker_kind(eng) == "hidden_states":
-        from mia.graph.delivery_route import merge_info
         info = merge_info(llm.collective_rpc("mia_delivery_info"))
     llm._mia_delivery_info = info
     return info
@@ -2094,7 +2100,6 @@ def _offline_hybrid_request(extra: dict) -> bool:
 
 
 def _step_inproc_core(llm) -> None:
-    from vllm.v1.engine.core_client import InprocClient
     eng = llm.llm_engine
     if isinstance(getattr(eng, "engine_core", None), InprocClient):
         eng.step()
@@ -2115,6 +2120,7 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
     info = _offline_delivery_info(llm)
     if not info.get("roots"):
         return set()
+    # lazy: tests patch these readers; graph install code stays out of plugin load
     from mia.graph.aperture_gather import GatherError, load_delivered, wait_delivered
     from mia.graph.delivered_probes import hs_probes
     from mia.graph.install_hs import DEFAULT_HOOKS_ON, DEFAULT_HS_MODE
@@ -2130,7 +2136,6 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
         if isinstance(layers, (list, tuple)):
             exp.update({k: list(layers) for k in keys})
         plan.append((out, extra, keys))
-    from mia.graph.delivery_route import run_filter
     run_ids = run_filter(info)
     to_save = [k for _o, e, ks in plan if e.get("save_to_disk") for k in ks]
     with PROF.timed("hybrid.offline_wait"):
@@ -2174,6 +2179,7 @@ def _deliver_offline(llm, outputs, engine_ids: dict) -> set:
 
 def _attach_delivered(obj, info: dict, key: str, meta: dict, layers, run_ids,
                       state=None) -> None:
+    # lazy: tests patch delivered_probes.padded_offline_probes
     from mia.graph.delivered_probes import (attach_lazy, first_pass_probes, offline_probes,
                                             padded_offline_probes, padded_reader)
 
@@ -2181,8 +2187,6 @@ def _attach_delivered(obj, info: dict, key: str, meta: dict, layers, run_ids,
     ask = {key: layers} if layers else None
 
     def rows(into=None):
-        from mia.graph import aperture_gather as ag
-        from mia.graph.delivered_probes import DeliveryReadTimeout
         try:
             n = ag.wait_delivered(roots, [key], expected_layers=ask, run_ids=run_ids,
                                   load=False)[key]
@@ -2224,7 +2228,6 @@ _TRACKED_KEYS = 1 << 16
 
 
 def _defer_flush(llm, info: dict, run_ids) -> dict:
-    import weakref
     fin = getattr(llm, "_mia_finish", None)
     if fin is not None and fin.alive:
         return fin.peek()[2][1]
@@ -2257,6 +2260,7 @@ def _engine_dead(engine) -> bool:
 
 
 def _backlog(state: dict):
+    # lazy: tests patch aperture_gather.delivery_backlog
     from mia.graph.aperture_gather import delivery_backlog
     keys = state["keys"]
     items = list(keys.items())                   # lazy reads pop keys from other threads
@@ -2282,7 +2286,6 @@ def _abandoned(state: dict, why: str) -> None:
 
 
 def _finish_deliveries(engine, state: dict) -> None:
-    import threading
     if threading.current_thread() is threading.main_thread():
         _finish_bounded(engine, state)
     else:
@@ -2291,8 +2294,6 @@ def _finish_deliveries(engine, state: dict) -> None:
 
 
 def _finish_bounded(engine, state: dict) -> None:
-    import threading
-    from mia.graph import aperture_gather as ag
     rpc = getattr(engine, "collective_rpc", None)
     if rpc is None:
         return
@@ -2345,10 +2346,6 @@ def _finish_bounded(engine, state: dict) -> None:
 
 
 def _save_offline_runs(disk: dict, kind: str, timer: str) -> None:
-    import time
-    import uuid
-
-    from mia.graph import run_artifact
     unit, stamp = f"generate-{uuid.uuid4().hex}", time.time_ns()
     for (hook_dir, run_id), items in disk.items():
         with PROF.timed(timer):
@@ -2385,7 +2382,6 @@ def _deliver_offline_qk(llm, outputs, engine_ids: dict) -> set:
             reqs.append((out, internal, extra))
     if not reqs or not _offline_qk_info(llm).get("per_request"):
         return set()
-    from mia.graph.delivered_probes import qk_probes
     _step_inproc_core(llm)
     n_layers = _hs_num_layers(llm.llm_engine)
     disk: dict = {}
@@ -2548,8 +2544,6 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
                             flushed_by_run.get(run_id), run_id, hook_dir))
                     if not landed:
                         PROF.incr("disk.await_artifact.timeout")
-                from mia.run_utils import read_refused_qk
-                from mia.workers._common import match_internal_ids
                 gone = read_refused_qk(hook_dir, str(run_id))
                 for r, _h in req_list:
                     hits = match_internal_ids(gone, str(r))
@@ -2562,8 +2556,6 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
 
 def _warn_graph_save_unwritten(runs) -> None:
     """One warning per call: save_to_disk on a graph engine that no delivery path writes."""
-    import os
-    from mia.graph import delivery_selector as ds
     names = ", ".join(repr(str(r)) for r in runs)
     for key, off in ((ds.MODE_ENV, lambda v: v.lower() in ("drain", "off")),
                      (ds.PROFILE_ENV, lambda v: v == "1"),
@@ -2578,9 +2570,6 @@ def _warn_graph_save_unwritten(runs) -> None:
         why = "delivers nothing for these requests; start the engine"
     print(f"[mia] WARNING: save_to_disk=True wrote nothing for run {names}: this engine runs CUDA "
           f"graphs and {why} with enforce_eager=True.", flush=True)
-
-
-from mia.graph.delivered_probes import serialize_probes as _serialize_probes  # noqa: E402
 
 
 def _attach_choice_probes(response, outs) -> None:
@@ -2645,8 +2634,7 @@ def register() -> None:
 
     _apply_delivery_selector()
 
-    from vllm import LLM
-    from vllm.engine.arg_utils import EngineArgs
+    # lazy: AsyncLLM and graph install code load only when register() runs
     from vllm.v1.engine.async_llm import AsyncLLM
 
     _original_create_engine_config = EngineArgs.create_engine_config
@@ -2671,7 +2659,6 @@ def register() -> None:
               f"passes are split by row count.", flush=True)
 
     try:
-        from mia.graph.delivery_route import patch_app_builder
         patch_app_builder()
     except Exception as e:  # noqa: BLE001
         print(f"[mia] delivered-data read route unavailable ({e!r}); MiaClient cannot read "
@@ -2685,7 +2672,6 @@ def register() -> None:
         "vllm.entrypoints.openai.serving_completion",
     ):
         try:
-            import importlib as _il
             _mod = _il.import_module(_completion_module)
             _cls = _mod.OpenAIServingCompletion
             _original_completion_response = (
@@ -2701,7 +2687,6 @@ def register() -> None:
         "vllm.entrypoints.openai.serving_chat",
     ):
         try:
-            import importlib as _il
             _mod = _il.import_module(_chat_module)
             _cls = _mod.OpenAIServingChat
             _original_chat_full_generator = _cls.chat_completion_full_generator

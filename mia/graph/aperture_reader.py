@@ -1,14 +1,30 @@
 """Rebuild each request's per-layer tensors from an aperture raw dump and its sidecar."""
 from __future__ import annotations
 
+import json
 import os
 
 import numpy as np
 import torch
+import torch as _torch
 
 from .aperture_metadata import read_qk_sidecar, read_sidecar
-from .aperture_trim import (TrimmedRegionError, is_reclaimed, refuse_trimmed_rows,  # noqa: F401
-                            trim_status, trimmed_floor_rows)
+from .aperture_run_index import INDEX_NAME, read_run_index, read_run_segments, run_slices
+from .aperture_trim import is_reclaimed, refuse_trimmed_rows, trimmed_floor_rows
+from .aperture_trim import TrimmedRegionError, trim_status  # noqa: F401  (re-exported)
+from .tp_shard import (
+    TPShardError,
+    check_complete_shard_set,
+    check_hs_shard_set,
+    discover_rank_dirs,
+    hs_expected_ranks,
+    hs_requested_layers,
+    hs_shard_from_header,
+    merge_head_tensors,
+    merge_hs_layer_maps,
+    parse_rank_dir,
+    qk_shard_from_header,
+)
 
 
 def _file_row(e) -> int:
@@ -215,8 +231,6 @@ def load_multilayer_aperture_artifact(run_dir: str, meta_path: str | None = None
 def load_from_run_index(run_dir: str, index_path: str | None = None, *,
                         skip_trimmed: bool = False, reclaimed_out: dict | None = None) -> dict:
     """Reconstruct ``{req_id: {layer: Tensor}}`` from the run index instead of the sidecar."""
-    from .aperture_run_index import INDEX_NAME, read_run_index
-
     if index_path is None:
         index_path = os.path.join(run_dir, INDEX_NAME)
     header, reqs = read_run_index(index_path)
@@ -227,8 +241,6 @@ def load_from_run_index(run_dir: str, index_path: str | None = None, *,
 def load_from_run_segments(run_dir: str, *, only_complete: bool = False,
                            skip_trimmed: bool = False, reclaimed_out: dict | None = None) -> dict:
     """Reconstruct ``{req_id: {layer: Tensor}}`` from the mid-run index segment chain."""
-    from .aperture_run_index import read_run_segments
-
     header, reqs, complete = read_run_segments(run_dir)
     if only_complete:
         reqs = {r: v for r, v in reqs.items() if r in complete}
@@ -238,8 +250,6 @@ def load_from_run_segments(run_dir: str, *, only_complete: bool = False,
 
 def _reconstruct_from_runs(run_dir: str, header: dict, reqs: dict, *, skip_trimmed: bool = False,
                            reclaimed_out: dict | None = None) -> dict:
-    from .aperture_run_index import run_slices
-
     np_dtype, is_bf16 = _np_dtype_for(header["dtype"])
     row_shape = tuple(header["row_shape"])
     floors = trimmed_floor_rows(run_dir)
@@ -284,8 +294,6 @@ HS_SIDECAR_NAME = "hs_aperture_meta.jsonl"
 
 def read_sidecar_header(meta_path: str) -> dict:
     """Line 0 of an aperture sidecar (HS or QK), without reading the entries."""
-    import json
-
     with open(meta_path, "r", encoding="utf-8") as f:
         first = f.readline()
     return json.loads(first)["__header__"]
@@ -293,9 +301,6 @@ def read_sidecar_header(meta_path: str) -> dict:
 
 def merge_qk_aperture_ranks(rank_dirs, meta_paths=None, *, check_replicas: bool = False) -> dict:
     """Merge per-rank QK aperture dumps into ONE artifact in the global head layout."""
-    from .tp_shard import TPShardError, check_complete_shard_set, merge_head_tensors, \
-        qk_shard_from_header
-
     rank_dirs = [str(d) for d in rank_dirs if d]
     if not rank_dirs:
         raise TPShardError("no QK rank dirs to merge (flush_aperture returned nothing)")
@@ -358,8 +363,6 @@ def merge_qk_aperture_ranks(rank_dirs, meta_paths=None, *, check_replicas: bool 
 
 def load_qk_aperture_tp(aperture_dir: str, *, check_replicas: bool = False) -> dict:
     """Load every ``tp_rank_<r>/`` QK dump under ``aperture_dir`` and merge them."""
-    from .tp_shard import TPShardError, discover_rank_dirs
-
     found = discover_rank_dirs(aperture_dir, QK_SIDECAR_NAME)
     if not found:
         raise TPShardError(f"no QK aperture sidecar under {aperture_dir}")
@@ -369,10 +372,6 @@ def load_qk_aperture_tp(aperture_dir: str, *, check_replicas: bool = False) -> d
 def merge_hs_aperture_ranks(rank_dirs, meta_paths=None, *, expected_layers=None,
                             skip_trimmed: bool = False, reclaimed_out: dict | None = None) -> dict:
     """Union per-rank HS aperture dumps of the TP LAYER shard into ONE artifact."""
-    from .tp_shard import (
-        TPShardError, check_hs_shard_set, hs_expected_ranks, hs_requested_layers,
-        hs_shard_from_header, merge_hs_layer_maps)
-
     rank_dirs = [str(d) for d in rank_dirs if d]
     if not rank_dirs:
         raise TPShardError("no HS rank dirs to merge (flush_aperture returned nothing)")
@@ -394,7 +393,6 @@ def merge_hs_aperture_ranks(rank_dirs, meta_paths=None, *, expected_layers=None,
     if any(s is None for s in shards):
         raise TPShardError("some HS dirs carry a layer-shard header and some do not: two "
                            "different captures, or a rank-0-only dir mixed into a sharded run")
-    from .tp_shard import parse_rank_dir
     geom0 = (headers[0].get("dtype"), list(headers[0].get("row_shape") or []))
     for d, h, sh in zip(rank_dirs, headers, shards):
         g = (h.get("dtype"), list(h.get("row_shape") or []))
@@ -417,9 +415,6 @@ def merge_hs_aperture_ranks(rank_dirs, meta_paths=None, *, expected_layers=None,
 
 
 def _hs_replicas_equal(found, headers, *, skip_trimmed: bool = False) -> None:
-    import torch as _torch
-    from .tp_shard import TPShardError
-
     tp = int(headers[0].get("tp_size", 1) or 1)
     ranks = [r for r, _ in found]
     if sorted(ranks) != list(range(tp)):
@@ -447,8 +442,6 @@ def load_hs_aperture_tp(aperture_dir: str, *, check_replicas: bool = False,
                         expected_layers=None, skip_trimmed: bool = False,
                         reclaimed_out: dict | None = None) -> dict:
     """Load one run's HS capture from its aperture dir, a rank dir, or a bare TP=1 dump."""
-    from .tp_shard import TPShardError, discover_rank_dirs, hs_shard_from_header
-
     found = discover_rank_dirs(aperture_dir, HS_SIDECAR_NAME)
     if not found:
         raise TPShardError(f"no HS aperture sidecar under {aperture_dir}")

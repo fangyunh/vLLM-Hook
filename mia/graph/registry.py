@@ -264,6 +264,7 @@ class HostRegistry:
 
     def build_and_upload_gpu(self, step, width, build_routing_fn):
         """GPU-side capture routing: build per-slot layer masks, then GPU-scatter the capture index."""
+        # lazy: Triton kernels stay out of plugin load
         from mia.graph.steer_routing_gpu import scatter_capture_routing
         plans = build_routing_fn(step, self)
         bs = step.num_reqs

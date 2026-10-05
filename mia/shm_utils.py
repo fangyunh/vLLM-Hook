@@ -6,14 +6,15 @@ import os
 import struct
 import time
 import json
-from typing import Dict, List, Optional, Any
+import warnings
+from multiprocessing.shared_memory import SharedMemory
+from typing import Dict, Optional, Any
+
+import torch
 
 
 def setup_shm(config_file: str, worker_name: str = None) -> Optional[Any]:
     """Allocate a SharedMemory block sized for (num_layers, max_batch, hidden_size)."""
-    import warnings
-    from multiprocessing.shared_memory import SharedMemory
-
     if worker_name != "capture_hs":
         warnings.warn(
             f"MIA_USE_SHM=1 is only supported for 'capture_hs', "
@@ -80,9 +81,6 @@ def teardown_shm(shm: Optional[Any]) -> None:
 
 def load_from_shm(hook_dir: str, run_id: Optional[str] = None) -> Dict:
     """Read tensors directly from the shared memory block."""
-    import torch
-    from multiprocessing.shared_memory import SharedMemory
-
     ready_flag = os.environ["MIA_SHM_READY_FLAG"]
     deadline = time.monotonic() + 10.0
     while not os.path.exists(ready_flag):

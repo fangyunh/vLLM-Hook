@@ -7,6 +7,7 @@ import mmap
 import os
 import queue
 import re
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ from .aperture_sink import (
     lock_run_dir, record_step_stats, release_run_lock, releases_run_lock_on_failure,
     resolve_per_request_write_mode, resolve_write_mode, resolve_write_threads, timed_write)
 from .thread_device import bind_thread_to_device
+from .delivery_selector import STAMP_ENV
+from mia.graph.offload_process import OffloadProcess
 
 logger = logging.getLogger(__name__)
 
@@ -385,7 +388,6 @@ class _PerRequestDiskStaging:
                 pass
         self._writers = {}
         self._closed = True
-        import shutil
         shutil.rmtree(self.run_dir, ignore_errors=True)
 
 
@@ -588,7 +590,6 @@ class MultiLayerApertureDrain:
     def _delivery_summary(self) -> str:
         if self._run_flusher is None:
             return ""
-        from .delivery_selector import STAMP_ENV
         stamp = os.environ.get(STAMP_ENV)
         if not stamp:
             return (" | delivery: the gather was armed by hand "
@@ -897,7 +898,6 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
         req_id = str(req_id)
         new_offload = None
         if offload is None and self._offload is None:
-            from mia.graph.offload_process import OffloadProcess
             use_proc = os.environ.get("MIA_OFFLOAD_PROCESS", "0") == "1"
             new_offload = OffloadProcess(use_process=use_proc)
         with self._index_lock:
@@ -906,6 +906,7 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
             elif self._offload is None and new_offload is not None:
                 self._offload = new_offload
                 new_offload = None
+                # lazy: child_process reads env at import; keep it out of plugin load
                 from mia.graph.child_process import register_shutdown
                 register_shutdown(self._offload.close)
             self._disk_routed[req_id] = str(dest)
@@ -932,7 +933,6 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
             src = self._disk_delivered_src.pop(req_id, None)
         if src is None:
             return False
-        import shutil
         shutil.rmtree(src, ignore_errors=True)
         return True
 
@@ -953,7 +953,6 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
                 src = self._disk_reclaim_pending.pop(ext, None)
                 if src is not None:
                     to_rm.append((ext, src))
-        import shutil
         for ext, src in to_rm:
             shutil.rmtree(src, ignore_errors=True)
             if _aperture_debug():
@@ -990,7 +989,6 @@ class OffLoopApertureDrain(MultiLayerApertureDrain):
         deferred = False
         if src is not None:
             if self._offload is None or self._offload.settled(req_id):
-                import shutil
                 shutil.rmtree(src, ignore_errors=True)
                 reclaimed = True
             else:

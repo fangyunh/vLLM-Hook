@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import glob
+import inspect
+import json
 import os
 import time
 from typing import Any, Dict, List, Optional
 
+import torch
+from safetensors import safe_open
+
 from mia._profiler import PROF
+from mia.artifact_quant import dequantize_cache_inplace
+from mia.errors import MiaDeliveryError
 
 
 def qk_score_size_select(prompt_len: int, mode: str, layer_to_heads: dict,
@@ -34,6 +41,7 @@ _DISK_HANDOFF_MS = 20.0
 _DISK_SLOPE_MS_PER_KB = {"qk": 0.0078, "hs": 0.0022}
 
 def _artifact_wait_s() -> float:
+    # lazy: keep mia.graph (reads env at import) out of import mia
     from mia.graph.run_artifact import artifact_wait_s
     return artifact_wait_s()
 
@@ -43,7 +51,6 @@ DEFAULT_GEN_LEN = 256
 
 def estimate_gen_len(max_tokens) -> int:
     """Decode length to price a request at: max_tokens if pinned, else a default estimate."""
-    import os
     try:
         n = int(max_tokens or 0)
     except (TypeError, ValueError):
@@ -83,7 +90,6 @@ def predict_artifact_kb(worker_kind: str, gran: str, prompt_len: int, n_layers: 
 
 def predicted_rpc_ms(worker_kind: str, predicted_kb: float) -> float:
     """Predicted blocking RPC ship time (ms) for an artifact size."""
-    import os
     intercept = float(os.environ.get("MIA_ROUTER_RPC_INTERCEPT_MS", _RPC_INTERCEPT_MS))
     default_slope = _RPC_SLOPE_MS_PER_KB.get(worker_kind, _RPC_SLOPE_MS_PER_KB["hs"])
     slope = float(os.environ.get(
@@ -93,7 +99,6 @@ def predicted_rpc_ms(worker_kind: str, predicted_kb: float) -> float:
 
 def predicted_disk_ms(worker_kind: str, predicted_kb: float) -> float:
     """Predicted on-loop disk cost (ms) for an artifact size."""
-    import os
     handoff = float(os.environ.get("MIA_ROUTER_DISK_HANDOFF_MS", _DISK_HANDOFF_MS))
     default_slope = _DISK_SLOPE_MS_PER_KB.get(worker_kind, _DISK_SLOPE_MS_PER_KB["hs"])
     slope = float(os.environ.get(
@@ -112,7 +117,6 @@ NO_CROSSOVER_KB = float(1 << 30)
 
 def rpc_disk_crossover_kb(worker_kind: str) -> float:
     """Artifact size (KB) where the RPC and disk cost models cross."""
-    import os
     rpc_intercept = float(os.environ.get("MIA_ROUTER_RPC_INTERCEPT_MS", _RPC_INTERCEPT_MS))
     rpc_slope = float(os.environ.get(
         f"MIA_ROUTER_RPC_SLOPE_MS_PER_KB_{worker_kind.upper()}",
@@ -130,7 +134,6 @@ def rpc_disk_crossover_kb(worker_kind: str) -> float:
 
 def unpack_hidden_states(entry: dict) -> "List[Any]":
     """Return hidden states as a list of per-pass tensors."""
-    import torch
     hs = entry["hidden_states"]
     if isinstance(hs, list):
         return hs
@@ -141,8 +144,6 @@ def unpack_hidden_states(entry: dict) -> "List[Any]":
 
 def unpack_qk(entry: dict) -> "tuple[List[Any], List[Any]]":
     """Return Q and K as lists of per-pass tensors."""
-    import torch
-
     def _unpack(t):
         if isinstance(t, list):
             return t
@@ -167,6 +168,7 @@ def _artifact_glob(hook_dir: str, run_id: str, filename: str, timeout: float = 0
                 os.path.exists(p[:-len(".safetensors")] + ".json") for p in ps):
             return False
         if expected_ranks:
+            # lazy: keep mia.graph (reads env at import) out of import mia
             from mia.graph.tp_shard import parse_rank_dir
             ranks = {parse_rank_dir(os.path.dirname(p)) for p in ps}
             return len(ranks - {None}) >= int(expected_ranks)
@@ -183,9 +185,6 @@ def _artifact_glob(hook_dir: str, run_id: str, filename: str, timeout: float = 0
 
 def _load_safetensors_shards(st_paths: List[str], cache_key: str, basename: str,
                               build_entries):
-    import json
-    from safetensors import safe_open
-
     shards = []
     with PROF.timed("io.artifact_load.safetensors"):
         for p in st_paths:
@@ -217,12 +216,14 @@ def _shard_tp_rank(cache: dict, path: str) -> int:
     shard = cache.get("tp_shard") if isinstance(cache, dict) else None
     if isinstance(shard, dict) and "tp_rank" in shard:
         return int(shard["tp_rank"])
+    # lazy: keep mia.graph (reads env at import) out of import mia
     from mia.graph.tp_shard import parse_rank_dir
     r = parse_rank_dir(os.path.dirname(path))
     return 0 if r is None else int(r)
 
 
 def _refuse_partial_qk_shard_set(shards, where: str = "") -> None:
+    # lazy: keep mia.graph (reads env at import) out of import mia
     from mia.graph.tp_shard import (TP_SHARD_KEY, TPShardError, check_complete_shard_set,
                                     qk_shard_from_header)
     geoms = [qk_shard_from_header(sh.get(TP_SHARD_KEY)) if isinstance(sh, dict) else None
@@ -257,8 +258,6 @@ def _replicated_hs_shard(shards):
 
 
 def _merge_shards_by_module(shards, cache_key: str, tensor_keys, where: str = ""):
-    import torch
-
     if cache_key == "qk_cache":
         _refuse_partial_qk_shard_set(shards, where)
     if len(shards) == 1:
@@ -268,6 +267,7 @@ def _merge_shards_by_module(shards, cache_key: str, tensor_keys, where: str = ""
     if cache_key == "hs_cache":
         return _replicated_hs_shard(shards)
     if cache_key == "qk_cache" and any("tp_shard" in sh for _, sh in shards):
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.tp_shard import merge_qk_payloads
         PROF.gauge("io.tp_shard_count", len(shards))
         with PROF.timed("io.tp_shard_merge"):
@@ -339,6 +339,7 @@ def _load_and_merge_hs_safetensors(
 
 
 def _empty_run_note(hook_dir: str, run_id: str) -> str:
+    # lazy: keep mia.graph (reads env at import) out of import mia
     from mia.graph.run_artifact import read_manifest
     try:
         man = read_manifest(hook_dir, str(run_id)) or {}
@@ -353,8 +354,6 @@ def _empty_run_note(hook_dir: str, run_id: str) -> str:
 
 def load_and_merge_hs_cache(hook_dir: str, run_id: str) -> Dict[str, Any]:
     """Load all hidden-state artifacts for run_id and merge across TP ranks."""
-    import torch
-
     safetensors = os.environ.get("MIA_USE_SAFETENSORS", "0") == "1"
     if safetensors:
         st_paths = _artifact_glob(hook_dir, run_id, "hidden_states.safetensors", timeout=_artifact_wait_s())
@@ -380,7 +379,6 @@ def load_and_merge_hs_cache(hook_dir: str, run_id: str) -> Dict[str, Any]:
             shards.append((_shard_tp_rank(cache, p), cache))
     shards.sort(key=lambda x: x[0])
 
-    from mia.artifact_quant import dequantize_cache_inplace
     for _, shard in shards:
         dequantize_cache_inplace(shard.get("hs_cache", {}), ("hidden_states",))
     if len(shards) == 1:
@@ -452,7 +450,6 @@ QK_REFUSED_FILE = "qk_refused.json"
 
 def write_refused_qk(run_dir: str, refused: dict) -> None:
     """Record exactly this flush's refused requests for ``run_dir``."""
-    import json
     path = os.path.join(run_dir, QK_REFUSED_FILE)
     if not refused:
         if os.path.exists(path):
@@ -467,7 +464,6 @@ def write_refused_qk(run_dir: str, refused: dict) -> None:
 
 def read_refused_qk(hook_dir: str, run_id: str) -> dict:
     """``{internal id: reason}`` of every request refused in ``run_id`` (all ranks)."""
-    import json
     out: dict = {}
     for p in glob.glob(os.path.join(hook_dir, str(run_id), "**", QK_REFUSED_FILE),
                        recursive=True):
@@ -478,11 +474,8 @@ def read_refused_qk(hook_dir: str, run_id: str) -> dict:
 
 def load_and_merge_qk_cache(hook_dir: str, run_id: str):
     """Load all QK shards for run_id and merge them into a single cache."""
-    import torch
-
     refused = read_refused_qk(hook_dir, run_id)
     if refused:
-        from mia.errors import MiaDeliveryError
         files = sorted(glob.glob(os.path.join(hook_dir, str(run_id), "**", QK_REFUSED_FILE),
                                  recursive=True))
         raise MiaDeliveryError(
@@ -524,12 +517,11 @@ def load_and_merge_qk_cache(hook_dir: str, run_id: str):
         cache["meta"].setdefault("num_shareds", 1)
         for _entry in cache.get("qk_cache", {}).values():
             _qk_rebuild_kall(_entry)
-        from mia.artifact_quant import dequantize_cache_inplace
         dequantize_cache_inplace(cache.get("qk_cache", {}), ("q", "k_all"))
         return cache
 
     if any("tp_shard" in sh for _, sh in shareds):
-        from mia.artifact_quant import dequantize_cache_inplace
+        # lazy: keep mia.graph (reads env at import) out of import mia
         from mia.graph.tp_shard import merge_qk_payloads
         for _, sh in shareds:
             for _entry in sh.get("qk_cache", {}).values():
@@ -564,7 +556,6 @@ def load_and_merge_qk_cache(hook_dir: str, run_id: str):
                 continue
             _qk_rebuild_kall(qk)
             if qk.get("q_qmeta") is not None:
-                from mia.artifact_quant import dequantize_cache_inplace
                 dequantize_cache_inplace({module_name: qk}, ("q", "k_all"))
             if layer_num is None:
                 layer_num = qk.get("layer_num")
@@ -603,7 +594,6 @@ def load_and_merge_qk_cache(hook_dir: str, run_id: str):
 
 def dispatch_disk_analyze(analyzer, analyzer_spec, run_id=None, run_ids=None):
     """Call ``analyzer.analyze`` with whichever of run_id/run_ids it accepts."""
-    import inspect
     sig = inspect.signature(analyzer.analyze)
     kwargs = {"analyzer_spec": analyzer_spec}
     if "run_ids" in sig.parameters and run_ids is not None:

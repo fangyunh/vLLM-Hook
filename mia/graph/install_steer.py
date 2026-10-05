@@ -7,8 +7,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 import torch
 
-from vllm.forward_context import get_forward_context
-
 from mia._profiler import PROF
 from mia.graph import register_graph_ops
 from mia.graph.hosts import SteerHost
@@ -18,6 +16,8 @@ from mia.graph.install import (
     install_prepare_inputs_routing,
 )
 from mia.graph.registry import PinnedMirror, set_registry
+from mia.graph.steer_routing_gpu import scatter_routing
+from mia.graph.tp_shard import refuse_pipeline_parallel
 from mia.runner import StepView
 from mia.workers._common import iter_matched_modules
 from mia.workers.hs_capture_worker import match_layer
@@ -76,7 +76,6 @@ def install_steer_hosts(worker) -> None:
     global _ACTIVE_WORKER_STEER
 
     _require_buffer_mode_steer()
-    from mia.graph.tp_shard import refuse_pipeline_parallel
     refuse_pipeline_parallel(
         getattr(getattr(worker, "parallel_config", None), "pipeline_parallel_size", 1),
         "steer graph install")
@@ -420,7 +419,6 @@ class SteerRegistry:
 
     def build_and_upload_gpu(self, step: StepView, width, build_routing_fn=None) -> list:
         """GPU per-step routing: host slot refresh on req_ids change, then a GPU scatter into the slabs."""
-        from mia.graph.steer_routing_gpu import scatter_routing
         composition_changed = self.refresh_slot_config(step)
         qsl_np = step.query_start_loc_np
         real_n = int(qsl_np[-1]) if qsl_np.size else 0

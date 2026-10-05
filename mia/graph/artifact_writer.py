@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 
 from mia._profiler import PROF
 from mia.workers._common import save_pt_atomic, save_safetensors_atomic
@@ -24,7 +25,6 @@ def save_qk_cache_safetensors(cpu_cache: dict, run_dir: str,
            for e in cpu_cache["qk_cache"].values()):
         save_pt_atomic(cpu_cache, os.path.join(run_dir, "qk.pt"))
         return
-    from torch.nn.utils.rnn import pad_sequence
 
     at_entries = [e for e in cpu_cache["qk_cache"].values()
                   if e.get("hookq_mode", default_hookq_mode) == "all_tokens"]

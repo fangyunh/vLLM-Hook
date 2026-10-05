@@ -6,13 +6,17 @@ import json
 import logging
 import os
 import re
+import socket
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+from .aperture_trim import MARKER_GLOB
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +35,6 @@ class RunIndexError(RuntimeError):
 
 def new_run_id() -> str:
     """An identity for one launch's index chain: ``<host>-<pid>-<ns>-<rand>``."""
-    import socket
-    import uuid
-
     try:
         host = socket.gethostname().split(".", 1)[0]
     except OSError:
@@ -71,8 +72,6 @@ def segment_name(seq: int) -> str:
 
 def clear_chain(run_dir: str) -> None:
     """Remove a previous launch's index chain and trim markers from ``run_dir``."""
-    from .aperture_trim import MARKER_GLOB
-
     stale = glob.glob(os.path.join(run_dir, "hs_run_index.seg.*.jsonl"))
     stale += glob.glob(os.path.join(run_dir, MARKER_GLOB)) + [os.path.join(run_dir, INDEX_NAME)]
     for p in stale:
