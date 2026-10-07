@@ -17,7 +17,7 @@ pytest.importorskip("vllm")  # `import mia` pulls in vLLM; skip, never error the
 import mia.workers.hs_capture_worker as hs
 import mia.workers.qk_capture_worker as qk
 import mia.workers.steer_worker as steer
-from mia.runner import (
+from mia.core.runner import (
     StepView,
     UnsupportedRunnerError,
     install_request_arg_stash,

@@ -14,15 +14,15 @@ import torch
 
 pytest.importorskip("vllm")  # `import mia` pulls in vLLM; skip, never error the whole collection
 
-from mia.graph.capture_aperture import ApertureBackpressureError
-from mia.graph.install import (
+from mia.core.aperture.capture_aperture import ApertureBackpressureError
+from mia.core.hooks.install import (
     install_execute_model_wrapper,
     install_prepare_inputs_routing,
     prefix_block_ids,
 )
-from mia.graph.install_hs import install_execute_model_wrapper_hs
-from mia.graph.registry import get_registry, set_registry
-from mia.runner import StepView, UnsupportedRunnerError
+from mia.core.hooks.install_hs import install_execute_model_wrapper_hs
+from mia.core.hooks.registry import get_registry, set_registry
+from mia.core.runner import StepView, UnsupportedRunnerError
 
 _STALE = 999999
 

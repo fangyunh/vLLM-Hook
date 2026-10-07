@@ -16,32 +16,32 @@ import torch.nn as nn
 pytest.importorskip("vllm")  # `import mia` pulls in vLLM; skip, never error the whole collection
 
 import mia._plugin as plugin
-import mia.graph.writer_process as wp
+import mia.core.delivery.writer_process as wp
 from mia._plugin import _derive_safe_max_batched_tokens, _model_dims
 from mia.errors import MiaConfigurationError, MiaRefusal, MiaSizingError
-from mia.graph.aperture_metadata import ReqCaptureRecord
-from mia.graph.aperture_reader import read_sidecar_header
-from mia.graph.aperture_sizing import (
+from mia.core.aperture.aperture_metadata import ReqCaptureRecord
+from mia.core.aperture.aperture_reader import read_sidecar_header
+from mia.core.aperture.aperture_sizing import (
     DEFAULT_APERTURE_GPU_BYTES,
     DEFAULT_AUTOCAP_HEADROOM_BYTES,
     DEFAULT_AUTOCAP_SAFETY,
     compute_safe_max_batched_tokens,
     per_layer_token_bytes_qk,
 )
-from mia.graph.install import (
+from mia.core.hooks.install import (
     _resolve_qk_aperture_rows,
     install_execute_model_wrapper,
     install_qk_hosts,
 )
-from mia.graph.install_hs import (
+from mia.core.hooks.install_hs import (
     _resolve_aperture_rows,
     install_execute_model_wrapper_hs,
     install_hs_hosts,
 )
-from mia.graph.install_steer import install_steer_hosts
-from mia.graph.ops import _capture_hs_impl
-from mia.graph.registry import get_registry
-from mia.graph.tp_shard import qk_shard, resolve_tp_coords
+from mia.core.hooks.install_steer import install_steer_hosts
+from mia.core.hooks.ops import _capture_hs_impl
+from mia.core.hooks.registry import get_registry
+from mia.core.runtime.tp_shard import qk_shard, resolve_tp_coords
 from mia.workers.hs_capture_worker import HSCaptureWorker
 
 GIB = 1 << 30
