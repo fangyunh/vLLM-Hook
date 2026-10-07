@@ -12,8 +12,8 @@ import pytest
 
 pytest.importorskip("vllm")  # `import mia` pulls in vLLM; skip, never error the whole collection
 
-import mia._plugin as plugin
-from mia._plugin import (
+import mia.core._plugin as plugin
+from mia.core._plugin import (
     UnsupportedGraphModeError,
     _mia_source_id,
     mia_graph_layout,

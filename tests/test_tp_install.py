@@ -15,9 +15,9 @@ import torch.nn as nn
 
 pytest.importorskip("vllm")  # `import mia` pulls in vLLM; skip, never error the whole collection
 
-import mia._plugin as plugin
+import mia.core._plugin as plugin
 import mia.core.delivery.writer_process as wp
-from mia._plugin import _derive_safe_max_batched_tokens, _model_dims
+from mia.core._plugin import _derive_safe_max_batched_tokens, _model_dims
 from mia.errors import MiaConfigurationError, MiaRefusal, MiaSizingError
 from mia.core.aperture.aperture_metadata import ReqCaptureRecord
 from mia.core.aperture.aperture_reader import read_sidecar_header
