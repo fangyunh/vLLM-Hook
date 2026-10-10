@@ -3,6 +3,8 @@
 
 📄 [Preprint] [**vLLM Hook** v0: A Plug-in for Programming Model Internals on vLLM](https://arxiv.org/abs/2603.06588v1)
 
+📄 [Preprint] [**MIA**: Runtime-Reconfigurable Access to Model Internals in LLM Inference Engines](./docs/MIA_Arxiv_.pdf)
+
 MIA is a plugin library designed to let developers and researchers **inspect**, **analyze**, and **steer** the internal operations of large language models running under the **vLLM** inference engine.  
 
 This includes dynamic analysis of:  
@@ -35,8 +37,7 @@ New here? Start with the [Quickstart](#-quickstart).
   - Easy to add analyzers ([adding a worker or analyzer](#adding-a-worker-or-analyzer))  
 - **Introspection** of model internals  
 - **Interventions** (activation steering)  
-- **CUDA graphs by default** — capture and steering keep the engine's CUDA graphs
-  ([limits](docs/configs.md#limits))  
+- **CUDA graphs by default** — capture and steering keep the engine's CUDA graphs  
 - **Example applications**:  
   - Safety guardrails  
   - Reranking  
@@ -113,7 +114,7 @@ conda activate vllm-hook-mia
 pip install -r requirement.txt    # vLLM 0.29.0, torch 2.13.0 and the other validated versions
 pip uninstall -y torchcodec       # vLLM's audio/video decoder; MIA does not use it
 pip install -e . --no-deps        # the plugin itself, from the repo root
-pip install pytest                # for the checks below
+pip install pytest                # for the check below
 ```
 
 Versions match [`requirement.txt`](requirement.txt). `pip check` flags the removed `torchcodec`; that is expected.
@@ -124,14 +125,12 @@ engine. Keep a dedicated environment; set `VLLM_PLUGINS=''` to run stock vLLM in
 
 ### 3. Check the install
 
-No GPU needed — the hermetic test gate covers engine-config policy, the runner adapter, graph
-routing, TP install and the client wire format:
+Needs a GPU — the use-case tests boot a real engine for each test model
+([`tests/README.md`](tests/README.md)):
 
 ```bash
-pytest tests -q -m "not gpu"
+pytest tests/use_cases -m gpu
 ```
-
-The GPU tests are described in [`tests/README.md`](tests/README.md).
 
 ---
 

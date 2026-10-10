@@ -8,37 +8,18 @@ analyzers work correctly with vLLM models.
 ```
 tests/
 ├── conftest.py     shared fixtures, the `gpu` marker and `requires_gpu`
-├── use_cases/      one test per use case — these boot a real engine
-├── test_plugin_config.py     engine-config policy: V2 runner, cudagraph mode, no PP
-├── test_runner_adapter.py    the V2 model-runner adapter contract
-├── test_graph_routing.py     per-step routing under CUDA graphs
-├── test_tp_install.py        what each rank installs at tensor_parallel_size > 1
-└── test_client_requests.py   the wire format MiaClient puts on the request
+└── use_cases/      one test per use case — these boot a real engine
 ```
 
 `use_cases/` is where a new worker or analyzer belongs — add a test there alongside your
-demo. The five modules beside it are deliberately few: they cover the parts of the 0.29 /
-V2 port that have no use case of their own, and that would fail silently rather than
-loudly if they regressed.
+demo.
 
 ---
 ## Run Tests
 
 Install pytest first (`pip install pytest`), and run from the project root.
 
-### The hermetic gate (no GPU needed)
-
-Tests that boot a real engine carry the `gpu` marker. To run everything else — the gate
-CI and code review use — select on the **marker**:
-
-```bash
-pytest tests -q -m "not gpu"      # 104 passed, 11 deselected
-```
-
-Use `-m`, **never `-k "not gpu"`**: `-k` filters test names, so it lets the engine tests through
-and drops CPU tests whose names merely contain "gpu".
-
-### The GPU tests
+Tests that boot a real engine carry the `gpu` marker:
 
 ```bash
 pytest tests/use_cases -m gpu
@@ -46,8 +27,8 @@ pytest tests/use_cases -m gpu
 
 - They boot one engine at a time (each test shuts its engine down) on small models: opt-125m,
   gpt2, Qwen2-1.5B, Phi-3-mini and Mistral-7B (gated: `hf auth login`), downloaded on first use.
-- `pytest tests -q` runs the gate and these together. On a GPU in exclusive-process mode (common
-  on clusters) no other process may hold the device, or the engine fails with
+- `pytest tests -q` also runs the AttnLink checks, which need no GPU. On a GPU in exclusive-process
+  mode (common on clusters) no other process may hold the device, or the engine fails with
   `CUDA-capable device(s) is/are busy or unavailable`.
 - They use `gpu_memory_utilization` 0.2–0.5 of the card, and write `hs_aperture_dump/` /
   `qk_aperture_dump/` in the working directory.
