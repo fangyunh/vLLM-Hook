@@ -706,10 +706,12 @@ class QKCaptureWorker:
         """collective_rpc-callable: module names, config and whether the per-request drain is on."""
         drain = getattr(self, "_qk_drain", None)
         names = getattr(self, "_qk_module_names", None) or {}
+        gp = getattr(drain, "_gather_proc", None)
         return {"names": [[int(L), str(n)] for L, n in sorted(names.items())],
                 "config": dict(getattr(self, "_conf", {}) or {}),
                 "per_request": bool(drain is not None and getattr(drain, "per_request", False)),
-                "delivery_dir": None}
+                "delivery_dir": os.path.abspath(gp.out_dir) if gp is not None else None,
+                "run_id": gp.run_id if gp is not None else None, "kind": "qk"}
 
     def aperture_residency(self):
         """Read-only (host_live_count, disk_residency) query for the off-loop QK per-request path."""

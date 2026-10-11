@@ -8,6 +8,7 @@ import os
 import time
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
 from vllm.forward_context import get_forward_context
 
@@ -514,6 +515,36 @@ def _capture_idle_key(step: StepView, registry, output_attr: str) -> Optional[tu
     return _IDLE_ROUTE_KEY
 
 
+def _qk_asks_layers(spec, num_layers) -> bool:
+    """Whether an ``output_qk`` spec names at least one installed (0-based) layer."""
+    if isinstance(spec, (dict, list, tuple)):
+        try:
+            return any(0 <= int(L) < int(num_layers) for L in spec)
+        except (TypeError, ValueError):
+            return False
+    return spec is not None and spec is not False
+
+
+def _note_qk_asked(step: StepView, registry) -> None:
+    """Remember per prefilling request whether it asked for Q/K, with its hookq_mode/hooks_on (the finish stamp)."""
+    asked = getattr(registry, "_qk_asked", None)
+    if asked is None:
+        return
+    mode0 = getattr(registry, "_worker_hookq_mode", "all_tokens")
+    hooks0 = getattr(registry, "_default_hooks_on", "prefill")
+    pre = np.flatnonzero(np.asarray(step.is_prefilling_np[:step.num_reqs], dtype=bool))
+    for i in pre.tolist():
+        key = str(step.req_ids[i])
+        if key in asked:
+            continue
+        extra = step.extra_args_for(i)
+        spec = extra.get("output_qk") if extra else None
+        if spec is None:
+            continue
+        asked[key] = {"asked": _qk_asks_layers(spec, registry.num_layers) and extra.get("qk_capture") != "score",
+                      "m": extra.get("hookq_mode", mode0), "h": extra.get("hooks_on", hooks0)}
+
+
 def install_prepare_inputs_routing(model_runner, worker, build_routing_fn,
                                    label: str = "qk", routing_key_fn=None) -> None:
     """Wrap V2's ``prepare_inputs`` so routing lands after input prep and before the forward."""
@@ -624,6 +655,7 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
     model_runner._mia_qk_wrapped = True
 
     def _qk_routing_key(step, registry):
+        _note_qk_asked(step, registry)
         return _capture_idle_key(step, registry, "output_qk")
 
     install_prepare_inputs_routing(model_runner, worker, _build_routing, label="qk",
@@ -671,11 +703,16 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
             registry._qk_consumer = drain
             _pr = " + per-request delivery" if _per_request else ""
             _mode = f"OFF-LOOP consumer thread (drain_aperture={drain._aperture_depth}){_pr}"
+        if registry is not None:
+            registry._qk_asked = {} if getattr(drain, "gather_stamp", False) else None
         worker._qk_drain = drain
         worker._qk_run_dir = run_dir
         print(f"[graph/install] QK aperture write path (tp_rank {int(tp_rank)}): "
               f"{drain.write_path_summary()}", flush=True)
         atexit.register(lambda d=drain: d.close())
+        # lazy: child_process reads env at import; keep it out of plugin load
+        from mia.core.runtime.child_process import register_drain_shutdown
+        register_drain_shutdown(drain.close)         # before the gather's Finalize
         print(f"[graph/install] QK aperture drain ON -> {run_dir} "
               f"(R={aperture.n_slots} rows/layer, {len(layers)} layers, {_mode})", flush=True)
     else:
@@ -734,6 +771,13 @@ def install_execute_model_wrapper(model_runner, worker) -> None:
         _fin_evidence = getattr(scheduler_output, "finished_req_ids", None)
         if _fin_evidence:
             PROF.incr("hook.fire.qk", len(_fin_evidence) * len(layers))
+        # the finish stamp follows this step's rows into the drain, never precedes them
+        if _fin_evidence and drain is not None and getattr(drain, "gather_stamp", False):
+            asked = getattr(registry, "_qk_asked", None) or {}
+            for _rid in _fin_evidence:
+                a = asked.pop(str(_rid), None)
+                drain.note_gather_finish(_rid, asked=bool(a and a["asked"]),
+                                         meta=None if a is None else {"m": a["m"], "h": a["h"]})
 
         registry._pending_plans = []
         registry._qk_step_entries = []

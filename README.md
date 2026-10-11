@@ -82,6 +82,8 @@ Tensor parallelism (TP > 1) is supported for `capture_hs`, `capture_qk` and `ste
 rank writes its own `tp_rank_<r>/` directory and MIA's loaders merge them. Pipeline parallelism is
 not supported, and Q/K `score` capture requires TP = 1.
 
+Q/K capture uses the hybrid delivery by default (TP = 1, graph mode); `MIA_APERTURE_DELIVERY=drain` selects the in-drain writer. See [configs](docs/configs.md#qk-hybrid-delivery-default).
+
 ---
 
 ## 📦 Installation

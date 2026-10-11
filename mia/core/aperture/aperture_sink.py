@@ -407,6 +407,18 @@ class RawFileSink:
 
     def write(self, t: torch.Tensor) -> int:
         """Append ``t``'s bytes; returns the byte count."""
+        n = self.write_at(t, self.offset)
+        self.offset += n
+        return n
+
+    def claim(self, nbytes: int) -> int:
+        """Reserve the next ``nbytes`` and return their offset, for a later ``write_at``."""
+        off = self.offset
+        self.offset = off + int(nbytes)
+        return off
+
+    def write_at(self, t: torch.Tensor, off: int) -> int:
+        """Write ``t``'s bytes at ``off`` without moving ``self.offset``; returns the byte count."""
         fd = self.fd
         if fd is None:
             raise ApertureWriteError(f"write to {self.path} after its sink was closed")
@@ -414,7 +426,6 @@ class RawFileSink:
         n = len(mv)
         if n == 0:
             return 0
-        off = self.offset
         if self.direct:
             bs, ma = self.block_size, self.mem_align
             ptr = t.data_ptr()
@@ -431,7 +442,6 @@ class RawFileSink:
                 raise ApertureWriteError(
                     f"pwrite to {self.path} wrote {w} of {n - done} bytes at offset {off + done}")
             done += w
-        self.offset = off + n
         return n
 
     def close(self) -> None:
@@ -755,6 +765,13 @@ def timed_write(sink: RawFileSink, t: torch.Tensor) -> Tuple[int, float, str]:
     return n, time.perf_counter() - t0, sink.mode
 
 
+def timed_write_at(sink: RawFileSink, t: torch.Tensor, off: int) -> Tuple[int, float, str]:
+    """``timed_write`` at a claimed offset."""
+    t0 = time.perf_counter()
+    n = sink.write_at(t, off)
+    return n, time.perf_counter() - t0, sink.mode
+
+
 def record_step_stats(stats: WriteStats, kind: str, *, rows: int, step_s: float, d2h_s: float,
                       write_s: float, write_tail_s: float, busy_s: float, bookkeeping_s: float,
                       bytes_by_mode: Dict[str, int],
@@ -797,6 +814,6 @@ __all__ = [
     "WriteShape", "predict_rows_per_write",
     "DirectIOInfo", "probe_direct_io", "alloc_host_rows",
     "tensor_bytes_view", "RawFileSink", "PerRequestSinks", "WriterPool", "join_writes",
-    "WriteStats", "ApertureWritePath", "timed_write", "record_step_stats", "join_writes_quietly",
+    "WriteStats", "ApertureWritePath", "timed_write", "timed_write_at", "record_step_stats", "join_writes_quietly",
 ]
 

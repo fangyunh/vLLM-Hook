@@ -7,6 +7,7 @@ import os
 import numpy as np
 import torch
 
+from .aperture_layout import QK_LAYOUT
 from .aperture_metadata import read_qk_sidecar, read_sidecar
 from .aperture_run_index import INDEX_NAME, read_run_index, read_run_segments, run_slices
 from .aperture_trim import is_reclaimed, refuse_trimmed_rows, trimmed_floor_rows
@@ -90,8 +91,12 @@ def _np_dtype_for(dtype_name: str):
         raise ValueError(f"unsupported dtype {dtype_name!r} in aperture header")
 
 
-def load_multilayer_qk_aperture_artifact(run_dir: str, meta_path: str | None = None) -> dict:
-    """Reconstruct per-request, per-layer QK tensors from a QK aperture dump and its sidecar."""
+def load_multilayer_qk_aperture_artifact(run_dir: str, meta_path: str | None = None, *,
+                                         skip_trimmed: bool = False,
+                                         reclaimed_out: dict | None = None) -> dict:
+    """Reconstruct per-request, per-layer QK tensors from a QK aperture dump and its sidecar.
+
+    Requests whose rows were trimmed away are refused, or skipped into ``reclaimed_out`` with ``skip_trimmed``."""
     if meta_path is None:
         meta_path = os.path.join(run_dir, "qk_aperture_meta.jsonl")
     header, entries = read_qk_sidecar(meta_path)
@@ -115,6 +120,7 @@ def load_multilayer_qk_aperture_artifact(run_dir: str, meta_path: str | None = N
     for e in entries:
         grouped.setdefault((e.req_id, e.layer), []).append(e)
 
+    floors = trimmed_floor_rows(run_dir, layout=QK_LAYOUT)
     out: dict = {}
     for (req_id, layer), es in grouped.items():
         es.sort(key=lambda e: e.k_start)
@@ -125,6 +131,12 @@ def load_multilayer_qk_aperture_artifact(run_dir: str, meta_path: str | None = N
                 f"(prefix caching). k_full would be short by the cached prefix; refusing to "
                 f"return a wrong k_all. Capture with prefix caching off (the graph default) or "
                 f"eager.")
+        # the lowest k row is the request's lowest row
+        if floors and es and is_reclaimed(layer, es[0].k_start, floors):
+            if not skip_trimmed:
+                refuse_trimmed_rows(run_dir, layer, es[0].k_start, floors, layout=QK_LAYOUT)
+            _note_reclaimed(reclaimed_out, req_id, layer)
+            continue
 
         kmm = _mm(k_mmaps, f"qk_k_layer_{layer}.raw", layer, k_dtype, k_row_shape)
 

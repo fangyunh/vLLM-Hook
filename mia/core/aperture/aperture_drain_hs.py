@@ -774,7 +774,7 @@ def _close_write_path(drain, kind: str) -> None:
             gp.close()
         ri = getattr(drain, "_run_index", None)
         if ri is not None:
-            ri.write(os.path.join(drain.run_dir, INDEX_NAME), drain.header)
+            ri.write(os.path.join(drain.run_dir, getattr(ri, "index_name", INDEX_NAME)), drain.header)
         drain._closed = True
         release_run_lock(drain)
     finally:
@@ -801,6 +801,7 @@ class _Finish:
     """Per-request finish signal, queued after that request's row entries."""
     req_id: str
     asked: bool = False
+    meta: Optional[dict] = None       # QK only
 
 
 class OffLoopApertureDrain(MultiLayerApertureDrain):

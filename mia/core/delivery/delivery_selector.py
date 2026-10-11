@@ -1,4 +1,4 @@
-"""Which per-request delivery path a run gets; makes the hybrid the default."""
+"""Which per-request delivery path a run gets; makes the hybrid the default for HS and Q/K."""
 from __future__ import annotations
 
 import logging
@@ -26,6 +26,7 @@ WRITE_MODE_ENV = "MIA_APERTURE_WRITE_MODE"
 
 # A literal, not an import: mia.core._plugin is mid-import when apply() runs.
 HS_WORKER = "hidden_states"
+QK_WORKER = "qk"
 
 DEFAULT_FLUSH_MS = 200
 
@@ -110,6 +111,11 @@ _HYBRID_SET = (
     f"{DELIVER_ENV}=1 (the gather child that scatters them), "
     f"{FLUSH_MS_ENV}={DEFAULT_FLUSH_MS} (the publication cadence)"
 )
+_QK_RETRIEVAL = (
+    "Each Q/K request lands as files under the delivery dir (aperture_gather.load_qk_delivery); a save_to_disk "
+    "request's qk.pt is written from them after the response, which carries a marker instead of waiting; a request "
+    "without save_to_disk is answered with response.probes read from them."
+)
 _HYBRID_RETRIEVAL = (
     "Each request's activations land as files under the delivery dir "
     "(aperture_gather.load_delivered); output.probes, MiaClient's response.probes and "
@@ -117,7 +123,22 @@ _HYBRID_RETRIEVAL = (
 )
 
 
-def _hybrid(env: Mapping[str, str], source: str, reason: str, *, asked: bool = False) -> Selection:
+def _refuse_qk_hybrid_impossible(env: Mapping[str, str], tp_size: Optional[int]) -> None:
+    asked = f"{MODE_ENV}=hybrid for Q/K capture"
+    tp = 1 if tp_size is None else int(tp_size)
+    if tp > 1:
+        raise DeliveryConfigError(
+            f"{asked} at tensor_parallel_size={tp}: the Q/K hybrid is TP=1 only (Q/K shards by heads, so a "
+            f"request is complete only with every rank's slice). Use {MODE_ENV}=drain, or TP=1.")
+    if _dp_size(env) > 1:
+        raise DeliveryConfigError(f"{asked} at {DP_SIZE_ENV}={_dp_size(env)}: not collected across DP engines.")
+    if _is_on(env, PROFILE_ENV):
+        raise DeliveryConfigError(f"{asked} with {PROFILE_ENV}=1: profile mode measures capture only and delivers "
+                                  f"nothing; unset one of them.")
+
+
+def _hybrid(env: Mapping[str, str], source: str, reason: str, *, asked: bool = False,
+            kind: str = HS_WORKER) -> Selection:
     _refuse_if_hybrid_impossible(env, source)
     sets = [(GATHER_ENV, "1"), (DELIVER_ENV, "1")]
     cadence = _get(env, FLUSH_MS_ENV)
@@ -128,13 +149,19 @@ def _hybrid(env: Mapping[str, str], source: str, reason: str, *, asked: bool = F
         how = (f"chosen BY DEFAULT: {PER_REQUEST_ENV}=1 asks for per-request delivery, and the "
                f"HYBRID is how MIA delivers it ({MODE_ENV}=drain takes the in-drain per-request "
                f"writer instead)")
+    elif source == "default" and kind == QK_WORKER:
+        how = (f"chosen BY DEFAULT for Q/K capture ({MODE_ENV}=drain takes the in-drain "
+               f"per-request writer, {MODE_ENV}=off the shared files only)")
     elif source == "default":
         how = (f"chosen BY DEFAULT for hidden-states capture ({MODE_ENV}=drain takes the in-drain "
                f"per-request writer, {MODE_ENV}=off the shared files only)")
+    elif kind == QK_WORKER:
+        how = f"chosen explicitly ({MODE_ENV}=hybrid) for Q/K capture"
     else:
         how = f"chosen explicitly ({MODE_ENV}=hybrid)"
     note = (f"per-request delivery -> HYBRID (shared-file drain + streaming gather + trim), {how}. "
-            f"Arming {_HYBRID_SET}; the trim keeps its own default (ON). {_HYBRID_RETRIEVAL}")
+            f"Arming {_HYBRID_SET}; the trim keeps its own default (ON). "
+            f"{_QK_RETRIEVAL if kind == QK_WORKER else _HYBRID_RETRIEVAL}")
     return Selection(mode="hybrid", source=source, reason=reason, note=note,
                      env_set=tuple(sets), env_unset=(PER_REQUEST_ENV,))
 
@@ -178,14 +205,16 @@ def validate(env: Mapping[str, str]) -> None:
 
 
 def resolve(env: Mapping[str, str], *, worker_kind: Optional[str] = None,
-            graph: Optional[bool] = None) -> Selection:
+            graph: Optional[bool] = None, tp_size: Optional[int] = None) -> Selection:
     """Which delivery path this environment means; pure, mutates nothing."""
     stamp = _read_stamp(env)
     if stamp is not None:
         mode, source = stamp
         reason = f"carried in {STAMP_ENV} (resolution stamp)"
         if mode == "hybrid":
-            return _hybrid(env, source, reason)
+            kind = worker_kind if worker_kind is not None else (
+                parse_mia_worker_env(env.get(WORKER_ENV)) or HS_WORKER)
+            return _hybrid(env, source, reason, kind=kind)
         if mode == "drain":
             return _drain(source, reason)
         return _off(reason)
@@ -205,9 +234,12 @@ def resolve(env: Mapping[str, str], *, worker_kind: Optional[str] = None,
             raise DeliveryConfigError(
                 f"{MODE_ENV}=hybrid needs CUDA graph mode and this engine runs eager; unset "
                 f"{MODE_ENV}, or drop enforce_eager=True (vllm serve: --enforce-eager).")
+        if kind == QK_WORKER:
+            _refuse_qk_hybrid_impossible(env, tp_size)
+            return _hybrid(env, "explicit", f"{MODE_ENV}=hybrid", kind=QK_WORKER)
         if kind != HS_WORKER:
             raise DeliveryConfigError(
-                f"{MODE_ENV}=hybrid applies to hidden-states capture only, not the {kind!r} "
+                f"{MODE_ENV}=hybrid applies to hidden-states and Q/K capture, not the {kind!r} "
                 f"worker; unset {MODE_ENV}.")
         return _hybrid(env, "explicit", f"{MODE_ENV}=hybrid")
     if mode_env == "drain":
@@ -216,6 +248,11 @@ def resolve(env: Mapping[str, str], *, worker_kind: Optional[str] = None,
         return _off(f"{MODE_ENV}=off: the shared files only", "explicit")
 
     if deliver_on or gather_on:
+        if kind == QK_WORKER:
+            raise DeliveryConfigError(
+                f"{DELIVER_ENV}/{GATHER_ENV} set by hand on the Q/K worker: the Q/K gather is armed only by "
+                f"{MODE_ENV}=hybrid (which also unsets {PER_REQUEST_ENV} and refuses TP/DP/profile mode); by hand "
+                f"it would stamp a hybrid that delivers nothing. Set {MODE_ENV}=hybrid instead.")
         return Selection(
             mode="hybrid" if deliver_on else "off", source="explicit",
             reason=f"{DELIVER_ENV}/{GATHER_ENV} set by hand",
@@ -225,16 +262,15 @@ def resolve(env: Mapping[str, str], *, worker_kind: Optional[str] = None,
                   f"{GATHER_ENV}=1 with no {DELIVER_ENV}: the run-encoded index is published and "
                   f"nothing is delivered; the selector changed nothing"))
     if not per_request:
-        return _no_ask_default(env, kind, graph)
+        return _no_ask_default(env, kind, graph, tp_size)
     if not graph:
         return _off(f"{PER_REQUEST_ENV}=1 on an eager engine, which is inert -- the capture "
                     f"aperture only exists under graph mode")
 
     if kind != HS_WORKER:
         return _drain("scope",
-                      f"the hybrid gather reads hs_layer_*.raw and is HIDDEN-STATES ONLY; this run "
-                      f"is {WORKER_ENV}={kind}, whose per-request delivery is the drain's",
-                      hybrid_hint=False)
+                      f"{PER_REQUEST_ENV}=1 on the {WORKER_ENV}={kind} worker selects the in-drain writer",
+                      hybrid_hint=kind == QK_WORKER)
     if _is_on(env, PROFILE_ENV):
         return _drain("scope",
                       f"{PROFILE_ENV}=1 measures the capture pipeline only and disables delivery; "
@@ -256,7 +292,8 @@ def _dp_size(env: Mapping[str, str]) -> int:
             f"unset it.") from None
 
 
-def _no_ask_default(env: Mapping[str, str], kind: str, graph: bool) -> Selection:
+def _no_ask_default(env: Mapping[str, str], kind: str, graph: bool,
+                    tp_size: Optional[int] = None) -> Selection:
     if not graph:
         return _off("eager -- no aperture", "scope")
     if kind not in (HS_WORKER, "qk"):
@@ -269,7 +306,16 @@ def _no_ask_default(env: Mapping[str, str], kind: str, graph: bool) -> Selection
         if _dp_size(env) > 1:
             return _off(f"{DP_SIZE_ENV}={_dp_size(env)}: QK per-request delivery cannot be collected "
                         f"across DP engines", "scope")
-        return _drain("default", "QK capture under graph mode", hybrid_hint=False)
+        tp = 1 if tp_size is None else int(tp_size)
+        if tp > 1:
+            return _drain("scope", f"Q/K capture at tensor_parallel_size={tp}: the Q/K hybrid is TP=1 only")
+        mmap = _get(env, MMAP_ENV)
+        if mmap is not None and mmap != "0":
+            return _drain("scope", f"{MMAP_ENV}={mmap} pre-sizes the layer files the Q/K hybrid would read")
+        wm = _get(env, WRITE_MODE_ENV)
+        if wm is not None and wm.lower() == "legacy":
+            return _drain("scope", f"{WRITE_MODE_ENV}=legacy keeps no per-step index for the Q/K hybrid")
+        return _hybrid(env, "default", "Q/K capture under graph mode", kind=QK_WORKER)
     mmap = _get(env, MMAP_ENV)
     if mmap is not None and mmap != "0":
         return _off(f"{MMAP_ENV}={mmap} pre-sizes the layer files the hybrid would read", "scope")
@@ -283,11 +329,12 @@ _ANNOUNCED: set = set()
 
 
 def apply(env: Optional[MutableMapping[str, str]] = None, *, announce: bool = True,
-          worker_kind: Optional[str] = None, graph: Optional[bool] = None) -> Selection:
+          worker_kind: Optional[str] = None, graph: Optional[bool] = None,
+          tp_size: Optional[int] = None) -> Selection:
     """Resolve, write the answer into ``env`` (default ``os.environ``), stamp it, announce once."""
     if env is None:
         env = os.environ
-    sel = resolve(env, worker_kind=worker_kind, graph=graph)
+    sel = resolve(env, worker_kind=worker_kind, graph=graph, tp_size=tp_size)
     if sel.mode != "off":
         for k, v in sel.env_set:
             env[k] = v

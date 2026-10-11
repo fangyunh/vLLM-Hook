@@ -351,6 +351,19 @@ hidden-state files. A served capture sent without `save_to_disk` may land in
 `<hook_dir>/<run_id>/` instead of on the response; `client.analyze()` reads it either way. An
 explicit `save_to_disk` is never overridden.
 
+### Q/K hybrid delivery (default)
+
+| env var | value | effect |
+|---|---|---|
+| `MIA_APERTURE_DELIVERY` | unset or `hybrid` (with `MIA_WORKER=qk`, graph mode) | Q/K rows go to shared per-layer files; a run index is published every 200 ms; gather processes cut each request's rows into its own directory under `<MIA_APERTURE_DIR>/tp_rank_0/delivered/`; the shared files are trimmed behind them |
+
+- With `save_to_disk` the response returns at once with a `mia` marker and `qk.pt` is written afterwards; `client.analyze()` and `load_and_merge_qk_cache` wait for it (up to `MIA_DELIVERY_TIMEOUT_S` without progress) and raise if the request was refused (prefix-cache hit, preempted request, or shutdown before the write).
+- Without `save_to_disk` the response is held and carries `response.probes`.
+- With `MIA_APERTURE_DELIVERY=hybrid`, refused: TP > 1, DP > 1, `MIA_PROFILE_MODE=1`, `MIA_APERTURE_MMAP`, `MIA_APERTURE_WRITE_MODE=legacy`, and `MIA_APERTURE_GATHER(_DELIVER)` set by hand on the Q/K worker.
+- Left unset, TP > 1, `MIA_APERTURE_MMAP` and `MIA_APERTURE_WRITE_MODE=legacy` fall back to the in-drain writer; DP > 1, `MIA_PROFILE_MODE=1` and eager get no per-request delivery.
+- The `qk.pt` writer handles about 1.4-1.8 requests/s at 2 writers on a ~120 MB request; above that the `qk.pt` queue grows (the response is not slowed). A write unfinished at shutdown is recorded as a refusal (`qk_refused.json`).
+- The pipelined Q/K drain holds two pinned host buffers per layer, about twice the in-drain writer's pinned memory.
+
 
 ## Tuning
 
